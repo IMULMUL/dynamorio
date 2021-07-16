@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2013-2017 Google, Inc.   All rights reserved.
+ * Copyright (c) 2013-2021 Google, Inc.   All rights reserved.
  * **********************************************************/
 
 /*
@@ -47,7 +47,7 @@ extern "C" {
 /**
  * \addtogroup drx DynamoRIO eXtension utilities
  */
-/*@{*/ /* begin doxygen group */
+/**@{*/ /* begin doxygen group */
 
 /* i#1531: drx uses drmgr internally, so a client using drx cannot use
  * DR's TLS field routines directly.
@@ -509,7 +509,10 @@ DR_EXPORT
  * equivalent scalar load and stores, mask register bit tests, and mask register bit
  * updates.
  *
- * \warning This function is not fully supported yet. Do not use.
+ * Clients applying this expansion are encouraged to use emulation-aware
+ * instrumentation via drmgr_orig_app_instr_for_fetch() and
+ * drmgr_orig_app_instr_for_operands() in order to observe the original
+ * opcode with the expanded memory operands.
  *
  * \warning The added multi-instruction sequence contains several control-transfer
  * instructions and is not straight-line code, which can complicate subsequent analysis
@@ -534,7 +537,7 @@ DR_EXPORT
 bool
 drx_expand_scatter_gather(void *drcontext, instrlist_t *bb, OUT bool *expanded);
 
-/*@}*/ /* end doxygen group */
+/**@}*/ /* end doxygen group */
 
 #ifdef __cplusplus
 }

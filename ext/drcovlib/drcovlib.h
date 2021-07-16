@@ -49,7 +49,7 @@ extern "C" {
 /**
  * \addtogroup drcovlib Code Coverage Library
  */
-/*@{*/ /* begin doxygen group */
+/**@{*/ /* begin doxygen group */
 
 /** Success code for each drcovlib operation */
 typedef enum {
@@ -256,8 +256,16 @@ typedef struct _drmodtrack_info_t {
     uint index;
     /**
      * The offset of this segment from the beginning of this backing file.
+     * If this field is not present in an older-version offline file, it will be
+     * filled in with -1.  On Windows this field is always 0.
      */
     uint64 offset;
+    /**
+     * The preferred base address of this segment of the module.
+     * If this field is not present in an older-version offline file, it will be
+     * filled in with -1.
+     */
+    app_pc preferred_base;
 } drmodtrack_info_t;
 
 DR_EXPORT
@@ -392,7 +400,7 @@ drmodtrack_add_custom_data(void *(*load_cb)(module_data_t *module, int seg_idx),
                            const char *(*parse_cb)(const char *src, OUT void **data),
                            void (*free_cb)(void *data));
 
-/*@}*/ /* end doxygen group */
+/**@}*/ /* end doxygen group */
 
 #ifdef __cplusplus
 }

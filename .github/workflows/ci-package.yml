@@ -72,8 +72,15 @@ jobs:
     # Install multilib for non-cross-compiling Linux build:
     - name: Create Build Environment
       run: |
-        sudo apt-get -y install doxygen vera++ cmake zlib1g-dev libsnappy-dev \
+        sudo apt update
+        sudo apt-get -y install doxygen vera++ zlib1g-dev libsnappy-dev \
           g++-multilib
+
+    # Use a newer cmake to avoid 32-bit toolchain problems (i#4830).
+    - name: Setup newer cmake
+      uses: jwlawson/actions-setup-cmake@v1.8
+      with:
+        cmake-version: '3.19.7'
 
     - name: Get Version
       id: version
@@ -98,46 +105,19 @@ jobs:
       env:
         CI_TARGET: package
         VERSION_NUMBER: ${{ steps.version.outputs.version_number }}
-        DEPLOY_DOCS: yes
+        # We do not update the web documentation here because a newer
+        # Doxygen is needed but we have not yet tested our tests and
+        # packages built on newer Ubuntu on GA CI.
+        DEPLOY_DOCS: no
         DYNAMORIO_CROSS_AARCHXX_LINUX_ONLY: no
+        CI_TRIGGER: ${{ github.event_name }}
+        CI_BRANCH: ${{ github.ref }}
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v2
       with:
         name: linux-tarball
         path: DynamoRIO-Linux-${{ steps.version.outputs.version_number }}.tar.gz
-
-    # XXX i#4111: Delete this step and the dynamorio_docs repository once
-    # we're happy with the embedded version.
-    - name: Deploy Standalone Docs
-      uses: crazy-max/ghaction-github-pages@v2
-      with:
-        build_dir: html
-        repo: DynamoRIO/dynamorio_docs
-        target_branch: master
-      env:
-        # We need a personal access token for write access to another repo.
-        GH_PAT: ${{ secrets.DOCS_TOKEN }}
-
-    - name: Check Out Web
-      uses: actions/checkout@v2
-      with:
-        repository: DynamoRIO/dynamorio.github.io
-        token: ${{ secrets.DOCS_TOKEN }}
-        path: dynamorio.github.io
-
-    - name: Deploy Embedded Docs
-      run: |
-        rsync -av --delete html_embed/ dynamorio.github.io/docs/
-        cd dynamorio.github.io
-        git config --local user.name "cronbuild"
-        git config --local user.email "dynamorio-devs@googlegroups.com"
-        git add -A
-        git commit -m "Snapshot for cronbuild-${{ steps.version.outputs.version_number }}"
-        git push
-      env:
-        # We need a personal access token for write access to another repo.
-        GITHUB_TOKEN: ${{ secrets.DOCS_TOKEN }}
 
     - name: Send failure mail to dynamorio-devs
       if: failure() && github.ref == 'refs/heads/master'
@@ -181,6 +161,7 @@ jobs:
     # Install cross-compilers for cross-compiling Linux build:
     - name: Create Build Environment
       run: |
+        sudo apt-get update
         sudo apt-get -y install doxygen vera++ cmake zlib1g-dev libsnappy-dev \
           g++-arm-linux-gnueabihf g++-aarch64-linux-gnu
 
@@ -205,6 +186,8 @@ jobs:
         CI_TARGET: package
         VERSION_NUMBER: ${{ steps.version.outputs.version_number }}
         DYNAMORIO_CROSS_AARCHXX_LINUX_ONLY: yes
+        CI_TRIGGER: ${{ github.event_name }}
+        CI_BRANCH: ${{ github.ref }}
 
     - name: Upload AArch64
       uses: actions/upload-artifact@v2
@@ -254,6 +237,7 @@ jobs:
     # Install cross-compilers for cross-compiling Linux build:
     - name: Create Build Environment
       run: |
+        sudo apt-get update
         sudo apt-get -y install doxygen vera++ cmake zlib1g-dev libsnappy-dev \
           g++-arm-linux-gnueabihf g++-aarch64-linux-gnu
 
@@ -278,6 +262,8 @@ jobs:
         CI_TARGET: package
         VERSION_NUMBER: ${{ steps.version.outputs.version_number }}
         DYNAMORIO_CROSS_AARCHXX_LINUX_ONLY: yes
+        CI_TRIGGER: ${{ github.event_name }}
+        CI_BRANCH: ${{ github.ref }}
 
     - name: Upload ARM
       uses: actions/upload-artifact@v2
@@ -327,6 +313,7 @@ jobs:
     # Fetch and install Android NDK for Andoid cross-compile build.
     - name: Create Build Environment
       run: |
+        sudo apt-get update
         sudo apt-get -y install doxygen vera++ cmake zlib1g-dev libsnappy-dev
         cd /tmp
         wget https://dl.google.com/android/repository/android-ndk-r10e-linux-x86_64.zip
@@ -362,6 +349,8 @@ jobs:
         DYNAMORIO_CROSS_AARCHXX_LINUX_ONLY: no
         DYNAMORIO_CROSS_ANDROID_ONLY: yes
         DYNAMORIO_ANDROID_TOOLCHAIN: /tmp/android-gcc-arm-ndk-10e
+        CI_TRIGGER: ${{ github.event_name }}
+        CI_BRANCH: ${{ github.ref }}
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v2
@@ -449,6 +438,8 @@ jobs:
       env:
         CI_TARGET: package
         VERSION_NUMBER: ${{ steps.version.outputs.version_number }}
+        CI_TRIGGER: ${{ github.event_name }}
+        CI_BRANCH: ${{ github.ref }}
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v2

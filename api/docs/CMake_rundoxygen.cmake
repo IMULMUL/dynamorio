@@ -175,6 +175,16 @@ if (embeddable)
     # Remove full paths.
     string(REGEX REPLACE "\ntitle: \"${proj_bindir}" "\ntitle: \"" string "${string}")
     string(REGEX REPLACE "\ntitle: \"${proj_srcdir}" "\ntitle: \"" string "${string}")
+    # Add permalink to front matter so the web site hides the docs/ subdir.
+    get_filename_component(linkname ${html} NAME)
+    string(REGEX REPLACE "(\nlayout: default\n)" "\\1permalink: /${linkname}\n"
+      string "${string}")
+    # Our images are in an images/ subdir.
+    string(REGEX REPLACE "<img src=\"" "<img src=\"/images/" string "${string}")
+    string(REGEX REPLACE
+        "<object type=\"image/svg\\+xml\" data=\""
+        "<object type=\"image/svg+xml\" data=\"/images/"
+        string "${string}")
 
     # Collect type info for keyword searches with direct anchor links (else the
     # search finds the page but the user then has to manually search within the long
@@ -207,8 +217,30 @@ if (embeddable)
       set(keywords "window.data[\"${fname}-${name}\"]={\
 \"name\":\"${fname}-${name}\",\
 \"title\":\"${name} in ${fname} header\",\
-\"url\":\"docs/${url}\",\
+\"url\":\"${url}\",\
 \"content\":\"${name} ${extra}\"};\n")
+      file(APPEND ${CMAKE_CURRENT_BINARY_DIR}/html/keywords.js "${keywords}")
+    endforeach ()
+    # Similarly, put in explicit search entries for sections so searches go
+    # straight to the anchor link.
+    string(REGEX MATCHALL "\n<h1><a class=\"anchor\" id=\"[^\"]*\"></a>\n[^\n]+</h1>"
+      sections "${nosemis}")
+    foreach (section ${sections})
+      string(REGEX REPLACE ".* id=\"([^\"]+)\".*" "\\1" id "${section}")
+      string(REGEX REPLACE ".*</a>\n([^<]+)</h1>" "\\1" name "${section}")
+      if (name STREQUAL "" OR id STREQUAL "" OR name MATCHES "<")
+        message(FATAL_ERROR "Failed to find section name or anchor: ${section}")
+      endif ()
+      set(url "/${fname}.html#${id}")
+      # Quotes cause JavaScript syntax errors.
+      string(REPLACE "\"" "" name "${name}")
+      # Spaces would be ok but it feels nicer w/o them in the key.
+      string(REPLACE " " "_" key "${name}")
+      set(keywords "window.data[\"${fname}-${key}\"]={\
+\"name\":\"${fname}-${key}\",\
+\"title\":\"${name}\",\
+\"url\":\"${url}\",\
+\"content\":\"${name}\"};\n")
       file(APPEND ${CMAKE_CURRENT_BINARY_DIR}/html/keywords.js "${keywords}")
     endforeach ()
 
@@ -217,6 +249,7 @@ if (embeddable)
 
   # We leverage the javascript menu from the non-embedded version.
   file(GLOB all_js ${CMAKE_CURRENT_BINARY_DIR}/../html/*.js)
+  set(found_user_docs OFF)
   foreach (js ${all_js})
     if (js MATCHES "navtree.js" OR
         js MATCHES "resize.js" OR
@@ -224,25 +257,78 @@ if (embeddable)
       continue ()
     endif ()
     file(READ ${js} string)
-    # Remove the index array and subsequent vars from navtreedata.js.
-    string(REGEX REPLACE "var NAVTREEINDEX =.*$" "" string "${string}")
-    # Remove one layer from navtreedata.js.
-    string(REGEX REPLACE "\n *\\[ \"DynamoRIO API\", \"index.html\", \\[" ""
-      string "${string}")
-    # Remove the home page and the end of the extra layer.
-    string(REGEX REPLACE "\n[^\n]*DynamoRIO Home Page[^\n]*\n[^\n]*" ""
-      string "${string}")
-    # Remove name so we can inline.
-    string(REGEX REPLACE "var [^\n]* =\n" "" string "${string}")
     # Ask jekyll to inline, instead of just naming for JS.
-    string(REGEX REPLACE ", \"([^\"]+)\" \\]" ", {% include_relative docs/\\1.js %} ]"
+    string(REGEX REPLACE ", \"([^\"]+)\" \\]" ", {% include_relative \\1.js %} ]"
       string "${string}")
-    # End in a comma for inlining.
-    string(REGEX REPLACE "\\];" "]," string "${string}")
+    if (js MATCHES "navtreedata.js")
+      # Add a jekyll header.
+      set(string "---\npermalink: /navtreedata.js\n---\n${string}")
+      # Remove the index array from navtreedata.js.
+      string(REGEX REPLACE "var NAVTREEINDEX =[^;]*;" "" string "${string}")
+      # Remove one layer from navtreedata.js.
+      string(REGEX REPLACE "\n *\\[ \"DynamoRIO\", \"index.html\", \\[" ""
+        string "${string}")
+      # Remove the home page at the end.
+      string(REGEX REPLACE "\n[^\n]*DynamoRIO Home Page[^\n]*\n" "" string "${string}")
+      # Insert a layer in navtreedata.js, using the end of the top layer we removed.
+      string(REGEX REPLACE "\n( *\\[ \"Deprecated List)"
+        "\n[ \"API Reference\", \"files.html\", [\n\\1"
+        string "${string}")
+      if (NOT string MATCHES "Extension API")
+        message(FATAL_ERROR "Cannot find menu entry for page \"Extension API\"")
+      endif ()
+      string(REGEX MATCH "\n[^\n]+\"Extension API\"[^\n]+\n" ext_entry "${string}")
+      string(REPLACE "${ext_entry}" "\n" string "${string}")
+    else ()
+      # Remove name so we can inline.
+      string(REGEX REPLACE "var [^\n]* =\n" "" string "${string}")
+      # End in a comma for inlining.
+      string(REGEX REPLACE "\\];" "]," string "${string}")
+      # Update directory index names which are hashes that differ between the
+      # treeview and embed generations.
+      string(REGEX MATCHALL "\"[a-zA-Z_0-9]+\", \"dir_[a-f0-9]+\\.html\""
+        dir_hashes "${string}")
+      foreach (dir_hash ${dir_hashes})
+        string(REGEX REPLACE "\"([a-zA-Z_0-9]+)\".*" "\\1" key "${dir_hash}")
+        # We go search the dir_*.html embed files looking for key.
+        file(GLOB dir_html ${CMAKE_CURRENT_BINARY_DIR}/html/dir_*.html)
+        set(found_hash OFF)
+        foreach (html ${dir_html})
+          file(READ ${html} html_string)
+          if (html_string MATCHES "${key} Directory Reference")
+            get_filename_component(fname ${html} NAME)
+            string(REGEX REPLACE "\"${key}\", \"dir_[a-f0-9]+\\.html\""
+              "\"${key}\", \"${fname}\"" string "${string}")
+            set(found_hash ON)
+            break ()
+          endif ()
+        endforeach ()
+        if (NOT found_hash)
+          message(FATAL_ERROR "Cannot find corresonding page for ${key}")
+        endif ()
+      endforeach ()
+    endif ()
+    if (js MATCHES "page_user_docs.js")
+      # CMake 3.6+ guarantees the glob is sorted lexicographically, so we've already
+      # seen navtreedata.js.
+      set(found_user_docs ON)
+      if (ext_entry)
+        if (NOT string MATCHES "Disassembly Library")
+          message(FATAL_ERROR "Cannot find menu entry for page \"Disassembly Library\"")
+        endif ()
+        string(REGEX REPLACE "\n([^\n]+\"Disassembly Library)" "${ext_entry}\\1"
+          string "${string}")
+      else ()
+        message(FATAL_ERROR "Failed to find the menu entries to move")
+      endif ()
+    endif ()
     # Put the modified contents into our dir.
     get_filename_component(fname ${js} NAME)
     file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/html/${fname} "${string}")
   endforeach ()
+  if (NOT found_user_docs)
+    message(FATAL_ERROR "Cannot find \"page_user_docs\" menu file")
+  endif ()
 
 else ()
   # Edit navbar.
