@@ -11,7 +11,7 @@
  ****************************************************************************/
 
 #ifndef _SYSCALL_H_
-#define _SYSCALL_H_ 1
+#define _SYSCALL_H_
 
 /* Do not include this on MacOS as you'll get the wrong numbers! */
 #ifndef LINUX
@@ -24,6 +24,8 @@
 #    include "syscall_linux_arm.h"
 #elif defined(DR_HOST_AARCH64)
 #    include "syscall_linux_uapi.h"
+#elif defined(DR_HOST_RISCV64)
+#    include "syscall_linux_riscv64.h"
 #else
 #    error Unknown platform.
 #endif

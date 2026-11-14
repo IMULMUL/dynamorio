@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2019 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2026 Google, Inc.  All rights reserved.
  * Copyright (c) 2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -125,17 +125,17 @@ DECLARE_NEVERPROT_VAR(static int infolevel, VERBOSE);
 
 /* we store values for each of these vars: */
 static const char *const config_var[] = {
-    DYNAMORIO_VAR_HOME,       DYNAMORIO_VAR_LOGDIR,       DYNAMORIO_VAR_OPTIONS,
-    DYNAMORIO_VAR_AUTOINJECT, DYNAMORIO_VAR_UNSUPPORTED,  DYNAMORIO_VAR_RUNUNDER,
-    DYNAMORIO_VAR_CMDLINE,    DYNAMORIO_VAR_ONCRASH,      DYNAMORIO_VAR_SAFEMARKER,
-    DYNAMORIO_VAR_CACHE_ROOT, DYNAMORIO_VAR_CACHE_SHARED,
+    DYNAMORIO_VAR_HOME,       DYNAMORIO_VAR_LOGDIR,     DYNAMORIO_VAR_OPTIONS,
+    DYNAMORIO_VAR_AUTOINJECT, DYNAMORIO_VAR_ALTINJECT,  DYNAMORIO_VAR_UNSUPPORTED,
+    DYNAMORIO_VAR_RUNUNDER,   DYNAMORIO_VAR_CMDLINE,    DYNAMORIO_VAR_ONCRASH,
+    DYNAMORIO_VAR_SAFEMARKER, DYNAMORIO_VAR_CACHE_ROOT, DYNAMORIO_VAR_CACHE_SHARED,
 };
 #    ifdef WINDOWS
 static const wchar_t *const w_config_var[] = {
-    L_DYNAMORIO_VAR_HOME,       L_DYNAMORIO_VAR_LOGDIR,       L_DYNAMORIO_VAR_OPTIONS,
-    L_DYNAMORIO_VAR_AUTOINJECT, L_DYNAMORIO_VAR_UNSUPPORTED,  L_DYNAMORIO_VAR_RUNUNDER,
-    L_DYNAMORIO_VAR_CMDLINE,    L_DYNAMORIO_VAR_ONCRASH,      L_DYNAMORIO_VAR_SAFEMARKER,
-    L_DYNAMORIO_VAR_CACHE_ROOT, L_DYNAMORIO_VAR_CACHE_SHARED,
+    L_DYNAMORIO_VAR_HOME,       L_DYNAMORIO_VAR_LOGDIR,     L_DYNAMORIO_VAR_OPTIONS,
+    L_DYNAMORIO_VAR_AUTOINJECT, L_DYNAMORIO_VAR_ALTINJECT,  L_DYNAMORIO_VAR_UNSUPPORTED,
+    L_DYNAMORIO_VAR_RUNUNDER,   L_DYNAMORIO_VAR_CMDLINE,    L_DYNAMORIO_VAR_ONCRASH,
+    L_DYNAMORIO_VAR_SAFEMARKER, L_DYNAMORIO_VAR_CACHE_ROOT, L_DYNAMORIO_VAR_CACHE_SHARED,
 };
 #    endif
 #    define NUM_CONFIG_VAR (sizeof(config_var) / sizeof(config_var[0]))
@@ -388,6 +388,42 @@ read_config_file(file_t f, config_info_t *cfg, bool app_specific, bool overwrite
     }
 }
 
+/* Store the initial config file paths that have been used, for
+ * troubleshooting purposes. config_read() below can try
+ * up to five different paths.
+ */
+#    define MAX_CONFIG_PATHS_TRIED 5
+#    define MAX_CONFIG_PATHS (MAXIMUM_PATH * MAX_CONFIG_PATHS_TRIED)
+static char config_paths[MAX_CONFIG_PATHS];
+const char *
+get_config_paths(void)
+{
+    if (config_initialized)
+        return config_paths;
+    else
+        return NULL;
+}
+
+static file_t
+log_path_and_open(const char *fname, int os_open_flags)
+{
+    static size_t config_paths_offset = 0;
+
+    INFO(2, "trying config file %s", fname);
+
+    /* Store the config path that is being read, but only if config
+     * is being initialized, as otherwise access to the global config_paths
+     * buffer may not be thread safe.
+     */
+    if (!config_initialized) {
+        config_paths_offset += snprintf(
+            config_paths + config_paths_offset,
+            BUFFER_SIZE_ELEMENTS(config_paths) - config_paths_offset, "%s, ", fname);
+    }
+
+    return os_open(fname, OS_OPEN_READ);
+}
+
 static void
 config_read(config_info_t *cfg, const char *appname_in, process_id_t pid, const char *sfx)
 {
@@ -427,8 +463,7 @@ config_read(config_info_t *cfg, const char *appname_in, process_id_t pid, const 
                      "%s/%s/%s.%d.1%s", local, LOCAL_CONFIG_SUBDIR, appname, pid_to_check,
                      sfx);
             NULL_TERMINATE_BUFFER(cfg->fname_app);
-            INFO(2, "trying config file %s", cfg->fname_app);
-            f_app = os_open(cfg->fname_app, OS_OPEN_READ);
+            f_app = log_path_and_open(cfg->fname_app, OS_OPEN_READ);
             if (f_app != INVALID_FILE)
                 cfg->has_1config = true; /* one-time file */
         }
@@ -437,16 +472,14 @@ config_read(config_info_t *cfg, const char *appname_in, process_id_t pid, const 
             snprintf(cfg->fname_app, BUFFER_SIZE_ELEMENTS(cfg->fname_app), "%s/%s/%s.%s",
                      local, LOCAL_CONFIG_SUBDIR, appname, sfx);
             NULL_TERMINATE_BUFFER(cfg->fname_app);
-            INFO(2, "trying config file %s", cfg->fname_app);
-            f_app = os_open(cfg->fname_app, OS_OPEN_READ);
+            f_app = log_path_and_open(cfg->fname_app, OS_OPEN_READ);
         }
         /* 3) <local>/default.0config */
         if (f_default == INVALID_FILE) {
             snprintf(cfg->fname_default, BUFFER_SIZE_ELEMENTS(cfg->fname_default),
                      "%s/%s/default.0%s", local, LOCAL_CONFIG_SUBDIR, sfx);
             NULL_TERMINATE_BUFFER(cfg->fname_default);
-            INFO(2, "trying config file %s", cfg->fname_default);
-            f_default = os_open(cfg->fname_default, OS_OPEN_READ);
+            f_default = log_path_and_open(cfg->fname_default, OS_OPEN_READ);
         }
     }
 #    ifdef WINDOWS
@@ -465,16 +498,14 @@ config_read(config_info_t *cfg, const char *appname_in, process_id_t pid, const 
             snprintf(cfg->fname_app, BUFFER_SIZE_ELEMENTS(cfg->fname_app), "%s%s/%s.%s",
                      global, GLOBAL_CONFIG_SUBDIR, appname, sfx);
             NULL_TERMINATE_BUFFER(cfg->fname_app);
-            INFO(2, "trying config file %s", cfg->fname_app);
-            f_app = os_open(cfg->fname_app, OS_OPEN_READ);
+            f_app = log_path_and_open(cfg->fname_app, OS_OPEN_READ);
         }
         /* 5) <global>/default.0config */
         if (f_default == INVALID_FILE) {
             snprintf(cfg->fname_default, BUFFER_SIZE_ELEMENTS(cfg->fname_default),
                      "%s%s/default.0%s", global, GLOBAL_CONFIG_SUBDIR, sfx);
             NULL_TERMINATE_BUFFER(cfg->fname_default);
-            INFO(2, "trying config file %s", cfg->fname_default);
-            f_default = os_open(cfg->fname_default, OS_OPEN_READ);
+            f_default = log_path_and_open(cfg->fname_default, OS_OPEN_READ);
         }
     }
     if (f_app != INVALID_FILE) {
@@ -626,6 +657,12 @@ d_r_config_init(void)
     config_initialized = true;
 }
 
+bool
+d_r_config_initialized(void)
+{
+    return config_initialized;
+}
+
 #    ifndef NOT_DYNAMORIO_CORE_PROPER
 /* To support re-reading config, we need to heap allocate a config_vals_t array,
  * which we can leave unprotected.
@@ -730,7 +767,7 @@ get_unqualified_parameter(const char *name, char *value, int maxlen)
  */
 bool
 should_inject_from_rununder(const char *runstr, bool app_specific, bool from_env,
-                            bool *rununder_on OUT)
+                            bool *rununder_on DR_PARAM_OUT)
 {
     int rununder;
     *rununder_on = false;
@@ -741,9 +778,9 @@ should_inject_from_rununder(const char *runstr, bool app_specific, bool from_env
         return false;
     /* env var counts as app-specific */
     if (!app_specific && !from_env) {
-        if (TEST(RUNUNDER_ALL, rununder))
+        if (TESTANY(RUNUNDER_ALL, rununder))
             *rununder_on = true;
-    } else if (TEST(RUNUNDER_ON, rununder))
+    } else if (TESTANY(RUNUNDER_ON, rununder))
         *rununder_on = true;
     /* Linux ignores RUNUNDER_EXPLICIT, RUNUNDER_COMMANDLINE_*, RUNUNDER_ONCE */
     return true;

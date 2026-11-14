@@ -1,4 +1,5 @@
 /* **********************************************************
+ * Copyright (c) 2021-2026 Google, Inc.  All rights reserved.
  * Copyright (c) 2016 ARM Limited. All rights reserved.
  * **********************************************************/
 
@@ -36,8 +37,6 @@
 #include "decode.h"
 #include "disassemble.h"
 
-#if defined(INTERNAL) || defined(DEBUG) || defined(CLIENT_INTERFACE)
-
 static const char *const pred_names[] = {
     "",   /* DR_PRED_NONE */
     "eq", /* DR_PRED_EQ */
@@ -56,27 +55,31 @@ static const char *const pred_names[] = {
     "le", /* DR_PRED_LE */
     "al", /* DR_PRED_AL */
     "nv", /* DR_PRED_NV */
+    "",   /* DR_PRED_MASKED */
 };
 
 int
-print_bytes_to_buffer(char *buf, size_t bufsz, size_t *sofar INOUT, byte *pc,
-                      byte *next_pc, instr_t *instr)
+d_r_print_encoding_first_line_to_buffer(char *buf, size_t bufsz,
+                                        size_t *sofar DR_PARAM_INOUT, byte *pc,
+                                        byte *next_pc, instr_t *instr)
 {
     print_to_buffer(buf, bufsz, sofar, " %08x   ", *(uint *)pc);
     return 0;
 }
 
 void
-print_extra_bytes_to_buffer(char *buf, size_t bufsz, size_t *sofar INOUT, byte *pc,
-                            byte *next_pc, int extra_sz, const char *extra_bytes_prefix)
+d_r_print_encoding_second_line_to_buffer(char *buf, size_t bufsz,
+                                         size_t *sofar DR_PARAM_INOUT, byte *pc,
+                                         byte *next_pc, int extra_sz,
+                                         const char *extra_bytes_prefix)
 {
-    ASSERT_NOT_IMPLEMENTED(false); /* FIXME i#1569 */
+    ASSERT_NOT_IMPLEMENTED(false); /* TODO i#1569 */
 }
 
 static const char *
 shift_name(dr_shift_type_t shift)
 {
-    static const char *const names[] = { "lsl", "lsr", "asr", "ror" };
+    static const char *const names[] = { "lsl", "lsr", "asr", "ror", "mul" };
     int i = shift;
     return (0 <= i && i < sizeof(names) / sizeof(*names) ? names[i] : "<UNKNOWN SHIFT>");
 }
@@ -92,33 +95,36 @@ extend_name(dr_extend_type_t extend)
 }
 
 void
-opnd_base_disp_scale_disassemble(char *buf, size_t bufsz, size_t *sofar INOUT,
+opnd_base_disp_scale_disassemble(char *buf, size_t bufsz, size_t *sofar DR_PARAM_INOUT,
                                  opnd_t opnd)
 {
     bool scaled;
     uint amount;
     dr_extend_type_t extend = opnd_get_index_extend(opnd, &scaled, &amount);
     const char *name = extend_name(extend);
-    if (scaled)
+    if (scaled) {
+        if (extend == DR_EXTEND_UXTX)
+            name = shift_name(DR_SHIFT_LSL);
+
         print_to_buffer(buf, bufsz, sofar, ",%s #%d", name, amount);
-    else if (extend != DR_EXTEND_UXTX)
+    } else if (extend != DR_EXTEND_UXTX)
         print_to_buffer(buf, bufsz, sofar, ",%s", name);
 }
 
 bool
-opnd_disassemble_arch(char *buf, size_t bufsz, size_t *sofar INOUT, opnd_t opnd)
+opnd_disassemble_arch(char *buf, size_t bufsz, size_t *sofar DR_PARAM_INOUT, opnd_t opnd)
 {
-    if (opnd_is_immed_int(opnd) && TEST(DR_OPND_IS_SHIFT, opnd_get_flags(opnd))) {
+    if (opnd_is_immed_int(opnd) && TESTANY(DR_OPND_IS_SHIFT, opnd_get_flags(opnd))) {
         dr_shift_type_t t = (dr_shift_type_t)opnd_get_immed_int(opnd);
         print_to_buffer(buf, bufsz, sofar, "%s", shift_name(t));
         return true;
     }
-    if (opnd_is_immed_int(opnd) && TEST(DR_OPND_IS_EXTEND, opnd_get_flags(opnd))) {
+    if (opnd_is_immed_int(opnd) && TESTANY(DR_OPND_IS_EXTEND, opnd_get_flags(opnd))) {
         dr_extend_type_t t = (dr_extend_type_t)opnd_get_immed_int(opnd);
         print_to_buffer(buf, bufsz, sofar, "%s", extend_name(t));
         return true;
     }
-    if (opnd_is_immed_int(opnd) && TEST(DR_OPND_IS_CONDITION, opnd_get_flags(opnd))) {
+    if (opnd_is_immed_int(opnd) && TESTANY(DR_OPND_IS_CONDITION, opnd_get_flags(opnd))) {
         dr_pred_type_t pred = DR_PRED_EQ + opnd_get_immed_int(opnd);
         print_to_buffer(buf, bufsz, sofar, "%s", pred_names[pred]);
         return true;
@@ -127,30 +133,34 @@ opnd_disassemble_arch(char *buf, size_t bufsz, size_t *sofar INOUT, opnd_t opnd)
 }
 
 bool
-opnd_disassemble_noimplicit(char *buf, size_t bufsz, size_t *sofar INOUT,
+opnd_disassemble_noimplicit(char *buf, size_t bufsz, size_t *sofar DR_PARAM_INOUT,
                             dcontext_t *dcontext, instr_t *instr, byte optype,
                             opnd_t opnd, bool prev, bool multiple_encodings, bool dst,
-                            int *idx INOUT)
+                            int *idx DR_PARAM_OUT)
 {
-    ASSERT_NOT_IMPLEMENTED(false); /* FIXME i#1569 */
+    ASSERT_NOT_IMPLEMENTED(false); /* TODO i#1569 */
     return false;
 }
 
 void
 print_instr_prefixes(dcontext_t *dcontext, instr_t *instr, char *buf, size_t bufsz,
-                     size_t *sofar INOUT)
+                     size_t *sofar DR_PARAM_OUT)
 {
 }
 
 void
 print_opcode_name(instr_t *instr, const char *name, char *buf, size_t bufsz,
-                  size_t *sofar INOUT)
+                  size_t *sofar DR_PARAM_OUT)
 {
-    if (instr_get_opcode(instr) == OP_bcond) {
-        print_to_buffer(buf, bufsz, sofar, "b.%s",
-                        pred_names[instr_get_predicate(instr)]);
+    if (instr_get_predicate(instr) != DR_PRED_NONE &&
+        instr_get_predicate(instr) != DR_PRED_MASKED) {
+        if (instr_get_opcode(instr) == OP_bcond) {
+            print_to_buffer(buf, bufsz, sofar, "b.%s",
+                            pred_names[instr_get_predicate(instr)]);
+        } else {
+            print_to_buffer(buf, bufsz, sofar, "%s.%s", name,
+                            pred_names[instr_get_predicate(instr)]);
+        }
     } else
         print_to_buffer(buf, bufsz, sofar, "%s", name);
 }
-
-#endif /* INTERNAL || DEBUG || CLIENT_INTERFACE */

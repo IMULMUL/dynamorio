@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2021 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2026 Google, Inc.  All rights reserved.
  * Copyright (c) 2000-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -52,13 +52,16 @@
 #define INSTR_INLINE extern inline
 
 #include "../globals.h"
+#include "isa_regdeps/encoding_common.h"
 #include "instr.h"
 #include "arch.h"
 #include "../link.h"
 #include "decode.h"
 #include "decode_fast.h"
-#include "instr_create.h"
-/* FIXME i#1551: refactor this file and avoid this x86-specific include in base arch/ */
+#include "opcode_api.h"
+#include "opnd.h"
+#include "instr_create_shared.h"
+/* XXX i#1551: refactor this file and avoid this x86-specific include in base arch/ */
 #include "x86/decode_private.h"
 
 #ifdef DEBUG
@@ -82,24 +85,29 @@
 
 /* returns an empty instr_t object */
 instr_t *
-instr_create(dcontext_t *dcontext)
+instr_create(void *drcontext)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     instr_t *instr = (instr_t *)heap_alloc(dcontext, sizeof(instr_t) HEAPACCT(ACCT_IR));
     /* everything initializes to 0, even flags, to indicate
      * an uninitialized instruction */
     memset((void *)instr, 0, sizeof(instr_t));
 #if defined(X86) && defined(X64)
+    IF_DEBUG(bool is_instr_isa_mode_set =)
     instr_set_isa_mode(instr, X64_CACHE_MODE_DC(dcontext) ? DR_ISA_AMD64 : DR_ISA_IA32);
-#elif defined(ARM)
+#else
+    IF_DEBUG(bool is_instr_isa_mode_set =)
     instr_set_isa_mode(instr, dr_get_isa_mode(dcontext));
 #endif
+    CLIENT_ASSERT(is_instr_isa_mode_set, "setting instruction ISA mode unsuccessful");
     return instr;
 }
 
 /* deletes the instr_t object with handle "instr" and frees its storage */
 void
-instr_destroy(dcontext_t *dcontext, instr_t *instr)
+instr_destroy(void *drcontext, instr_t *instr)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
 #ifdef ARM
     /* i#4680: Reset encode state to avoid dangling pointers.  This doesn't cover
      * auto-scope instr_t vars so the whole IT tracking is still fragile.
@@ -115,12 +123,13 @@ instr_destroy(dcontext_t *dcontext, instr_t *instr)
 
 /* returns a clone of orig, but with next and prev fields set to NULL */
 instr_t *
-instr_clone(dcontext_t *dcontext, instr_t *orig)
+instr_clone(void *drcontext, instr_t *orig)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     /* We could heap-allocate an instr_noalloc_t but it's intended for use in a
      * signal handler or other places where we don't want any heap allocation.
      */
-    CLIENT_ASSERT(!TEST(INSTR_IS_NOALLOC_STRUCT, orig->flags),
+    CLIENT_ASSERT(!TESTANY(INSTR_IS_NOALLOC_STRUCT, orig->flags),
                   "Cloning an instr_noalloc_t is not supported.");
 
     instr_t *instr = (instr_t *)heap_alloc(dcontext, sizeof(instr_t) HEAPACCT(ACCT_IR));
@@ -139,11 +148,11 @@ instr_clone(dcontext_t *dcontext, instr_t *orig)
         instr->bytes =
             (byte *)heap_reachable_alloc(dcontext, instr->length HEAPACCT(ACCT_IR));
         memcpy((void *)instr->bytes, (void *)orig->bytes, instr->length);
-    } else if (instr_is_label(orig)) {
+    } else if (instr_is_label(orig) && instr_get_label_callback(instr) != NULL) {
         /* We don't know what this callback does, we can't copy this. The caller that
          * makes the clone needs to take care of this, xref i#3926.
          */
-        instr_set_label_callback(instr, NULL);
+        instr_clear_label_callback(instr);
     }
     if (orig->num_dsts > 0) { /* checking num_dsts, not dsts, b/c of label data */
         instr->dsts = (opnd_t *)heap_alloc(
@@ -158,6 +167,7 @@ instr_clone(dcontext_t *dcontext, instr_t *orig)
     }
     /* copy note (we make no guarantee, and have no way, to do a deep clone) */
     instr->note = orig->note;
+    instr->offset = orig->offset;
     if (instr_is_label(orig))
         memcpy(&instr->label_data, &orig->label_data, sizeof(instr->label_data));
     return instr;
@@ -165,18 +175,32 @@ instr_clone(dcontext_t *dcontext, instr_t *orig)
 
 /* zeroes out the fields of instr */
 void
-instr_init(dcontext_t *dcontext, instr_t *instr)
+instr_init(void *drcontext, instr_t *instr)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     /* everything initializes to 0, even flags, to indicate
      * an uninitialized instruction */
     memset((void *)instr, 0, sizeof(instr_t));
     instr_set_isa_mode(instr, dr_get_isa_mode(dcontext));
+#ifndef NOT_DYNAMORIO_CORE_PROPER
+    /* Just like in global_heap_alloc() we pay the cost of this check to support
+     * drdecode use even with full DR linked in (i#2499).  Decoding of simple
+     * single-source-no-dest instrs never hits the heap code so we check here too.
+     */
+    if (dcontext == GLOBAL_DCONTEXT && !dynamo_heap_initialized) {
+        /* TODO i#2499: We have no control point currently to call standalone_exit().
+         * We need to develop a solution with atexit() or ELF destructors or sthg.
+         */
+        standalone_init();
+    }
+#endif
 }
 
 /* zeroes out the fields of instr */
 void
-instr_noalloc_init(dcontext_t *dcontext, instr_noalloc_t *instr)
+instr_noalloc_init(void *drcontext, instr_noalloc_t *instr)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     memset(instr, 0, sizeof(*instr));
     instr->instr.flags |= INSTR_IS_NOALLOC_STRUCT;
     instr_set_isa_mode(&instr->instr, dr_get_isa_mode(dcontext));
@@ -184,13 +208,14 @@ instr_noalloc_init(dcontext_t *dcontext, instr_noalloc_t *instr)
 
 /* Frees all dynamically allocated storage that was allocated by instr */
 void
-instr_free(dcontext_t *dcontext, instr_t *instr)
+instr_free(void *drcontext, instr_t *instr)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     if (instr_is_label(instr) && instr_get_label_callback(instr) != NULL)
         (*instr->label_cb)(dcontext, instr);
-    if (TEST(INSTR_IS_NOALLOC_STRUCT, instr->flags))
+    if (TESTANY(INSTR_IS_NOALLOC_STRUCT, instr->flags))
         return;
-    if (TEST(INSTR_RAW_BITS_ALLOCATED, instr->flags)) {
+    if (TESTANY(INSTR_RAW_BITS_ALLOCATED, instr->flags)) {
         instr_free_raw_bits(dcontext, instr);
     }
     if (instr->num_dsts > 0) { /* checking num_dsts, not dsts, b/c of label data */
@@ -211,7 +236,7 @@ instr_free(dcontext_t *dcontext, instr_t *instr)
 int
 instr_mem_usage(instr_t *instr)
 {
-    if (TEST(INSTR_IS_NOALLOC_STRUCT, instr->flags))
+    if (TESTANY(INSTR_IS_NOALLOC_STRUCT, instr->flags))
         return sizeof(instr_noalloc_t);
     int usage = 0;
     if ((instr->flags & INSTR_RAW_BITS_ALLOCATED) != 0) {
@@ -233,10 +258,11 @@ instr_mem_usage(instr_t *instr)
  * This instr must have been initialized before!
  */
 void
-instr_reset(dcontext_t *dcontext, instr_t *instr)
+instr_reset(void *drcontext, instr_t *instr)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     instr_free(dcontext, instr);
-    if (TEST(INSTR_IS_NOALLOC_STRUCT, instr->flags)) {
+    if (TESTANY(INSTR_IS_NOALLOC_STRUCT, instr->flags)) {
         instr_init(dcontext, instr);
         instr->flags |= INSTR_IS_NOALLOC_STRUCT;
     } else {
@@ -253,8 +279,9 @@ instr_reset(dcontext_t *dcontext, instr_t *instr)
  * This instr must have been initialized before!
  */
 void
-instr_reuse(dcontext_t *dcontext, instr_t *instr)
+instr_reuse(void *drcontext, instr_t *instr)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     byte *bits = NULL;
     uint len = 0;
     bool alloc = false;
@@ -300,8 +327,9 @@ instr_reuse(dcontext_t *dcontext, instr_t *instr)
 }
 
 instr_t *
-instr_build(dcontext_t *dcontext, int opcode, int instr_num_dsts, int instr_num_srcs)
+instr_build(void *drcontext, int opcode, int instr_num_dsts, int instr_num_srcs)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     instr_t *instr = instr_create(dcontext);
     instr_set_opcode(instr, opcode);
     instr_set_num_opnds(dcontext, instr, instr_num_dsts, instr_num_srcs);
@@ -309,8 +337,9 @@ instr_build(dcontext_t *dcontext, int opcode, int instr_num_dsts, int instr_num_
 }
 
 instr_t *
-instr_build_bits(dcontext_t *dcontext, int opcode, uint num_bytes)
+instr_build_bits(void *drcontext, int opcode, uint num_bytes)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     instr_t *instr = instr_create(dcontext);
     instr_set_opcode(instr, opcode);
     instr_allocate_raw_bits(dcontext, instr, num_bytes);
@@ -327,7 +356,7 @@ private_instr_encode(dcontext_t *dcontext, instr_t *instr, bool always_cache)
 {
     byte *buf;
     byte stack_buf[MAX_INSTR_LENGTH];
-    if (TEST(INSTR_IS_NOALLOC_STRUCT, instr->flags)) {
+    if (TESTANY(INSTR_IS_NOALLOC_STRUCT, instr->flags)) {
         /* We have no choice: we live with no persistent caching if the stack is
          * too far away, because the instr's raw bits will be on the stack.
          * (We can't use encode_buf here bc the re-rel below does not support
@@ -354,12 +383,18 @@ private_instr_encode(dcontext_t *dcontext, instr_t *instr, bool always_cache)
     if (nxt == NULL) {
         nxt = instr_encode_ignore_reachability(dcontext, instr, buf);
         if (nxt == NULL) {
+#ifdef AARCH64
+            /* We do not use instr_info_t encoding info on AArch64. XXX i#1569 */
+            SYSLOG_INTERNAL_WARNING("cannot encode %s",
+                                    get_opcode_name(instr_get_opcode(instr)));
+#else
             SYSLOG_INTERNAL_WARNING("cannot encode %s",
                                     opcode_to_encoding_info(instr->opcode,
                                                             instr_get_isa_mode(instr)
                                                                 _IF_ARM(false))
                                         ->name);
-            if (!TEST(INSTR_IS_NOALLOC_STRUCT, instr->flags))
+#endif
+            if (!TESTANY(INSTR_IS_NOALLOC_STRUCT, instr->flags))
                 heap_reachable_free(dcontext, buf, MAX_INSTR_LENGTH HEAPACCT(ACCT_IR));
             return 0;
         }
@@ -389,7 +424,7 @@ private_instr_encode(dcontext_t *dcontext, instr_t *instr, bool always_cache)
          * we rely on the INSTR_RIP_REL_VALID flag being invalidated whenever
          * the raw bits are.
          */
-        bool rip_rel_valid = TEST(INSTR_RIP_REL_VALID, instr->flags);
+        bool rip_rel_valid = TESTANY(INSTR_RIP_REL_VALID, instr->flags);
 #endif
         byte *tmp;
         CLIENT_ASSERT(!instr_raw_bits_valid(instr),
@@ -408,9 +443,15 @@ private_instr_encode(dcontext_t *dcontext, instr_t *instr, bool always_cache)
         instr->bytes = tmp;
         instr_set_operands_valid(instr, valid);
     }
-    if (!TEST(INSTR_IS_NOALLOC_STRUCT, instr->flags))
+    if (!TESTANY(INSTR_IS_NOALLOC_STRUCT, instr->flags))
         heap_reachable_free(dcontext, buf, MAX_INSTR_LENGTH HEAPACCT(ACCT_IR));
     return len;
+}
+
+dr_isa_mode_t
+instr_get_isa_mode(instr_t *instr)
+{
+    return (dr_isa_mode_t)instr->isa_mode;
 }
 
 #define inlined_instr_get_opcode(instr)                                           \
@@ -426,6 +467,40 @@ instr_get_opcode(instr_t *instr)
 /* in rest of file, directly de-reference for performance (PR 622253) */
 #define instr_get_opcode inlined_instr_get_opcode
 
+/* XXX i#6238: This API is not yet supported for synthetic instructions */
+#define inlined_instr_get_category(instr)                                         \
+    (IF_DEBUG_(CLIENT_ASSERT(sizeof(*instr) == sizeof(instr_t), "invalid type"))( \
+        ((instr)->category == DR_INSTR_CATEGORY_UNCATEGORIZED ||                  \
+         !instr_operands_valid(instr))                                            \
+            ? (instr_decode_with_current_dcontext(instr), (instr)->category)      \
+            : (instr)->category))
+uint
+instr_get_category(instr_t *instr)
+{
+    return inlined_instr_get_category(instr);
+}
+/* in rest of file, directly de-reference for performance (PR 622253) */
+#define instr_get_category inlined_instr_get_category
+
+const char *
+instr_get_category_name(dr_instr_category_t category)
+{
+    switch (category) {
+    case DR_INSTR_CATEGORY_UNCATEGORIZED: return "uncategorized";
+    case DR_INSTR_CATEGORY_FP: return "fp";
+    case DR_INSTR_CATEGORY_LOAD: return "load";
+    case DR_INSTR_CATEGORY_STORE: return "store";
+    case DR_INSTR_CATEGORY_BRANCH: return "branch";
+    case DR_INSTR_CATEGORY_SIMD: return "simd";
+    case DR_INSTR_CATEGORY_STATE: return "state";
+    case DR_INSTR_CATEGORY_MOVE: return "move";
+    case DR_INSTR_CATEGORY_CONVERT: return "convert";
+    case DR_INSTR_CATEGORY_MATH: return "math";
+    case DR_INSTR_CATEGORY_OTHER: return "other";
+    default: return "";
+    }
+}
+
 static inline void
 instr_being_modified(instr_t *instr, bool raw_bits_valid)
 {
@@ -435,6 +510,12 @@ instr_being_modified(instr_t *instr, bool raw_bits_valid)
     }
     /* PR 214962: if client changes our mangling, un-mark to avoid bad translation */
     instr_set_our_mangling(instr, false);
+}
+
+void
+instr_set_category(instr_t *instr, uint category)
+{
+    instr->category = category;
 }
 
 void
@@ -470,6 +551,13 @@ app_pc
 instr_get_app_pc(instr_t *instr)
 {
     return instr_get_translation(instr);
+}
+
+DR_API
+size_t
+instr_get_offset(instr_t *instr)
+{
+    return instr->offset;
 }
 
 /* Returns true iff instr's opcode is valid.  If the opcode is not
@@ -539,16 +627,17 @@ instr_get_dst(instr_t *instr, uint pos)
  * assumes that instr is currently all zeroed out!
  */
 void
-instr_set_num_opnds(dcontext_t *dcontext, instr_t *instr, int instr_num_dsts,
+instr_set_num_opnds(void *drcontext, instr_t *instr, int instr_num_dsts,
                     int instr_num_srcs)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     if (instr_num_dsts > 0) {
         CLIENT_ASSERT(instr->num_dsts == 0 && instr->dsts == NULL,
                       "instr_set_num_opnds: dsts are already set");
         CLIENT_ASSERT_TRUNCATE(instr->num_dsts, byte, instr_num_dsts,
                                "instr_set_num_opnds: too many dsts");
         instr->num_dsts = (byte)instr_num_dsts;
-        if (TEST(INSTR_IS_NOALLOC_STRUCT, instr->flags)) {
+        if (TESTANY(INSTR_IS_NOALLOC_STRUCT, instr->flags)) {
             instr_noalloc_t *noalloc = (instr_noalloc_t *)instr;
             noalloc->instr.dsts = noalloc->dsts;
         } else {
@@ -561,7 +650,7 @@ instr_set_num_opnds(dcontext_t *dcontext, instr_t *instr, int instr_num_dsts,
         if (instr_num_srcs > 1) {
             CLIENT_ASSERT(instr->num_srcs <= 1 && instr->srcs == NULL,
                           "instr_set_num_opnds: srcs are already set");
-            if (TEST(INSTR_IS_NOALLOC_STRUCT, instr->flags)) {
+            if (TESTANY(INSTR_IS_NOALLOC_STRUCT, instr->flags)) {
                 instr_noalloc_t *noalloc = (instr_noalloc_t *)instr;
                 noalloc->instr.srcs = noalloc->srcs;
             } else {
@@ -608,10 +697,11 @@ instr_set_dst(instr_t *instr, uint pos, opnd_t opnd)
 
 /* end is open-ended (so pass pos,pos+1 to remove just the pos-th src) */
 void
-instr_remove_srcs(dcontext_t *dcontext, instr_t *instr, uint start, uint end)
+instr_remove_srcs(void *drcontext, instr_t *instr, uint start, uint end)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     opnd_t *new_srcs;
-    CLIENT_ASSERT(!TEST(INSTR_IS_NOALLOC_STRUCT, instr->flags),
+    CLIENT_ASSERT(!TESTANY(INSTR_IS_NOALLOC_STRUCT, instr->flags),
                   /* We could implement, but it does not seem an important use case. */
                   "instr_remove_srcs not supported for instr_noalloc_t");
     CLIENT_ASSERT(start >= 0 && end <= instr->num_srcs && start < end,
@@ -640,10 +730,11 @@ instr_remove_srcs(dcontext_t *dcontext, instr_t *instr, uint start, uint end)
 
 /* end is open-ended (so pass pos,pos+1 to remove just the pos-th dst) */
 void
-instr_remove_dsts(dcontext_t *dcontext, instr_t *instr, uint start, uint end)
+instr_remove_dsts(void *drcontext, instr_t *instr, uint start, uint end)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     opnd_t *new_dsts;
-    CLIENT_ASSERT(!TEST(INSTR_IS_NOALLOC_STRUCT, instr->flags),
+    CLIENT_ASSERT(!TESTANY(INSTR_IS_NOALLOC_STRUCT, instr->flags),
                   /* We could implement, but it does not seem an important use case. */
                   "instr_remove_srcs not supported for instr_noalloc_t");
     CLIENT_ASSERT(start >= 0 && end <= instr->num_dsts && start < end,
@@ -691,6 +782,100 @@ instr_set_target(instr_t *instr, opnd_t target)
     instr_set_operands_valid(instr, true);
 }
 
+bool
+instr_is_opnd_store_source(instr_t *store_instr, int source_ordinal)
+{
+    /* We generally do not model data movement in our IR, especially for complex
+     * SIMD swaps and shuffles: we just have flat lists of sources and dests.
+     * Taint trackers or other dataflow tools are expected to dispatch on opcode
+     * for cases where some sources map to a subset of the dests.  However,
+     * identifying which sources flow into the (typically unique) memory
+     * destination is a key piece of information we do try to provide.  We do
+     * not yet go as far as labeling this in the IR decoding codec/table info
+     * sources and thus rely on operand ordering conventions.  If these heuristics
+     * prove too fragile we can move toward more direct support, but by
+     * providing an official helper function here now we at least get all users
+     * using the same code we can update later.
+     */
+    if (store_instr == NULL || source_ordinal < 0 ||
+        source_ordinal >= instr_num_srcs(store_instr))
+        return false;
+    /* First, find the (first) store. */
+    opnd_t memop = opnd_create_null();
+    for (int i = 0; i < instr_num_dsts(store_instr); i++) {
+        memop = instr_get_dst(store_instr, i);
+        if (opnd_is_memory_reference(memop))
+            break;
+    }
+    if (opnd_is_null(memop))
+        return false;
+#ifdef X86
+    /* First, handle exceptional cases. */
+    if (instr_get_opcode(store_instr) == OP_cmpxchg8b) {
+        /* Our table has xcx:xbx in later slots. */
+        return source_ordinal == 3 || source_ordinal == 4;
+    }
+#endif
+    /* A convention in our IR is to always list the primary data source as
+     * the first source operand.
+     */
+    if (source_ordinal == 0)
+        return true;
+#ifdef X86
+    /* XXX: Are there other atomics on x86 or other arches we need to list here too? */
+    if (instr_get_opcode(store_instr) == OP_cmpxchg)
+        return false;
+#endif
+    /* CISC ALU ops have the target listed as a (non-first) source memop. */
+    if (opnd_same(memop, instr_get_src(store_instr, source_ordinal)))
+        return true;
+    /* Now we need to distinuish additional register data sources from an
+     * address register update.  There can be many additional data sources
+     * (x86 OP_pusha, aarch32 register lists).  But an address register update
+     * will always be listed as both a source and a dest, at the end, even if this
+     * duplicates a data source.  E.g.:
+     *
+     *   e92dffff   stmdb  %r0 %r1 %r2 %r3 %r4 %r5 %r6 %r7 %r8 %r9 %r10 %r11 %r12 %sp %lr
+     * %pc %sp -> -0x40(%sp)[64byte] %sp
+     *
+     * There can be an immediate before (aarch32) or after (aarch64) the source for
+     * cases where the adjustment is not fixed: e.g., AArch64 INSTR_CREATE_str_imm().
+     *
+     * Our OP_pusha entry violates the address register convention below by listing
+     * xsp first but not duplicating it at the end: but that means we need take no
+     * further action here as all sources are data sources.
+     */
+    if (instr_num_srcs(store_instr) > 1 && instr_num_dsts(store_instr) > 1) {
+        /* Is the last dest an address register? */
+        opnd_t last_dst = instr_get_dst(store_instr, instr_num_dsts(store_instr) - 1);
+        if (opnd_is_reg(last_dst) &&
+            /* See whether the memory operation uses the last dest reg. */
+            opnd_uses_reg(memop, opnd_get_reg(last_dst))) {
+            /* Is there an identical source operand register, at the end or prior to
+             * an immed that is at the end?
+             */
+            opnd_t last_src = instr_get_src(store_instr, instr_num_srcs(store_instr) - 1);
+            /* Move prior to an immed if there are enough srcs for reg, reg, imm. */
+            bool has_immed = false;
+            if (opnd_is_immed_int(last_src) && instr_num_srcs(store_instr) > 2) {
+                has_immed = true;
+                last_src = instr_get_src(store_instr, instr_num_srcs(store_instr) - 2);
+            } else if (instr_num_srcs(store_instr) > 2 &&
+                       opnd_is_immed_int(
+                           instr_get_src(store_instr, instr_num_srcs(store_instr) - 2))) {
+                has_immed = true;
+            }
+            if (opnd_same(last_dst, last_src)) {
+                /* Fits pattern of address register. */
+                if (source_ordinal == instr_num_srcs(store_instr) - 1 ||
+                    (has_immed && source_ordinal == instr_num_srcs(store_instr) - 2))
+                    return false;
+            }
+        }
+    }
+    return true;
+}
+
 instr_t *
 instr_set_prefix_flag(instr_t *instr, uint prefix)
 {
@@ -721,9 +906,7 @@ instr_get_prefixes(instr_t *instr)
 bool
 instr_is_predicated(instr_t *instr)
 {
-    /* XXX i#1556: we should also mark conditional branches and string loops
-     * as predicated!
-     */
+    /* XXX i#1556: we should also mark jecxz and string loops as predicated! */
     dr_pred_type_t pred = instr_get_predicate(instr);
     return instr_predicate_is_cond(pred);
 }
@@ -738,14 +921,15 @@ instr_get_predicate(instr_t *instr)
 instr_t *
 instr_set_predicate(instr_t *instr, dr_pred_type_t pred)
 {
-    instr->prefixes |= ((pred << PREFIX_PRED_BITPOS) & PREFIX_PRED_MASK);
+    instr->prefixes = ((instr->prefixes & ~PREFIX_PRED_MASK) |
+                       ((pred << PREFIX_PRED_BITPOS) & PREFIX_PRED_MASK));
     return instr;
 }
 
 bool
 instr_branch_is_padded(instr_t *instr)
 {
-    return TEST(INSTR_BRANCH_PADDED, instr->flags);
+    return TESTANY(INSTR_BRANCH_PADDED, instr->flags);
 }
 
 void
@@ -761,7 +945,7 @@ instr_branch_set_padded(instr_t *instr, bool val)
 bool
 instr_branch_special_exit(instr_t *instr)
 {
-    return TEST(INSTR_BRANCH_SPECIAL_EXIT, instr->flags);
+    return TESTANY(INSTR_BRANCH_SPECIAL_EXIT, instr->flags);
 }
 
 /* If val is true, indicates that instr is a special exit cti.
@@ -854,12 +1038,12 @@ uint
 instr_eflags_conditionally(uint full_eflags, dr_pred_type_t pred,
                            dr_opnd_query_flags_t flags)
 {
-    if (!TEST(DR_QUERY_INCLUDE_COND_SRCS, flags) && instr_predicate_is_cond(pred) &&
+    if (!TESTANY(DR_QUERY_INCLUDE_COND_SRCS, flags) && instr_predicate_is_cond(pred) &&
         !instr_predicate_reads_srcs(pred)) {
         /* i#1836: the predicate itself reads some flags */
         full_eflags &= ~EFLAGS_READ_NON_PRED;
     }
-    if (!TEST(DR_QUERY_INCLUDE_COND_DSTS, flags) && instr_predicate_is_cond(pred) &&
+    if (!TESTANY(DR_QUERY_INCLUDE_COND_DSTS, flags) && instr_predicate_is_cond(pred) &&
         !instr_predicate_writes_eflags(pred))
         full_eflags &= ~EFLAGS_WRITE_ALL;
     return full_eflags;
@@ -878,8 +1062,7 @@ instr_get_eflags(instr_t *instr, dr_opnd_query_flags_t flags)
             encoded = true;
             len = private_instr_encode(dcontext, instr, true /*cache*/);
             if (len == 0) {
-                if (!instr_is_label(instr))
-                    CLIENT_ASSERT(false, "instr_get_eflags: invalid instr");
+                CLIENT_ASSERT(instr_is_label(instr), "instr_get_eflags: invalid instr");
                 return 0;
             }
         }
@@ -894,7 +1077,7 @@ instr_get_eflags(instr_t *instr, dr_opnd_query_flags_t flags)
             instr_free_raw_bits(dcontext, instr);
             CLIENT_ASSERT(!instr_raw_bits_valid(instr), "internal encoding buf error");
         }
-        /* even if decode fails, set valid to true -- ok?  FIXME */
+        /* even if decode fails, set valid to true -- ok?  XXX */
         instr_set_eflags_valid(instr, true);
     }
     return instr_eflags_conditionally(instr->eflags, instr_get_predicate(instr), flags);
@@ -1029,11 +1212,12 @@ instr_set_raw_bits_valid(instr_t *instr, bool valid)
 }
 
 void
-instr_free_raw_bits(dcontext_t *dcontext, instr_t *instr)
+instr_free_raw_bits(void *drcontext, instr_t *instr)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     if ((instr->flags & INSTR_RAW_BITS_ALLOCATED) == 0)
         return;
-    if (!TEST(INSTR_IS_NOALLOC_STRUCT, instr->flags))
+    if (!TESTANY(INSTR_IS_NOALLOC_STRUCT, instr->flags))
         heap_reachable_free(dcontext, instr->bytes, instr->length HEAPACCT(ACCT_IR));
     instr->bytes = NULL;
     instr->flags &= ~INSTR_RAW_BITS_VALID;
@@ -1045,14 +1229,15 @@ instr_free_raw_bits(dcontext_t *dcontext, instr_t *instr)
  * initializes array to the original bits!
  */
 void
-instr_allocate_raw_bits(dcontext_t *dcontext, instr_t *instr, uint num_bytes)
+instr_allocate_raw_bits(void *drcontext, instr_t *instr, uint num_bytes)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     byte *original_bits = NULL;
-    if (TEST(INSTR_RAW_BITS_VALID, instr->flags))
+    if (TESTANY(INSTR_RAW_BITS_VALID, instr->flags))
         original_bits = instr->bytes;
-    if (!TEST(INSTR_RAW_BITS_ALLOCATED, instr->flags) || instr->length != num_bytes) {
+    if (!TESTANY(INSTR_RAW_BITS_ALLOCATED, instr->flags) || instr->length != num_bytes) {
         byte *new_bits;
-        if (TEST(INSTR_IS_NOALLOC_STRUCT, instr->flags)) {
+        if (TESTANY(INSTR_IS_NOALLOC_STRUCT, instr->flags)) {
             /* This may not be reachable, so re-relativization is limited. */
             instr_noalloc_t *noalloc = (instr_noalloc_t *)instr;
             CLIENT_ASSERT(num_bytes <= sizeof(noalloc->encode_buf),
@@ -1091,9 +1276,20 @@ instr_set_label_callback(instr_t *instr, instr_label_callback_t cb)
     CLIENT_ASSERT(instr_is_label(instr),
                   "only set callback functions for label instructions");
     CLIENT_ASSERT(instr->label_cb == NULL, "label callback function is already set");
-    CLIENT_ASSERT(!TEST(INSTR_RAW_BITS_ALLOCATED, instr->flags),
+    CLIENT_ASSERT(!TESTANY(INSTR_RAW_BITS_ALLOCATED, instr->flags),
                   "instruction's raw bits occupying label callback memory");
     instr->label_cb = cb;
+}
+
+void
+instr_clear_label_callback(instr_t *instr)
+{
+    CLIENT_ASSERT(instr_is_label(instr),
+                  "only set callback functions for label instructions");
+    CLIENT_ASSERT(instr->label_cb != NULL, "label callback function not set");
+    CLIENT_ASSERT(!TESTANY(INSTR_RAW_BITS_ALLOCATED, instr->flags),
+                  "instruction's raw bits occupying label callback memory");
+    instr->label_cb = NULL;
 }
 
 instr_label_callback_t
@@ -1101,7 +1297,7 @@ instr_get_label_callback(instr_t *instr)
 {
     CLIENT_ASSERT(instr_is_label(instr),
                   "only label instructions have a callback function");
-    CLIENT_ASSERT(!TEST(INSTR_RAW_BITS_ALLOCATED, instr->flags),
+    CLIENT_ASSERT(!TESTANY(INSTR_RAW_BITS_ALLOCATED, instr->flags),
                   "instruction's raw bits occupying label callback memory");
     return instr->label_cb;
 }
@@ -1130,8 +1326,9 @@ instr_get_translation(instr_t *instr)
  * gave you the instr)
  */
 void
-instr_make_persistent(dcontext_t *dcontext, instr_t *instr)
+instr_make_persistent(void *drcontext, instr_t *instr)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     if ((instr->flags & INSTR_RAW_BITS_VALID) != 0 &&
         (instr->flags & INSTR_RAW_BITS_ALLOCATED) == 0) {
         instr_allocate_raw_bits(dcontext, instr, instr->length);
@@ -1215,8 +1412,9 @@ instr_set_raw_word(instr_t *instr, uint pos, uint word)
 }
 
 int
-instr_length(dcontext_t *dcontext, instr_t *instr)
+instr_length(void *drcontext, instr_t *instr)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     int res;
 
 #ifdef ARM
@@ -1248,7 +1446,7 @@ instr_set_encoding_hint(instr_t *instr, dr_encoding_hint_type_t hint)
 bool
 instr_has_encoding_hint(instr_t *instr, dr_encoding_hint_type_t hint)
 {
-    return TEST(hint, instr->encoding_hints);
+    return TESTANY(hint, instr->encoding_hints);
 }
 
 /***********************************************************************/
@@ -1277,7 +1475,7 @@ instr_expand(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr)
 
     /* make it easy for iterators: handle NULL
      * assume that if opcode is valid, is at Level 2, so not a bundle
-     * do not expand meta-instrs -- FIXME: is that the right thing to do?
+     * do not expand meta-instrs -- XXX: is that the right thing to do?
      */
     if (instr == NULL || instr_opcode_valid(instr) || instr_is_meta(instr) ||
         /* if an invalid instr (not just undecoded) do not try to expand */
@@ -1289,7 +1487,7 @@ instr_expand(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr)
          * for the logger */
         instr_t *log_instr = instr_clone(dcontext, instr);
         d_r_loginst(dcontext, 4, log_instr, "instr_expand");
-        instr_free(dcontext, log_instr);
+        instr_destroy(dcontext, log_instr);
     });
 
     /* decode routines use dcontext mode, but we want instr mode */
@@ -1379,7 +1577,7 @@ instr_is_level_0(instr_t *instr)
     dcontext_t *dcontext = get_thread_private_dcontext();
     dr_isa_mode_t old_mode;
     /* assume that if opcode is valid, is at Level 2, so not a bundle
-     * do not expand meta-instrs -- FIXME: is that the right to do? */
+     * do not expand meta-instrs -- XXX: is that the right to do? */
     if (instr == NULL || instr_opcode_valid(instr) || instr_is_meta(instr) ||
         /* if an invalid instr (not just undecoded) do not try to expand */
         !instr_valid(instr))
@@ -1463,7 +1661,7 @@ instr_decode_cti(dcontext_t *dcontext, instr_t *instr)
      */
     if (!instr_opcode_valid(instr) ||
         (instr_is_cti(instr) && !instr_operands_valid(instr))) {
-        byte *next_pc;
+        DEBUG_EXT_DECLARE(byte * next_pc;)
         DEBUG_EXT_DECLARE(int old_len = instr->length;)
         /* decode_cti() will use the dcontext mode, but we want the instr mode */
         dr_isa_mode_t old_mode;
@@ -1471,7 +1669,7 @@ instr_decode_cti(dcontext_t *dcontext, instr_t *instr)
         CLIENT_ASSERT(instr_raw_bits_valid(instr),
                       "instr_decode_cti: raw bits are invalid");
         instr_reuse(dcontext, instr);
-        next_pc = decode_cti(dcontext, instr->bytes, instr);
+        DEBUG_EXT_DECLARE(next_pc =) decode_cti(dcontext, instr->bytes, instr);
         dr_set_isa_mode(dcontext, old_mode, NULL);
         /* ok to be invalid, let caller deal with it */
         CLIENT_ASSERT(next_pc == NULL || (next_pc - instr->bytes == old_len),
@@ -1490,7 +1688,7 @@ void
 instr_decode_opcode(dcontext_t *dcontext, instr_t *instr)
 {
     if (!instr_opcode_valid(instr)) {
-        byte *next_pc;
+        DEBUG_EXT_DECLARE(byte * next_pc;)
         DEBUG_EXT_DECLARE(int old_len = instr->length;)
 #ifdef X86
         bool rip_rel_valid = instr_rip_rel_valid(instr);
@@ -1501,7 +1699,7 @@ instr_decode_opcode(dcontext_t *dcontext, instr_t *instr)
         CLIENT_ASSERT(instr_raw_bits_valid(instr),
                       "instr_decode_opcode: raw bits are invalid");
         instr_reuse(dcontext, instr);
-        next_pc = decode_opcode(dcontext, instr->bytes, instr);
+        DEBUG_EXT_DECLARE(next_pc =) decode_opcode(dcontext, instr->bytes, instr);
         dr_set_isa_mode(dcontext, old_mode, NULL);
 #ifdef X86
         /* decode_opcode sets raw bits which invalidates rip_rel, but
@@ -1523,7 +1721,7 @@ void
 instr_decode(dcontext_t *dcontext, instr_t *instr)
 {
     if (!instr_operands_valid(instr)) {
-        byte *next_pc;
+        DEBUG_EXT_DECLARE(byte * next_pc;)
         DEBUG_EXT_DECLARE(int old_len = instr->length;)
 #ifdef X86
         bool rip_rel_valid = instr_rip_rel_valid(instr);
@@ -1533,7 +1731,7 @@ instr_decode(dcontext_t *dcontext, instr_t *instr)
         dr_set_isa_mode(dcontext, instr_get_isa_mode(instr), &old_mode);
         CLIENT_ASSERT(instr_raw_bits_valid(instr), "instr_decode: raw bits are invalid");
         instr_reuse(dcontext, instr);
-        next_pc = decode(dcontext, instr_get_raw_bits(instr), instr);
+        DEBUG_EXT_DECLARE(next_pc =) decode(dcontext, instr_get_raw_bits(instr), instr);
 #ifndef NOT_DYNAMORIO_CORE_PROPER
         if (expand_should_set_translation(dcontext))
             instr_set_translation(instr, instr_get_raw_bits(instr));
@@ -1609,7 +1807,7 @@ instrlist_decode_cti(dcontext_t *dcontext, instrlist_t *ilist)
     for (instr = instrlist_first(ilist); instr != NULL; instr = instr_get_next(instr)) {
         /* N.B.: if we change exit cti's to have instr_t targets, we have to
          * change other modules like emit to handle that!
-         * FIXME
+         * XXX
          */
         if (!instr_is_exit_cti(instr) &&
             instr_opcode_valid(instr) && /* decode_cti only filled in cti opcodes */
@@ -1700,6 +1898,10 @@ instr_shrink_to_16_bits(instr_t *instr)
     const instr_info_t *info;
     byte optype;
     CLIENT_ASSERT(instr_operands_valid(instr), "instr_shrink_to_16_bits: invalid opnds");
+    /* Our use of get_encoding_info() with no final PC specified works
+     * as there are no encoding template choices involving reachability
+     * which affect whether an operand has an indirect register.
+     */
     info = get_encoding_info(instr);
     for (i = 0; i < instr_num_dsts(instr); i++) {
         opnd = instr_get_dst(instr, i);
@@ -1754,6 +1956,35 @@ instr_uses_reg(instr_t *instr, reg_id_t reg)
 bool
 instr_reg_in_dst(instr_t *instr, reg_id_t reg)
 {
+#ifdef AARCH64
+    /* FFR does not appear in any operand, it is implicit upon the instruction type or
+     * accessed via SVE predicate registers.
+     */
+    if (reg == DR_REG_FFR) {
+        switch (instr_get_opcode(instr)) {
+        case OP_setffr:
+        case OP_rdffr:
+
+        case OP_ldff1b:
+        case OP_ldff1d:
+        case OP_ldff1h:
+        case OP_ldff1sb:
+        case OP_ldff1sh:
+        case OP_ldff1sw:
+        case OP_ldff1w:
+
+        case OP_ldnf1b:
+        case OP_ldnf1d:
+        case OP_ldnf1h:
+        case OP_ldnf1sb:
+        case OP_ldnf1sh:
+        case OP_ldnf1sw:
+        case OP_ldnf1w: return true;
+        default: break;
+        }
+    }
+#endif
+
     int i;
     for (i = 0; i < instr_num_dsts(instr); i++) {
         if (opnd_uses_reg(instr_get_dst(instr, i), reg))
@@ -1771,6 +2002,19 @@ instr_reg_in_src(instr_t *instr, reg_id_t reg)
     if (instr_get_opcode(instr) == OP_nop_modrm)
         return false;
 #endif
+
+#ifdef AARCH64
+    /* FFR does not appear in any operand, it is implicit upon the instruction type or
+     * accessed via SVE predicate registers.
+     */
+    if (reg == DR_REG_FFR) {
+        switch (instr_get_opcode(instr)) {
+        case OP_wrffr:
+        case OP_rdffrs: return true;
+        default: break;
+        }
+    }
+#endif
     for (i = 0; i < instr_num_srcs(instr); i++) {
         if (opnd_uses_reg(instr_get_src(instr, i), reg))
             return true;
@@ -1785,7 +2029,7 @@ instr_reads_from_reg(instr_t *instr, reg_id_t reg, dr_opnd_query_flags_t flags)
     int i;
     opnd_t opnd;
 
-    if (!TEST(DR_QUERY_INCLUDE_COND_SRCS, flags) && instr_is_predicated(instr) &&
+    if (!TESTANY(DR_QUERY_INCLUDE_COND_SRCS, flags) && instr_is_predicated(instr) &&
         !instr_predicate_reads_srcs(instr_get_predicate(instr)))
         return false;
 
@@ -1811,7 +2055,7 @@ instr_reads_from_exact_reg(instr_t *instr, reg_id_t reg, dr_opnd_query_flags_t f
     int i;
     opnd_t opnd;
 
-    if (!TEST(DR_QUERY_INCLUDE_COND_SRCS, flags) && instr_is_predicated(instr) &&
+    if (!TESTANY(DR_QUERY_INCLUDE_COND_SRCS, flags) && instr_is_predicated(instr) &&
         !instr_predicate_reads_srcs(instr_get_predicate(instr)))
         return false;
 
@@ -1850,7 +2094,7 @@ instr_writes_to_reg(instr_t *instr, reg_id_t reg, dr_opnd_query_flags_t flags)
     int i;
     opnd_t opnd;
 
-    if (!TEST(DR_QUERY_INCLUDE_COND_DSTS, flags) && instr_is_predicated(instr))
+    if (!TESTANY(DR_QUERY_INCLUDE_COND_DSTS, flags) && instr_is_predicated(instr))
         return false;
 
     for (i = 0; i < instr_num_dsts(instr); i++) {
@@ -1868,7 +2112,7 @@ instr_writes_to_exact_reg(instr_t *instr, reg_id_t reg, dr_opnd_query_flags_t fl
     int i;
     opnd_t opnd;
 
-    if (!TEST(DR_QUERY_INCLUDE_COND_DSTS, flags) && instr_is_predicated(instr))
+    if (!TESTANY(DR_QUERY_INCLUDE_COND_DSTS, flags) && instr_is_predicated(instr))
         return false;
 
     for (i = 0; i < instr_num_dsts(instr); i++) {
@@ -1988,6 +2232,11 @@ instr_writes_memory(instr_t *instr)
 {
     int a;
     opnd_t curop;
+    int opc = instr_get_opcode(instr);
+
+    if (opc_is_not_a_real_memory_store(opc))
+        return false;
+
     for (a = 0; a < instr_num_dsts(instr); a++) {
         curop = instr_get_dst(instr, a);
         if (opnd_is_memory_reference(curop)) {
@@ -1998,20 +2247,59 @@ instr_writes_memory(instr_t *instr)
 }
 
 #ifdef X86
+
 bool
 instr_zeroes_ymmh(instr_t *instr)
+{
+    int i;
+    /* Our use of get_encoding_info() with no final PC specified works
+     * as there are no encoding template choices involving reachability
+     * which affect whether ymmh is zeroed.
+     */
+    const instr_info_t *info = get_encoding_info(instr);
+    if (info == NULL)
+        return false;
+    /* Legacy (SSE) instructions always preserve top half of YMM.
+     * Moreover, EVEX encoded instructions clear upper ZMM bits, but also
+     * YMM bits if an XMM reg is used.
+     */
+    if (!TESTANY(REQUIRES_VEX, info->flags) && !TESTANY(REQUIRES_EVEX, info->flags))
+        return false;
+
+    /* Handle zeroall special case. */
+    if (instr->opcode == OP_vzeroall)
+        return true;
+
+    for (i = 0; i < instr_num_dsts(instr); i++) {
+        opnd_t opnd = instr_get_dst(instr, i);
+        if (opnd_is_reg(opnd) && reg_is_vector_simd(opnd_get_reg(opnd)) &&
+            reg_is_strictly_xmm(opnd_get_reg(opnd)))
+            return true;
+    }
+    return false;
+}
+
+bool
+instr_zeroes_zmmh(instr_t *instr)
 {
     int i;
     const instr_info_t *info = get_encoding_info(instr);
     if (info == NULL)
         return false;
-    /* legacy instrs always preserve top half of ymm */
-    if (!TEST(REQUIRES_VEX, info->flags))
+    if (!TESTANY(REQUIRES_VEX, info->flags) && !TESTANY(REQUIRES_EVEX, info->flags))
         return false;
+    /* Handle special cases, namely zeroupper and zeroall. */
+    /* XXX: DR ir should actually have these two instructions have all SIMD vector regs
+     * as operand even though they are implicit.
+     */
+    if (instr->opcode == OP_vzeroall || instr->opcode == OP_vzeroupper)
+        return true;
+
     for (i = 0; i < instr_num_dsts(instr); i++) {
         opnd_t opnd = instr_get_dst(instr, i);
-        if (opnd_is_reg(opnd) && reg_is_xmm(opnd_get_reg(opnd)) &&
-            !reg_is_ymm(opnd_get_reg(opnd)))
+        if (opnd_is_reg(opnd) && reg_is_vector_simd(opnd_get_reg(opnd)) &&
+            (reg_is_strictly_xmm(opnd_get_reg(opnd)) ||
+             reg_is_strictly_ymm(opnd_get_reg(opnd))))
             return true;
     }
     return false;
@@ -2022,7 +2310,18 @@ instr_is_xsave(instr_t *instr)
 {
     int opcode = instr_get_opcode(instr); /* force decode */
     if (opcode == OP_xsave32 || opcode == OP_xsaveopt32 || opcode == OP_xsave64 ||
-        opcode == OP_xsaveopt64 || opcode == OP_xsavec32 || opcode == OP_xsavec64)
+        opcode == OP_xsaveopt64 || opcode == OP_xsavec32 || opcode == OP_xsavec64 ||
+        opcode == OP_xsaves32 || opcode == OP_xsaves64)
+        return true;
+    return false;
+}
+
+bool
+instr_is_xrstor(instr_t *instr)
+{
+    int opcode = instr_get_opcode(instr); /* force decode */
+    if (opcode == OP_xrstor32 || opcode == OP_xrstor64 || opcode == OP_xrstors32 ||
+        opcode == OP_xrstors64)
         return true;
     return false;
 }
@@ -2051,7 +2350,7 @@ instr_is_xsave(instr_t *instr)
 bool
 instr_rip_rel_valid(instr_t *instr)
 {
-    return instr_raw_bits_valid(instr) && TEST(INSTR_RIP_REL_VALID, instr->flags);
+    return instr_raw_bits_valid(instr) && TESTANY(INSTR_RIP_REL_VALID, instr->flags);
 }
 
 void
@@ -2283,7 +2582,7 @@ instr_get_rel_addr_src_idx(instr_t *instr)
 bool
 instr_is_our_mangling(instr_t *instr)
 {
-    return TEST(INSTR_OUR_MANGLING, instr->flags);
+    return TESTANY(INSTR_OUR_MANGLING, instr->flags);
 }
 
 void
@@ -2298,9 +2597,9 @@ instr_set_our_mangling(instr_t *instr, bool ours)
 bool
 instr_is_our_mangling_epilogue(instr_t *instr)
 {
-    ASSERT(!TEST(INSTR_OUR_MANGLING_EPILOGUE, instr->flags) ||
+    ASSERT(!TESTANY(INSTR_OUR_MANGLING_EPILOGUE, instr->flags) ||
            instr_is_our_mangling(instr));
-    return TEST(INSTR_OUR_MANGLING_EPILOGUE, instr->flags);
+    return TESTANY(INSTR_OUR_MANGLING_EPILOGUE, instr->flags);
 }
 
 void
@@ -2325,13 +2624,28 @@ instr_set_translation_mangling_epilogue(dcontext_t *dcontext, instrlist_t *ilist
     return instr;
 }
 
+#ifdef AARCH64
+void
+instr_set_has_register_predication(instr_t *instr)
+{
+    instr_set_predicate(instr, DR_PRED_MASKED);
+}
+
+bool
+instr_has_register_predication(instr_t *instr)
+{
+    return instr_get_predicate(instr) == DR_PRED_MASKED;
+}
+#endif
+
 /* Emulates instruction to find the address of the index-th memory operand.
  * Either or both OUT variables can be NULL.
  */
 static bool
 instr_compute_address_helper(instr_t *instr, priv_mcontext_t *mc, size_t mc_size,
-                             dr_mcontext_flags_t mc_flags, uint index, OUT app_pc *addr,
-                             OUT bool *is_write, OUT uint *pos)
+                             dr_mcontext_flags_t mc_flags, uint index,
+                             DR_PARAM_OUT app_pc *addr, DR_PARAM_OUT bool *is_write,
+                             DR_PARAM_OUT uint *pos)
 {
     /* for string instr, even w/ rep prefix, assume want value at point of
      * register snapshot passed in
@@ -2349,20 +2663,16 @@ instr_compute_address_helper(instr_t *instr, priv_mcontext_t *mc, size_t mc_size
     for (i = 0; i < instr_num_dsts(instr); i++) {
         curop = instr_get_dst(instr, i);
         if (opnd_is_memory_reference(curop)) {
-            if (opnd_is_vsib(curop)) {
-#ifdef X86
-                if (instr_compute_address_VSIB(instr, mc, mc_size, mc_flags, curop, index,
-                                               &have_addr, addr, &write)) {
-                    CLIENT_ASSERT(
-                        write,
-                        "VSIB found in destination but instruction is not a scatter");
+            if (opnd_is_vector_base_disp(curop)) {
+                if (instr_compute_vector_address(instr, mc, mc_size, mc_flags, curop,
+                                                 index, &have_addr, addr, &write)) {
+                    CLIENT_ASSERT(write,
+                                  "Vector address found in destination but instruction "
+                                  "is not a scatter");
                     break;
                 } else {
                     return false;
                 }
-#else
-                CLIENT_ASSERT(false, "VSIB should be x86-only");
-#endif
             }
             memcount++;
             if (memcount == (int)index) {
@@ -2377,16 +2687,12 @@ instr_compute_address_helper(instr_t *instr, priv_mcontext_t *mc, size_t mc_size
         for (i = 0; i < instr_num_srcs(instr); i++) {
             curop = instr_get_src(instr, i);
             if (opnd_is_memory_reference(curop)) {
-                if (opnd_is_vsib(curop)) {
-#ifdef X86
-                    if (instr_compute_address_VSIB(instr, mc, mc_size, mc_flags, curop,
-                                                   index, &have_addr, addr, &write))
+                if (opnd_is_vector_base_disp(curop)) {
+                    if (instr_compute_vector_address(instr, mc, mc_size, mc_flags, curop,
+                                                     index, &have_addr, addr, &write))
                         break;
                     else
                         return false;
-#else
-                    CLIENT_ASSERT(false, "VSIB should be x86-only");
-#endif
                 }
                 memcount++;
                 if (memcount == (int)index)
@@ -2409,7 +2715,8 @@ instr_compute_address_helper(instr_t *instr, priv_mcontext_t *mc, size_t mc_size
 
 bool
 instr_compute_address_ex_priv(instr_t *instr, priv_mcontext_t *mc, uint index,
-                              OUT app_pc *addr, OUT bool *is_write, OUT uint *pos)
+                              DR_PARAM_OUT app_pc *addr, DR_PARAM_OUT bool *is_write,
+                              DR_PARAM_OUT uint *pos)
 {
     return instr_compute_address_helper(instr, mc, sizeof(*mc), DR_MC_ALL, index, addr,
                                         is_write, pos);
@@ -2417,8 +2724,8 @@ instr_compute_address_ex_priv(instr_t *instr, priv_mcontext_t *mc, uint index,
 
 DR_API
 bool
-instr_compute_address_ex(instr_t *instr, dr_mcontext_t *mc, uint index, OUT app_pc *addr,
-                         OUT bool *is_write)
+instr_compute_address_ex(instr_t *instr, dr_mcontext_t *mc, uint index,
+                         DR_PARAM_OUT app_pc *addr, DR_PARAM_OUT bool *is_write)
 {
     return instr_compute_address_helper(instr, dr_mcontext_as_priv_mcontext(mc), mc->size,
                                         mc->flags, index, addr, is_write, NULL);
@@ -2428,7 +2735,8 @@ instr_compute_address_ex(instr_t *instr, dr_mcontext_t *mc, uint index, OUT app_
 DR_API
 bool
 instr_compute_address_ex_pos(instr_t *instr, dr_mcontext_t *mc, uint index,
-                             OUT app_pc *addr, OUT bool *is_write, OUT uint *pos)
+                             DR_PARAM_OUT app_pc *addr, DR_PARAM_OUT bool *is_write,
+                             DR_PARAM_OUT uint *pos)
 {
     return instr_compute_address_helper(instr, dr_mcontext_as_priv_mcontext(mc), mc->size,
                                         mc->flags, index, addr, is_write, pos);
@@ -2487,8 +2795,9 @@ instr_memory_reference_size(instr_t *instr)
  * returns NULL.
  */
 app_pc
-decode_memory_reference_size(dcontext_t *dcontext, app_pc pc, uint *size_in_bytes)
+decode_memory_reference_size(void *drcontext, app_pc pc, uint *size_in_bytes)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     app_pc next_pc;
     instr_t instr;
     instr_init(dcontext, &instr);
@@ -2499,6 +2808,46 @@ decode_memory_reference_size(dcontext_t *dcontext, app_pc pc, uint *size_in_byte
     *size_in_bytes = instr_memory_reference_size(&instr);
     instr_free(dcontext, &instr);
     return next_pc;
+}
+
+/* Returns the number of memory read accesses of the instruction.
+ */
+uint
+instr_num_memory_read_access(instr_t *instr)
+{
+    int i;
+    opnd_t curop;
+    int count = 0;
+    const int opc = instr_get_opcode(instr);
+
+    if (opc_is_not_a_real_memory_load(opc))
+        return 0;
+
+    for (i = 0; i < instr_num_srcs(instr); i++) {
+        curop = instr_get_src(instr, i);
+        if (opnd_is_memory_reference(curop)) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+/* Returns the number of memory write accesses of the instruction.
+ */
+uint
+instr_num_memory_write_access(instr_t *instr)
+{
+    int i;
+    opnd_t curop;
+    int count = 0;
+
+    for (i = 0; i < instr_num_dsts(instr); i++) {
+        curop = instr_get_dst(instr, i);
+        if (opnd_is_memory_reference(curop)) {
+            ++count;
+        }
+    }
+    return count;
 }
 
 DR_API
@@ -2593,7 +2942,8 @@ instr_is_cti(instr_t *instr) /* any control-transfer instruction */
 int
 instr_get_interrupt_number(instr_t *instr)
 {
-    CLIENT_ASSERT(instr_get_opcode(instr) == IF_X86_ELSE(OP_int, OP_svc),
+    CLIENT_ASSERT(instr_get_opcode(instr) ==
+                      IF_X86_ELSE(OP_int, IF_RISCV64_ELSE(OP_ecall, OP_svc)),
                   "instr_get_interrupt_number: instr not interrupt");
     if (instr_operands_valid(instr)) {
         ptr_int_t val = opnd_get_immed_int(instr_get_src(instr, 0));
@@ -2649,6 +2999,191 @@ instr_uses_fp_reg(instr_t *instr)
     return false;
 }
 
+opnd_size_t
+instr_get_operation_size(instr_t *instr)
+{
+    /* Only DR_ISA_REGDEPS instructions can have an operation_size.
+     */
+    if (instr_get_isa_mode(instr) == DR_ISA_REGDEPS)
+        return instr->operation_size;
+
+    return OPSZ_NA;
+}
+
+void
+instr_set_operation_size(instr_t *instr, opnd_size_t operation_size)
+{
+    CLIENT_ASSERT(instr_get_isa_mode(instr) == DR_ISA_REGDEPS,
+                  "instr_set_operation_size: only DR_ISA_REGDEPS instructions can have "
+                  "an operation_size");
+    instr->operation_size = operation_size;
+    return;
+}
+
+void
+instr_convert_to_isa_regdeps(void *drcontext, instr_t *instr_real_isa,
+                             instr_t *instr_regdeps_isa)
+{
+    /* Retrieve number of register destination operands from real ISA instruction.
+     * Note that a destination operand that is a memory renference should have its
+     * registers (if any) counted as source operands, since they are being read.
+     * We use [src|dst]_reg_used to keep track of registers we've seen and avoid
+     * duplicates.
+     */
+    bool src_reg_used[REGDEPS_MAX_NUM_REGS];
+    memset(src_reg_used, 0, sizeof(src_reg_used));
+    uint num_srcs = 0;
+    bool dst_reg_used[REGDEPS_MAX_NUM_REGS];
+    memset(dst_reg_used, 0, sizeof(dst_reg_used));
+    uint num_dsts = 0;
+    uint instr_real_num_dsts = (uint)instr_num_dsts(instr_real_isa);
+    for (uint dst_index = 0; dst_index < instr_real_num_dsts; ++dst_index) {
+        opnd_t dst_opnd = instr_get_dst(instr_real_isa, dst_index);
+        uint num_regs_used_by_opnd = (uint)opnd_num_regs_used(dst_opnd);
+        if (opnd_is_memory_reference(dst_opnd)) {
+            for (uint opnd_index = 0; opnd_index < num_regs_used_by_opnd; ++opnd_index) {
+                reg_id_t reg = opnd_get_reg_used(dst_opnd, opnd_index);
+                /* Map sub-registers to their containing register.
+                 */
+                reg_id_t reg_virtual = d_r_reg_to_virtual(reg);
+                if (!src_reg_used[reg_virtual]) {
+                    ++num_srcs;
+                    src_reg_used[reg_virtual] = true;
+                }
+            }
+        } else {
+            for (uint opnd_index = 0; opnd_index < num_regs_used_by_opnd; ++opnd_index) {
+                reg_id_t reg = opnd_get_reg_used(dst_opnd, opnd_index);
+                /* Map sub-registers to their containing register.
+                 */
+                reg_id_t reg_virtual = d_r_reg_to_virtual(reg);
+                if (!dst_reg_used[reg_virtual]) {
+                    ++num_dsts;
+                    dst_reg_used[reg_virtual] = true;
+                }
+            }
+        }
+    }
+
+    /* We use max_src_opnd_size_bytes to keep track of the size of the largest source
+     * operand.  This variable counts the number of bytes instead of using opnd_size_t to
+     * avoid relying on OPSZ_ enum values.  Later on we convert max_src_opnd_size_bytes to
+     * its corresponding OPSZ_ enum value and store it into operation_size.
+     */
+    uint max_src_opnd_size_bytes = 0;
+    /* Retrieve number of register source operands from real ISA instruction.
+     */
+    uint instr_real_num_srcs = (uint)instr_num_srcs(instr_real_isa);
+    for (uint i = 0; i < instr_real_num_srcs; ++i) {
+        opnd_t src_opnd = instr_get_src(instr_real_isa, i);
+        opnd_size_t opnd_size = opnd_get_size(src_opnd);
+        uint opnd_size_bytes = opnd_size_in_bytes(opnd_size);
+        if (opnd_size_bytes > max_src_opnd_size_bytes)
+            max_src_opnd_size_bytes = opnd_size_bytes;
+        uint num_regs_used_by_opnd = (uint)opnd_num_regs_used(src_opnd);
+        for (uint opnd_index = 0; opnd_index < num_regs_used_by_opnd; ++opnd_index) {
+            reg_id_t reg = opnd_get_reg_used(src_opnd, opnd_index);
+            /* Map sub-registers to their containing register.
+             */
+            reg_id_t reg_virtual = d_r_reg_to_virtual(reg);
+            if (!src_reg_used[reg_virtual]) {
+                ++num_srcs;
+                src_reg_used[reg_virtual] = true;
+            }
+        }
+    }
+
+    /* Declare num of source and destination operands valid in the converted instruction.
+     */
+    instr_set_num_opnds(drcontext, instr_regdeps_isa, num_dsts, num_srcs);
+
+    /* Retrieve arithmetic flags from real ISA instruction.
+     * If the real ISA instruction reads or writes one or more arithmetic flag, all
+     * arithmetic flags will be set to read or written in the converted instruction.
+     * Note that this operation can trigger additional encoding and decoding of
+     * instr_real_isa, depending on its decoding level.
+     */
+    uint eflags_instr_real = instr_get_arith_flags(instr_real_isa, DR_QUERY_DEFAULT);
+    uint eflags_instr_regdeps = 0;
+    if (TESTANY(EFLAGS_WRITE_ARITH, eflags_instr_real))
+        eflags_instr_regdeps |= EFLAGS_WRITE_ARITH;
+    if (TESTANY(EFLAGS_READ_ARITH, eflags_instr_real))
+        eflags_instr_regdeps |= EFLAGS_READ_ARITH;
+    instr_regdeps_isa->eflags = eflags_instr_regdeps;
+    instr_set_arith_flags_valid(instr_regdeps_isa, true);
+
+    /* Retrieve category of real ISA instruction and set it directly as the category of
+     * the converted instruction.  No changes needed here.
+     */
+    instr_set_category(instr_regdeps_isa, instr_get_category(instr_real_isa));
+
+    /* Convert max_src_opnd_size_bytes from number of bytes to opnd_size_t (which holds
+     * OPSZ_ enum values). If we have no operands, operation_size is OPSZ_0, same as a
+     * decoded DR_ISA_REGDEPS instruction.
+     */
+    opnd_size_t max_opnd_size = opnd_size_from_bytes(max_src_opnd_size_bytes);
+    if (num_dsts + num_srcs > 0)
+        instr_regdeps_isa->operation_size = max_opnd_size;
+    else
+        instr_regdeps_isa->operation_size = OPSZ_0;
+
+    /* Set the source and destination register operands for the converted instruction.
+     */
+    if (num_dsts > 0) {
+        uint reg_counter = 0;
+        for (uint reg = 0; reg < REGDEPS_MAX_NUM_REGS; ++reg) {
+            if (dst_reg_used[reg]) {
+                opnd_t dst_opnd = opnd_create_reg((reg_id_t)reg);
+                /* Virtual registers don't have a fixed size like real ISA registers do.
+                 * So, it can happen that the same virtual register in two different
+                 * instructions may have different sizes.
+                 *
+                 * Even though querying the size of a virtual register is not supported on
+                 * purpose (a user should query the instr_t.operation_size), we set the
+                 * opnd_t.size field to be the same as instr_t.operation_size (i.e.,
+                 * max_opnd_size), so that reg_get_size() can return some meaningful
+                 * information without triggering a CLIENT_ASSERT error because the
+                 * virtual register ID is not supported (e.g., is one of the "reserved"
+                 * register IDs).
+                 *
+                 * We do the same for both src and dst register operands of DR_ISA_REGDEPS
+                 * instructions.
+                 */
+                opnd_set_size(&dst_opnd, max_opnd_size);
+                instr_set_dst(instr_regdeps_isa, reg_counter, dst_opnd);
+                ++reg_counter;
+            }
+        }
+    }
+
+    if (num_srcs > 0) {
+        uint reg_counter = 0;
+        for (uint reg = 0; reg < REGDEPS_MAX_NUM_REGS; ++reg) {
+            if (src_reg_used[reg]) {
+                opnd_t src_opnd = opnd_create_reg((reg_id_t)reg);
+                opnd_set_size(&src_opnd, max_opnd_size);
+                instr_set_src(instr_regdeps_isa, reg_counter, src_opnd);
+                ++reg_counter;
+            }
+        }
+    }
+
+    /* Declare converted instruction operands to be valid.
+     * Must be done after instr_allocate_raw_bits(), which sets operands as invalid.
+     */
+    instr_set_operands_valid(instr_regdeps_isa, true);
+
+    /* Set opcode as OP_UNDECODED, so routines like instr_valid() can still work.
+     * We can't use instr_set_opcode() because of its CLIENT_ASSERT when setting the
+     * opcode to OP_UNDECODED or OP_INVALID.
+     */
+    instr_regdeps_isa->opcode = OP_UNDECODED;
+
+    /* Set converted instruction ISA mode to be DR_ISA_REGDEPS.
+     */
+    instr_set_isa_mode(instr_regdeps_isa, DR_ISA_REGDEPS);
+}
+
 /* We place these here rather than in mangle_shared.c to avoid the work of
  * linking mangle_shared.c into drdecodelib.
  */
@@ -2665,9 +3200,9 @@ convert_to_near_rel(dcontext_t *dcontext, instr_t *instr)
 }
 
 instr_t *
-instr_convert_short_meta_jmp_to_long(dcontext_t *dcontext, instrlist_t *ilist,
-                                     instr_t *instr)
+instr_convert_short_meta_jmp_to_long(void *drcontext, instrlist_t *ilist, instr_t *instr)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     /* PR 266292: we convert to a sequence of separate meta instrs for jecxz, etc. */
     CLIENT_ASSERT(instr_is_meta(instr),
                   "instr_convert_short_meta_jmp_to_long: instr is not meta");
@@ -2682,7 +3217,7 @@ instr_convert_short_meta_jmp_to_long(dcontext_t *dcontext, instrlist_t *ilist,
  * instr_t creation routines
  * To use 16-bit data sizes, must call set_prefix after creating instr
  * To support this, all relevant registers must be of eAX form!
- * FIXME: how do that?
+ * XXX: how do that?
  * will an all-operand replacement work, or do some instrs have some
  * var-size regs but some const-size also?
  *
@@ -2695,27 +3230,30 @@ instr_convert_short_meta_jmp_to_long(dcontext_t *dcontext, instrlist_t *ilist,
  * opcode complaints:
  * OP_imm vs. OP_st
  * OP_ret: build routines have to separate ret_imm and ret_far_imm
- * others, see FIXME's in instr_create.h
+ * others, see XXX's in instr_create_api.h
  */
 
 instr_t *
-instr_create_0dst_0src(dcontext_t *dcontext, int opcode)
+instr_create_0dst_0src(void *drcontext, int opcode)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     instr_t *in = instr_build(dcontext, opcode, 0, 0);
     return in;
 }
 
 instr_t *
-instr_create_0dst_1src(dcontext_t *dcontext, int opcode, opnd_t src)
+instr_create_0dst_1src(void *drcontext, int opcode, opnd_t src)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     instr_t *in = instr_build(dcontext, opcode, 0, 1);
     instr_set_src(in, 0, src);
     return in;
 }
 
 instr_t *
-instr_create_0dst_2src(dcontext_t *dcontext, int opcode, opnd_t src1, opnd_t src2)
+instr_create_0dst_2src(void *drcontext, int opcode, opnd_t src1, opnd_t src2)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     instr_t *in = instr_build(dcontext, opcode, 0, 2);
     instr_set_src(in, 0, src1);
     instr_set_src(in, 1, src2);
@@ -2723,9 +3261,9 @@ instr_create_0dst_2src(dcontext_t *dcontext, int opcode, opnd_t src1, opnd_t src
 }
 
 instr_t *
-instr_create_0dst_3src(dcontext_t *dcontext, int opcode, opnd_t src1, opnd_t src2,
-                       opnd_t src3)
+instr_create_0dst_3src(void *drcontext, int opcode, opnd_t src1, opnd_t src2, opnd_t src3)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     instr_t *in = instr_build(dcontext, opcode, 0, 3);
     instr_set_src(in, 0, src1);
     instr_set_src(in, 1, src2);
@@ -2734,9 +3272,10 @@ instr_create_0dst_3src(dcontext_t *dcontext, int opcode, opnd_t src1, opnd_t src
 }
 
 instr_t *
-instr_create_0dst_4src(dcontext_t *dcontext, int opcode, opnd_t src1, opnd_t src2,
-                       opnd_t src3, opnd_t src4)
+instr_create_0dst_4src(void *drcontext, int opcode, opnd_t src1, opnd_t src2, opnd_t src3,
+                       opnd_t src4)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     instr_t *in = instr_build(dcontext, opcode, 0, 4);
     instr_set_src(in, 0, src1);
     instr_set_src(in, 1, src2);
@@ -2746,16 +3285,18 @@ instr_create_0dst_4src(dcontext_t *dcontext, int opcode, opnd_t src1, opnd_t src
 }
 
 instr_t *
-instr_create_1dst_0src(dcontext_t *dcontext, int opcode, opnd_t dst)
+instr_create_1dst_0src(void *drcontext, int opcode, opnd_t dst)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     instr_t *in = instr_build(dcontext, opcode, 1, 0);
     instr_set_dst(in, 0, dst);
     return in;
 }
 
 instr_t *
-instr_create_1dst_1src(dcontext_t *dcontext, int opcode, opnd_t dst, opnd_t src)
+instr_create_1dst_1src(void *drcontext, int opcode, opnd_t dst, opnd_t src)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     instr_t *in = instr_build(dcontext, opcode, 1, 1);
     instr_set_dst(in, 0, dst);
     instr_set_src(in, 0, src);
@@ -2763,9 +3304,9 @@ instr_create_1dst_1src(dcontext_t *dcontext, int opcode, opnd_t dst, opnd_t src)
 }
 
 instr_t *
-instr_create_1dst_2src(dcontext_t *dcontext, int opcode, opnd_t dst, opnd_t src1,
-                       opnd_t src2)
+instr_create_1dst_2src(void *drcontext, int opcode, opnd_t dst, opnd_t src1, opnd_t src2)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     instr_t *in = instr_build(dcontext, opcode, 1, 2);
     instr_set_dst(in, 0, dst);
     instr_set_src(in, 0, src1);
@@ -2774,9 +3315,10 @@ instr_create_1dst_2src(dcontext_t *dcontext, int opcode, opnd_t dst, opnd_t src1
 }
 
 instr_t *
-instr_create_1dst_3src(dcontext_t *dcontext, int opcode, opnd_t dst, opnd_t src1,
-                       opnd_t src2, opnd_t src3)
+instr_create_1dst_3src(void *drcontext, int opcode, opnd_t dst, opnd_t src1, opnd_t src2,
+                       opnd_t src3)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     instr_t *in = instr_build(dcontext, opcode, 1, 3);
     instr_set_dst(in, 0, dst);
     instr_set_src(in, 0, src1);
@@ -2786,9 +3328,10 @@ instr_create_1dst_3src(dcontext_t *dcontext, int opcode, opnd_t dst, opnd_t src1
 }
 
 instr_t *
-instr_create_1dst_4src(dcontext_t *dcontext, int opcode, opnd_t dst, opnd_t src1,
-                       opnd_t src2, opnd_t src3, opnd_t src4)
+instr_create_1dst_4src(void *drcontext, int opcode, opnd_t dst, opnd_t src1, opnd_t src2,
+                       opnd_t src3, opnd_t src4)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     instr_t *in = instr_build(dcontext, opcode, 1, 4);
     instr_set_dst(in, 0, dst);
     instr_set_src(in, 0, src1);
@@ -2799,9 +3342,10 @@ instr_create_1dst_4src(dcontext_t *dcontext, int opcode, opnd_t dst, opnd_t src1
 }
 
 instr_t *
-instr_create_1dst_5src(dcontext_t *dcontext, int opcode, opnd_t dst, opnd_t src1,
-                       opnd_t src2, opnd_t src3, opnd_t src4, opnd_t src5)
+instr_create_1dst_5src(void *drcontext, int opcode, opnd_t dst, opnd_t src1, opnd_t src2,
+                       opnd_t src3, opnd_t src4, opnd_t src5)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     instr_t *in = instr_build(dcontext, opcode, 1, 5);
     instr_set_dst(in, 0, dst);
     instr_set_src(in, 0, src1);
@@ -2813,8 +3357,25 @@ instr_create_1dst_5src(dcontext_t *dcontext, int opcode, opnd_t dst, opnd_t src1
 }
 
 instr_t *
-instr_create_2dst_0src(dcontext_t *dcontext, int opcode, opnd_t dst1, opnd_t dst2)
+instr_create_1dst_6src(void *drcontext, int opcode, opnd_t dst, opnd_t src1, opnd_t src2,
+                       opnd_t src3, opnd_t src4, opnd_t src5, opnd_t src6)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
+    instr_t *in = instr_build(dcontext, opcode, 1, 6);
+    instr_set_dst(in, 0, dst);
+    instr_set_src(in, 0, src1);
+    instr_set_src(in, 1, src2);
+    instr_set_src(in, 2, src3);
+    instr_set_src(in, 3, src4);
+    instr_set_src(in, 4, src5);
+    instr_set_src(in, 5, src6);
+    return in;
+}
+
+instr_t *
+instr_create_2dst_0src(void *drcontext, int opcode, opnd_t dst1, opnd_t dst2)
+{
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     instr_t *in = instr_build(dcontext, opcode, 2, 0);
     instr_set_dst(in, 0, dst1);
     instr_set_dst(in, 1, dst2);
@@ -2822,9 +3383,9 @@ instr_create_2dst_0src(dcontext_t *dcontext, int opcode, opnd_t dst1, opnd_t dst
 }
 
 instr_t *
-instr_create_2dst_1src(dcontext_t *dcontext, int opcode, opnd_t dst1, opnd_t dst2,
-                       opnd_t src)
+instr_create_2dst_1src(void *drcontext, int opcode, opnd_t dst1, opnd_t dst2, opnd_t src)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     instr_t *in = instr_build(dcontext, opcode, 2, 1);
     instr_set_dst(in, 0, dst1);
     instr_set_dst(in, 1, dst2);
@@ -2833,9 +3394,10 @@ instr_create_2dst_1src(dcontext_t *dcontext, int opcode, opnd_t dst1, opnd_t dst
 }
 
 instr_t *
-instr_create_2dst_2src(dcontext_t *dcontext, int opcode, opnd_t dst1, opnd_t dst2,
-                       opnd_t src1, opnd_t src2)
+instr_create_2dst_2src(void *drcontext, int opcode, opnd_t dst1, opnd_t dst2, opnd_t src1,
+                       opnd_t src2)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     instr_t *in = instr_build(dcontext, opcode, 2, 2);
     instr_set_dst(in, 0, dst1);
     instr_set_dst(in, 1, dst2);
@@ -2845,9 +3407,10 @@ instr_create_2dst_2src(dcontext_t *dcontext, int opcode, opnd_t dst1, opnd_t dst
 }
 
 instr_t *
-instr_create_2dst_3src(dcontext_t *dcontext, int opcode, opnd_t dst1, opnd_t dst2,
-                       opnd_t src1, opnd_t src2, opnd_t src3)
+instr_create_2dst_3src(void *drcontext, int opcode, opnd_t dst1, opnd_t dst2, opnd_t src1,
+                       opnd_t src2, opnd_t src3)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     instr_t *in = instr_build(dcontext, opcode, 2, 3);
     instr_set_dst(in, 0, dst1);
     instr_set_dst(in, 1, dst2);
@@ -2858,9 +3421,10 @@ instr_create_2dst_3src(dcontext_t *dcontext, int opcode, opnd_t dst1, opnd_t dst
 }
 
 instr_t *
-instr_create_2dst_4src(dcontext_t *dcontext, int opcode, opnd_t dst1, opnd_t dst2,
-                       opnd_t src1, opnd_t src2, opnd_t src3, opnd_t src4)
+instr_create_2dst_4src(void *drcontext, int opcode, opnd_t dst1, opnd_t dst2, opnd_t src1,
+                       opnd_t src2, opnd_t src3, opnd_t src4)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     instr_t *in = instr_build(dcontext, opcode, 2, 4);
     instr_set_dst(in, 0, dst1);
     instr_set_dst(in, 1, dst2);
@@ -2872,9 +3436,10 @@ instr_create_2dst_4src(dcontext_t *dcontext, int opcode, opnd_t dst1, opnd_t dst
 }
 
 instr_t *
-instr_create_2dst_5src(dcontext_t *dcontext, int opcode, opnd_t dst1, opnd_t dst2,
-                       opnd_t src1, opnd_t src2, opnd_t src3, opnd_t src4, opnd_t src5)
+instr_create_2dst_5src(void *drcontext, int opcode, opnd_t dst1, opnd_t dst2, opnd_t src1,
+                       opnd_t src2, opnd_t src3, opnd_t src4, opnd_t src5)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     instr_t *in = instr_build(dcontext, opcode, 2, 5);
     instr_set_dst(in, 0, dst1);
     instr_set_dst(in, 1, dst2);
@@ -2887,9 +3452,9 @@ instr_create_2dst_5src(dcontext_t *dcontext, int opcode, opnd_t dst1, opnd_t dst
 }
 
 instr_t *
-instr_create_3dst_0src(dcontext_t *dcontext, int opcode, opnd_t dst1, opnd_t dst2,
-                       opnd_t dst3)
+instr_create_3dst_0src(void *drcontext, int opcode, opnd_t dst1, opnd_t dst2, opnd_t dst3)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     instr_t *in = instr_build(dcontext, opcode, 3, 0);
     instr_set_dst(in, 0, dst1);
     instr_set_dst(in, 1, dst2);
@@ -2898,9 +3463,23 @@ instr_create_3dst_0src(dcontext_t *dcontext, int opcode, opnd_t dst1, opnd_t dst
 }
 
 instr_t *
-instr_create_3dst_2src(dcontext_t *dcontext, int opcode, opnd_t dst1, opnd_t dst2,
-                       opnd_t dst3, opnd_t src1, opnd_t src2)
+instr_create_3dst_1src(void *drcontext, int opcode, opnd_t dst1, opnd_t dst2, opnd_t dst3,
+                       opnd_t src1)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
+    instr_t *in = instr_build(dcontext, opcode, 3, 1);
+    instr_set_dst(in, 0, dst1);
+    instr_set_dst(in, 1, dst2);
+    instr_set_dst(in, 2, dst3);
+    instr_set_src(in, 0, src1);
+    return in;
+}
+
+instr_t *
+instr_create_3dst_2src(void *drcontext, int opcode, opnd_t dst1, opnd_t dst2, opnd_t dst3,
+                       opnd_t src1, opnd_t src2)
+{
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     instr_t *in = instr_build(dcontext, opcode, 3, 2);
     instr_set_dst(in, 0, dst1);
     instr_set_dst(in, 1, dst2);
@@ -2911,9 +3490,10 @@ instr_create_3dst_2src(dcontext_t *dcontext, int opcode, opnd_t dst1, opnd_t dst
 }
 
 instr_t *
-instr_create_3dst_3src(dcontext_t *dcontext, int opcode, opnd_t dst1, opnd_t dst2,
-                       opnd_t dst3, opnd_t src1, opnd_t src2, opnd_t src3)
+instr_create_3dst_3src(void *drcontext, int opcode, opnd_t dst1, opnd_t dst2, opnd_t dst3,
+                       opnd_t src1, opnd_t src2, opnd_t src3)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     instr_t *in = instr_build(dcontext, opcode, 3, 3);
     instr_set_dst(in, 0, dst1);
     instr_set_dst(in, 1, dst2);
@@ -2925,9 +3505,10 @@ instr_create_3dst_3src(dcontext_t *dcontext, int opcode, opnd_t dst1, opnd_t dst
 }
 
 instr_t *
-instr_create_3dst_4src(dcontext_t *dcontext, int opcode, opnd_t dst1, opnd_t dst2,
-                       opnd_t dst3, opnd_t src1, opnd_t src2, opnd_t src3, opnd_t src4)
+instr_create_3dst_4src(void *drcontext, int opcode, opnd_t dst1, opnd_t dst2, opnd_t dst3,
+                       opnd_t src1, opnd_t src2, opnd_t src3, opnd_t src4)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     instr_t *in = instr_build(dcontext, opcode, 3, 4);
     instr_set_dst(in, 0, dst1);
     instr_set_dst(in, 1, dst2);
@@ -2940,10 +3521,10 @@ instr_create_3dst_4src(dcontext_t *dcontext, int opcode, opnd_t dst1, opnd_t dst
 }
 
 instr_t *
-instr_create_3dst_5src(dcontext_t *dcontext, int opcode, opnd_t dst1, opnd_t dst2,
-                       opnd_t dst3, opnd_t src1, opnd_t src2, opnd_t src3, opnd_t src4,
-                       opnd_t src5)
+instr_create_3dst_5src(void *drcontext, int opcode, opnd_t dst1, opnd_t dst2, opnd_t dst3,
+                       opnd_t src1, opnd_t src2, opnd_t src3, opnd_t src4, opnd_t src5)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     instr_t *in = instr_build(dcontext, opcode, 3, 5);
     instr_set_dst(in, 0, dst1);
     instr_set_dst(in, 1, dst2);
@@ -2957,9 +3538,30 @@ instr_create_3dst_5src(dcontext_t *dcontext, int opcode, opnd_t dst1, opnd_t dst
 }
 
 instr_t *
-instr_create_4dst_1src(dcontext_t *dcontext, int opcode, opnd_t dst1, opnd_t dst2,
-                       opnd_t dst3, opnd_t dst4, opnd_t src)
+
+instr_create_3dst_6src(void *drcontext, int opcode, opnd_t dst1, opnd_t dst2, opnd_t dst3,
+                       opnd_t src1, opnd_t src2, opnd_t src3, opnd_t src4, opnd_t src5,
+                       opnd_t src6)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
+    instr_t *in = instr_build(dcontext, opcode, 3, 6);
+    instr_set_dst(in, 0, dst1);
+    instr_set_dst(in, 1, dst2);
+    instr_set_dst(in, 2, dst3);
+    instr_set_src(in, 0, src1);
+    instr_set_src(in, 1, src2);
+    instr_set_src(in, 2, src3);
+    instr_set_src(in, 3, src4);
+    instr_set_src(in, 4, src5);
+    instr_set_src(in, 5, src6);
+    return in;
+}
+
+instr_t *
+instr_create_4dst_1src(void *drcontext, int opcode, opnd_t dst1, opnd_t dst2, opnd_t dst3,
+                       opnd_t dst4, opnd_t src)
+{
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     instr_t *in = instr_build(dcontext, opcode, 4, 1);
     instr_set_dst(in, 0, dst1);
     instr_set_dst(in, 1, dst2);
@@ -2970,9 +3572,10 @@ instr_create_4dst_1src(dcontext_t *dcontext, int opcode, opnd_t dst1, opnd_t dst
 }
 
 instr_t *
-instr_create_4dst_2src(dcontext_t *dcontext, int opcode, opnd_t dst1, opnd_t dst2,
-                       opnd_t dst3, opnd_t dst4, opnd_t src1, opnd_t src2)
+instr_create_4dst_2src(void *drcontext, int opcode, opnd_t dst1, opnd_t dst2, opnd_t dst3,
+                       opnd_t dst4, opnd_t src1, opnd_t src2)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     instr_t *in = instr_build(dcontext, opcode, 4, 2);
     instr_set_dst(in, 0, dst1);
     instr_set_dst(in, 1, dst2);
@@ -2984,10 +3587,26 @@ instr_create_4dst_2src(dcontext_t *dcontext, int opcode, opnd_t dst1, opnd_t dst
 }
 
 instr_t *
-instr_create_4dst_4src(dcontext_t *dcontext, int opcode, opnd_t dst1, opnd_t dst2,
-                       opnd_t dst3, opnd_t dst4, opnd_t src1, opnd_t src2, opnd_t src3,
-                       opnd_t src4)
+instr_create_4dst_3src(void *drcontext, int opcode, opnd_t dst1, opnd_t dst2, opnd_t dst3,
+                       opnd_t dst4, opnd_t src1, opnd_t src2, opnd_t src3)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
+    instr_t *in = instr_build(dcontext, opcode, 4, 3);
+    instr_set_dst(in, 0, dst1);
+    instr_set_dst(in, 1, dst2);
+    instr_set_dst(in, 2, dst3);
+    instr_set_dst(in, 3, dst4);
+    instr_set_src(in, 0, src1);
+    instr_set_src(in, 1, src2);
+    instr_set_src(in, 2, src3);
+    return in;
+}
+
+instr_t *
+instr_create_4dst_4src(void *drcontext, int opcode, opnd_t dst1, opnd_t dst2, opnd_t dst3,
+                       opnd_t dst4, opnd_t src1, opnd_t src2, opnd_t src3, opnd_t src4)
+{
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     instr_t *in = instr_build(dcontext, opcode, 4, 4);
     instr_set_dst(in, 0, dst1);
     instr_set_dst(in, 1, dst2);
@@ -3001,13 +3620,153 @@ instr_create_4dst_4src(dcontext_t *dcontext, int opcode, opnd_t dst1, opnd_t dst
 }
 
 instr_t *
-instr_create_Ndst_Msrc_varsrc(dcontext_t *dcontext, int opcode, uint fixed_dsts,
+instr_create_4dst_5src(void *drcontext, int opcode, opnd_t dst1, opnd_t dst2, opnd_t dst3,
+                       opnd_t dst4, opnd_t src1, opnd_t src2, opnd_t src3, opnd_t src4,
+                       opnd_t src5)
+{
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
+    instr_t *in = instr_build(dcontext, opcode, 4, 5);
+    instr_set_dst(in, 0, dst1);
+    instr_set_dst(in, 1, dst2);
+    instr_set_dst(in, 2, dst3);
+    instr_set_dst(in, 3, dst4);
+    instr_set_src(in, 0, src1);
+    instr_set_src(in, 1, src2);
+    instr_set_src(in, 2, src3);
+    instr_set_src(in, 3, src4);
+    instr_set_src(in, 4, src5);
+    return in;
+}
+
+instr_t *
+instr_create_4dst_6src(void *drcontext, int opcode, opnd_t dst1, opnd_t dst2, opnd_t dst3,
+                       opnd_t dst4, opnd_t src1, opnd_t src2, opnd_t src3, opnd_t src4,
+                       opnd_t src5, opnd_t src6)
+{
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
+    instr_t *in = instr_build(dcontext, opcode, 4, 6);
+    instr_set_dst(in, 0, dst1);
+    instr_set_dst(in, 1, dst2);
+    instr_set_dst(in, 2, dst3);
+    instr_set_dst(in, 3, dst4);
+    instr_set_src(in, 0, src1);
+    instr_set_src(in, 1, src2);
+    instr_set_src(in, 2, src3);
+    instr_set_src(in, 3, src4);
+    instr_set_src(in, 4, src5);
+    instr_set_src(in, 5, src6);
+    return in;
+}
+
+instr_t *
+instr_create_4dst_7src(void *drcontext, int opcode, opnd_t dst1, opnd_t dst2, opnd_t dst3,
+                       opnd_t dst4, opnd_t src1, opnd_t src2, opnd_t src3, opnd_t src4,
+                       opnd_t src5, opnd_t src6, opnd_t src7)
+{
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
+    instr_t *in = instr_build(dcontext, opcode, 4, 7);
+    instr_set_dst(in, 0, dst1);
+    instr_set_dst(in, 1, dst2);
+    instr_set_dst(in, 2, dst3);
+    instr_set_dst(in, 3, dst4);
+    instr_set_src(in, 0, src1);
+    instr_set_src(in, 1, src2);
+    instr_set_src(in, 2, src3);
+    instr_set_src(in, 3, src4);
+    instr_set_src(in, 4, src5);
+    instr_set_src(in, 5, src6);
+    instr_set_src(in, 6, src7);
+    return in;
+}
+
+instr_t *
+instr_create_5dst_3src(void *drcontext, int opcode, opnd_t dst1, opnd_t dst2, opnd_t dst3,
+                       opnd_t dst4, opnd_t dst5, opnd_t src1, opnd_t src2, opnd_t src3)
+{
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
+    instr_t *in = instr_build(dcontext, opcode, 5, 3);
+    instr_set_dst(in, 0, dst1);
+    instr_set_dst(in, 1, dst2);
+    instr_set_dst(in, 2, dst3);
+    instr_set_dst(in, 3, dst4);
+    instr_set_dst(in, 4, dst5);
+    instr_set_src(in, 0, src1);
+    instr_set_src(in, 1, src2);
+    instr_set_src(in, 2, src3);
+    return in;
+}
+
+instr_t *
+instr_create_5dst_4src(void *drcontext, int opcode, opnd_t dst1, opnd_t dst2, opnd_t dst3,
+                       opnd_t dst4, opnd_t dst5, opnd_t src1, opnd_t src2, opnd_t src3,
+                       opnd_t src4)
+{
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
+    instr_t *in = instr_build(dcontext, opcode, 5, 4);
+    instr_set_dst(in, 0, dst1);
+    instr_set_dst(in, 1, dst2);
+    instr_set_dst(in, 2, dst3);
+    instr_set_dst(in, 3, dst4);
+    instr_set_dst(in, 4, dst5);
+    instr_set_src(in, 0, src1);
+    instr_set_src(in, 1, src2);
+    instr_set_src(in, 2, src3);
+    instr_set_src(in, 3, src4);
+    return in;
+}
+
+instr_t *
+instr_create_5dst_5src(void *drcontext, int opcode, opnd_t dst1, opnd_t dst2, opnd_t dst3,
+                       opnd_t dst4, opnd_t dst5, opnd_t src1, opnd_t src2, opnd_t src3,
+                       opnd_t src4, opnd_t src5)
+{
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
+    instr_t *in = instr_build(dcontext, opcode, 5, 5);
+    instr_set_dst(in, 0, dst1);
+    instr_set_dst(in, 1, dst2);
+    instr_set_dst(in, 2, dst3);
+    instr_set_dst(in, 3, dst4);
+    instr_set_dst(in, 4, dst5);
+    instr_set_src(in, 0, src1);
+    instr_set_src(in, 1, src2);
+    instr_set_src(in, 2, src3);
+    instr_set_src(in, 3, src4);
+    instr_set_src(in, 4, src5);
+    return in;
+}
+
+instr_t *
+instr_create_5dst_8src(void *drcontext, int opcode, opnd_t dst1, opnd_t dst2, opnd_t dst3,
+                       opnd_t dst4, opnd_t dst5, opnd_t src1, opnd_t src2, opnd_t src3,
+                       opnd_t src4, opnd_t src5, opnd_t src6, opnd_t src7, opnd_t src8)
+{
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
+    instr_t *in = instr_build(dcontext, opcode, 5, 8);
+    instr_set_dst(in, 0, dst1);
+    instr_set_dst(in, 1, dst2);
+    instr_set_dst(in, 2, dst3);
+    instr_set_dst(in, 3, dst4);
+    instr_set_dst(in, 4, dst5);
+    instr_set_src(in, 0, src1);
+    instr_set_src(in, 1, src2);
+    instr_set_src(in, 2, src3);
+    instr_set_src(in, 3, src4);
+    instr_set_src(in, 4, src5);
+    instr_set_src(in, 5, src6);
+    instr_set_src(in, 6, src7);
+    instr_set_src(in, 7, src8);
+    return in;
+}
+
+instr_t *
+instr_create_Ndst_Msrc_varsrc(void *drcontext, int opcode, uint fixed_dsts,
                               uint fixed_srcs, uint var_srcs, uint var_ord, ...)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     va_list ap;
     instr_t *in = instr_build(dcontext, opcode, fixed_dsts, fixed_srcs + var_srcs);
     uint i;
-    reg_id_t prev_reg = REG_NULL;
+    DEBUG_EXT_DECLARE(reg_id_t prev_reg = REG_NULL;)
     bool check_order;
     va_start(ap, var_ord);
     for (i = 0; i < fixed_dsts; i++)
@@ -3026,20 +3785,21 @@ instr_create_Ndst_Msrc_varsrc(dcontext_t *dcontext, int opcode, uint fixed_dsts,
                       "instr_create_Ndst_Msrc_varsrc: wrong register order in reglist");
         instr_set_src(in, var_ord + i, opnd_add_flags(opnd, DR_OPND_IN_LIST));
         if (check_order)
-            prev_reg = opnd_get_reg(opnd);
+            DEBUG_EXT_DECLARE(prev_reg = opnd_get_reg(opnd));
     }
     va_end(ap);
     return in;
 }
 
 instr_t *
-instr_create_Ndst_Msrc_vardst(dcontext_t *dcontext, int opcode, uint fixed_dsts,
+instr_create_Ndst_Msrc_vardst(void *drcontext, int opcode, uint fixed_dsts,
                               uint fixed_srcs, uint var_dsts, uint var_ord, ...)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     va_list ap;
     instr_t *in = instr_build(dcontext, opcode, fixed_dsts + var_dsts, fixed_srcs);
     uint i;
-    reg_id_t prev_reg = REG_NULL;
+    DEBUG_EXT_DECLARE(reg_id_t prev_reg = REG_NULL;)
     bool check_order;
     va_start(ap, var_ord);
     for (i = 0; i < MIN(var_ord, fixed_dsts); i++)
@@ -3058,7 +3818,7 @@ instr_create_Ndst_Msrc_vardst(dcontext_t *dcontext, int opcode, uint fixed_dsts,
                       "instr_create_Ndst_Msrc_vardst: wrong register order in reglist");
         instr_set_dst(in, var_ord + i, opnd_add_flags(opnd, DR_OPND_IN_LIST));
         if (check_order)
-            prev_reg = opnd_get_reg(opnd);
+            DEBUG_EXT_DECLARE(prev_reg = opnd_get_reg(opnd));
     }
     va_end(ap);
     return in;
@@ -3277,8 +4037,8 @@ instr_create_save_immed_to_dc_via_reg(dcontext_t *dcontext, reg_id_t basereg, in
 instr_t *
 instr_create_jump_via_dcontext(dcontext_t *dcontext, int offs)
 {
-#    ifdef AARCH64
-    ASSERT_NOT_IMPLEMENTED(false); /* FIXME i#1569 */
+#    if defined(AARCH64) || defined(RISCV64)
+    ASSERT_NOT_IMPLEMENTED(false); /* TODO i#1569 i#3544 */
     return 0;
 #    else
     opnd_t memopnd = opnd_create_dcontext_field(dcontext, offs);
@@ -3296,42 +4056,69 @@ instr_create_restore_dynamo_stack(dcontext_t *dcontext)
     return instr_create_restore_from_dcontext(dcontext, REG_XSP, DSTACK_OFFSET);
 }
 
-/* make sure to keep in sync w/ emit_utils.c's insert_spill_or_restore() */
+/* Make sure to keep in sync w/ emit_utils.c's insert_tls_spill_or_restore(). */
 bool
 instr_raw_is_tls_spill(byte *pc, reg_id_t reg, ushort offs)
 {
 #    ifdef X86
-    ASSERT_NOT_IMPLEMENTED(reg != REG_XAX);
 #        ifdef X64
-    /* match insert_jmp_to_ibl */
+    /* Match the compact user-space RAX addr32 moffs form:
+     *   67 65 48 a3 88 00 00 00        addr32 mov %rax -> %gs:0x88
+     */
+    if (reg == REG_XAX && *pc == ADDR_PREFIX_OPCODE && *(pc + 1) == TLS_SEG_OPCODE &&
+        *(pc + 2) == (REX_PREFIX_BASE_OPCODE | REX_PREFIX_W_OPFLAG) &&
+        *(pc + 3) == MOV_XAX2MEM_OPCODE && *((int *)(pc + 4)) == os_tls_offset(offs))
+        return true;
+    /* Match the sign-extended disp32 form for all registers, including RAX:
+     *   65 48 89 1c 25 88 00 00 00     mov %rbx -> %gs:0x88
+     *   65 48 89 04 25 f8 ff ff ff     mov %rax -> %gs:-0x8
+     */
     if (*pc == TLS_SEG_OPCODE &&
         *(pc + 1) == (REX_PREFIX_BASE_OPCODE | REX_PREFIX_W_OPFLAG) &&
         *(pc + 2) == MOV_REG2MEM_OPCODE &&
         /* 0x1c for ebx, 0x0c for ecx, 0x04 for eax */
         *(pc + 3) == MODRM_BYTE(0 /*mod*/, reg_get_bits(reg), 4 /*rm*/) &&
-        *(pc + 4) == 0x25 && *((uint *)(pc + 5)) == (uint)os_tls_offset(offs))
+        *(pc + 4) == SIB_DISP32 && *((int *)(pc + 5)) == os_tls_offset(offs))
         return true;
-        /* we also check for 32-bit.  we could take in flags and only check for one
-         * version, but we're not worried about false positives.
-         */
+    /* we also check for 32-bit.  we could take in flags and only check for one
+     * version, but we're not worried about false positives.
+     */
 #        endif
-    /* looking for:   67 64 89 1e e4 0e    addr16 mov    %ebx -> %fs:0xee4   */
-    /* ASSUMPTION: when addr16 prefix is used, prefix order is fixed */
+    /* The 32-bit RAX form uses moffs instead of ModRM:
+     *   67 64 a3 e4 0e                 addr16 mov %eax -> %fs:0xee4
+     *   64 a3 e4 0e 00 00              mov %eax -> %fs:0xee4
+     */
+    if (reg == REG_XAX) {
+        return (*pc == ADDR_PREFIX_OPCODE && *(pc + 1) == TLS_SEG_OPCODE &&
+                *(pc + 2) == MOV_XAX2MEM_OPCODE &&
+                *((ushort *)(pc + 3)) == os_tls_offset(offs)) ||
+            (*pc == TLS_SEG_OPCODE && *(pc + 1) == MOV_XAX2MEM_OPCODE &&
+             *((int *)(pc + 2)) == os_tls_offset(offs));
+    }
+    /* ASSUMPTION: when addr16 prefix is used, prefix order is fixed.
+     *   67 64 89 1e e4 0e              addr16 mov %ebx -> %fs:0xee4
+     */
     return (*pc == ADDR_PREFIX_OPCODE && *(pc + 1) == TLS_SEG_OPCODE &&
             *(pc + 2) == MOV_REG2MEM_OPCODE &&
-            /* 0x1e for ebx, 0x0e for ecx, 0x06 for eax */
+            /* 0x1e for ebx, 0x0e for ecx */
             *(pc + 3) == MODRM_BYTE(0 /*mod*/, reg_get_bits(reg), 6 /*rm*/) &&
             *((ushort *)(pc + 4)) == os_tls_offset(offs)) ||
-        /* PR 209709: allow for no addr16 prefix */
+        /* Without addr16 the absolute disp32 uses rm=5, and follows ModRM:
+         *   64 89 1d e4 0e 00 00         mov %ebx -> %fs:0xee4
+         */
         (*pc == TLS_SEG_OPCODE && *(pc + 1) == MOV_REG2MEM_OPCODE &&
-         /* 0x1e for ebx, 0x0e for ecx, 0x06 for eax */
-         *(pc + 2) == MODRM_BYTE(0 /*mod*/, reg_get_bits(reg), 6 /*rm*/) &&
-         *((uint *)(pc + 4)) == os_tls_offset(offs));
+         /* 0x1d for ebx, 0x0d for ecx */
+         *(pc + 2) == MODRM_BYTE(0 /*mod*/, reg_get_bits(reg), 5 /*rm*/) &&
+         *((int *)(pc + 3)) == os_tls_offset(offs));
 #    elif defined(AARCHXX)
-    /* FIXME i#1551, i#1569: NYI on ARM/AArch64 */
+    /* TODO i#1551, i#1569: NYI on ARM/AArch64 */
     ASSERT_NOT_IMPLEMENTED(false);
     return false;
-#    endif /* X86/ARM */
+#    elif defined(RISCV64)
+    /* XXX i#3544: Not implemented. */
+    ASSERT_NOT_IMPLEMENTED(false);
+    return false;
+#    endif /* X86/ARM/RISCV64 */
 }
 
 /* this routine may upgrade a level 1 instr */
@@ -3365,7 +4152,7 @@ instr_check_tls_spill_restore(instr_t *instr, bool *spill, reg_id_t *reg, int *o
 #    ifdef X86
         opnd_is_far_base_disp(memop) && opnd_get_segment(memop) == SEG_TLS &&
         opnd_is_abs_base_disp(memop)
-#    elif defined(AARCHXX)
+#    elif defined(AARCHXX) || defined(RISCV64)
         opnd_is_base_disp(memop) && opnd_get_base(memop) == dr_reg_stolen &&
         opnd_get_index(memop) == DR_REG_NULL
 #    endif
@@ -3420,7 +4207,11 @@ instr_is_tls_xcx_spill(instr_t *instr)
     } else
         return instr_is_tls_spill(instr, REG_ECX, MANGLE_XCX_SPILL_SLOT);
 #    elif defined(AARCHXX)
-    /* FIXME i#1551, i#1569: NYI on ARM/AArch64 */
+    /* TODO i#1551, i#1569: NYI on ARM/AArch64 */
+    ASSERT_NOT_IMPLEMENTED(false);
+    return false;
+#    elif defined(RISCV64)
+    /* XXX i#3544: Not implemented */
     ASSERT_NOT_IMPLEMENTED(false);
     return false;
 #    endif
@@ -3474,7 +4265,7 @@ instr_check_mcontext_spill_restore(dcontext_t *dcontext, instr_t *instr, bool *s
 
 static bool
 instr_is_reg_spill_or_restore_ex(void *drcontext, instr_t *instr, bool DR_only, bool *tls,
-                                 bool *spill, reg_id_t *reg, uint *offs_out)
+                                 bool *spill, reg_id_t *reg, int *offs_out)
 {
     dcontext_t *dcontext = (dcontext_t *)drcontext;
     int check_disp = 0; /* init to satisfy some compilers */
@@ -3483,7 +4274,8 @@ instr_is_reg_spill_or_restore_ex(void *drcontext, instr_t *instr, bool DR_only, 
     if (reg == NULL)
         reg = &myreg;
     if (instr_check_tls_spill_restore(instr, spill, reg, &check_disp)) {
-        if (!DR_only ||
+        /* We do not want to count an mcontext base load as a reg spill/restore. */
+        if ((!DR_only && check_disp != os_tls_offset((ushort)TLS_DCONTEXT_SLOT)) ||
             (reg_spill_tls_offs(*reg) != -1 &&
              /* Mangling may choose to spill registers to a not natural tls offset,
               * e.g. rip-rel mangling will, if rax is used by the instruction. We
@@ -3493,7 +4285,7 @@ instr_is_reg_spill_or_restore_ex(void *drcontext, instr_t *instr, bool DR_only, 
               check_disp == os_tls_offset((ushort)TLS_REG1_SLOT) ||
               check_disp == os_tls_offset((ushort)TLS_REG2_SLOT) ||
               check_disp == os_tls_offset((ushort)TLS_REG3_SLOT)
-#    ifdef AARCHXX
+#    if defined(AARCHXX) || defined(RISCV64)
               || check_disp == os_tls_offset((ushort)TLS_REG4_SLOT) ||
               check_disp == os_tls_offset((ushort)TLS_REG5_SLOT)
 #    endif
@@ -3524,13 +4316,18 @@ bool
 instr_is_reg_spill_or_restore(void *drcontext, instr_t *instr, bool *tls, bool *spill,
                               reg_id_t *reg, uint *offs)
 {
-    return instr_is_reg_spill_or_restore_ex(drcontext, instr, false, tls, spill, reg,
-                                            offs);
+    int signed_offs;
+    bool found = instr_is_reg_spill_or_restore_ex(drcontext, instr, false, tls, spill,
+                                                  reg, &signed_offs);
+    /* Preserve the public uint API's displacement bits, including negative offsets. */
+    if (found && offs != NULL)
+        *offs = (uint)signed_offs;
+    return found;
 }
 
 bool
 instr_is_DR_reg_spill_or_restore(void *drcontext, instr_t *instr, bool *tls, bool *spill,
-                                 reg_id_t *reg, uint *offs)
+                                 reg_id_t *reg, int *offs)
 {
     return instr_is_reg_spill_or_restore_ex(drcontext, instr, true, tls, spill, reg,
                                             offs);
@@ -3605,12 +4402,16 @@ move_mm_reg_opcode(bool aligned16, bool aligned32)
         return (aligned16 ? OP_movaps : OP_movups);
     }
 #    elif defined(ARM)
-    /* FIXME i#1551: which one we should return, OP_vmov, OP_vldr, or OP_vstr? */
+    /* XXX i#1551: which one we should return, OP_vmov, OP_vldr, or OP_vstr? */
     return OP_vmov;
 #    elif defined(AARCH64)
-    ASSERT_NOT_IMPLEMENTED(false); /* FIXME i#1569 */
+    ASSERT_NOT_IMPLEMENTED(false); /* TODO i#1569 */
     return 0;
-#    endif /* X86/ARM */
+#    elif defined(RISCV64)
+    /* XXX i#3544: Not implemented */
+    ASSERT_NOT_IMPLEMENTED(false);
+    return 0;
+#    endif /* X86/ARM/RISCV64 */
 }
 
 uint

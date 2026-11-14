@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2015-2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2015-2023 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -30,25 +30,49 @@
  * DAMAGE.
  */
 
-#include <assert.h>
-#include <iostream>
-#include <iomanip>
 #include "caching_device_stats.h"
 
+#include <assert.h>
+#include <stdint.h>
+#ifdef HAS_ZLIB
+#    include <zlib.h>
+#endif
+
+#include <inttypes.h>
+#include <iomanip>
+#include <iostream>
+#include <locale>
+#include <map>
+#include <string>
+#include <utility>
+
+#include "memref.h"
+#include "options.h"
+#include "caching_device_block.h"
+#include "trace_entry.h"
+
+namespace dynamorio {
+namespace drmemtrace {
+
 caching_device_stats_t::caching_device_stats_t(const std::string &miss_file,
-                                               bool warmup_enabled, bool is_coherent)
+                                               int block_size, bool warmup_enabled,
+                                               bool is_coherent)
     : success_(true)
     , num_hits_(0)
     , num_misses_(0)
+    , num_compulsory_misses_(0)
     , num_child_hits_(0)
     , num_inclusive_invalidates_(0)
     , num_coherence_invalidates_(0)
+    , num_exclusive_invalidates_(0)
     , num_hits_at_reset_(0)
     , num_misses_at_reset_(0)
     , num_child_hits_at_reset_(0)
     , warmup_enabled_(warmup_enabled)
     , is_coherent_(is_coherent)
+    , access_count_(block_size)
     , file_(nullptr)
+    , caching_device_(nullptr)
 {
     if (miss_file.empty()) {
         dump_misses_ = false;
@@ -64,6 +88,17 @@ caching_device_stats_t::caching_device_stats_t(const std::string &miss_file,
         } else
             dump_misses_ = true;
     }
+
+    stats_map_.emplace(metric_name_t::HITS, num_hits_);
+    stats_map_.emplace(metric_name_t::MISSES, num_misses_);
+    stats_map_.emplace(metric_name_t::HITS_AT_RESET, num_hits_at_reset_);
+    stats_map_.emplace(metric_name_t::MISSES_AT_RESET, num_misses_at_reset_);
+    stats_map_.emplace(metric_name_t::COMPULSORY_MISSES, num_compulsory_misses_);
+    stats_map_.emplace(metric_name_t::CHILD_HITS_AT_RESET, num_child_hits_at_reset_);
+    stats_map_.emplace(metric_name_t::CHILD_HITS, num_child_hits_);
+    stats_map_.emplace(metric_name_t::INCLUSIVE_INVALIDATES, num_inclusive_invalidates_);
+    stats_map_.emplace(metric_name_t::COHERENCE_INVALIDATES, num_coherence_invalidates_);
+    stats_map_.emplace(metric_name_t::EXCLUSIVE_INVALIDATES, num_exclusive_invalidates_);
 }
 
 caching_device_stats_t::~caching_device_stats_t()
@@ -89,6 +124,8 @@ caching_device_stats_t::access(const memref_t &memref, bool hit,
         num_misses_++;
         if (dump_misses_)
             dump_miss(memref);
+
+        check_compulsory_miss(memref.data.addr);
     }
 }
 
@@ -102,10 +139,24 @@ caching_device_stats_t::child_access(const memref_t &memref, bool hit,
 }
 
 void
+caching_device_stats_t::check_compulsory_miss(addr_t addr)
+{
+    auto lookup_pair = access_count_.lookup(addr);
+
+    // If the address has never been accessed insert proper bound into access_count_
+    // and count it as a compulsory miss.
+    if (!lookup_pair.first) {
+        num_compulsory_misses_++;
+        access_count_.insert(addr, lookup_pair.second);
+    }
+}
+
+void
 caching_device_stats_t::dump_miss(const memref_t &memref)
 {
     addr_t pc, addr;
-    if (type_is_instr(memref.data.type))
+    memref_pid_t pid;
+    if (type_is_instr(memref.instr.type))
         pc = memref.instr.addr;
     else { // data ref: others shouldn't get here
         assert(type_is_prefetch(memref.data.type) ||
@@ -114,10 +165,15 @@ caching_device_stats_t::dump_miss(const memref_t &memref)
         pc = memref.data.pc;
     }
     addr = memref.data.addr;
+    pid = memref.data.pid;
+
+    // XXX: This writing method to the same file from multiple processes is racy.
+    // It works most of the time but consider using a directory with individual files
+    // per process as a future safer alternative.
 #ifdef HAS_ZLIB
-    gzprintf(file_, "0x%zx,0x%zx\n", pc, addr);
+    gzprintf(file_, "%" PRId64 ",0x%zx,0x%zx\n", pid, pc, addr);
 #else
-    fprintf(file_, "0x%zx,0x%zx\n", pc, addr);
+    fprintf(file_, "%" PRId64 ",0x%zx,0x%zx\n", pid, pc, addr);
 #endif
 }
 
@@ -137,17 +193,20 @@ caching_device_stats_t::print_counts(std::string prefix)
               << std::right << num_hits_ << std::endl;
     std::cerr << prefix << std::setw(18) << std::left << "Misses:" << std::setw(20)
               << std::right << num_misses_ << std::endl;
+    std::cerr << prefix << std::setw(18) << std::left
+              << "Compulsory misses:" << std::setw(20) << std::right
+              << num_compulsory_misses_ << std::endl;
     if (is_coherent_) {
         std::cerr << prefix << std::setw(21) << std::left
                   << "Parent invalidations:" << std::setw(17) << std::right
-                  << num_inclusive_invalidates_ << std::endl;
+                  << num_inclusive_invalidates_ + num_exclusive_invalidates_ << std::endl;
         std::cerr << prefix << std::setw(20) << std::left
                   << "Write invalidations:" << std::setw(18) << std::right
                   << num_coherence_invalidates_ << std::endl;
     } else {
         std::cerr << prefix << std::setw(18) << std::left
                   << "Invalidations:" << std::setw(20) << std::right
-                  << num_inclusive_invalidates_ << std::endl;
+                  << num_inclusive_invalidates_ + num_exclusive_invalidates_ << std::endl;
     }
 }
 
@@ -202,9 +261,11 @@ caching_device_stats_t::reset()
     num_child_hits_at_reset_ = num_child_hits_;
     num_hits_ = 0;
     num_misses_ = 0;
+    num_compulsory_misses_ = 0;
     num_child_hits_ = 0;
     num_inclusive_invalidates_ = 0;
     num_coherence_invalidates_ = 0;
+    num_exclusive_invalidates_ = 0;
 }
 
 void
@@ -214,5 +275,10 @@ caching_device_stats_t::invalidate(invalidation_type_t invalidation_type)
         num_inclusive_invalidates_++;
     } else if (invalidation_type == INVALIDATION_COHERENCE) {
         num_coherence_invalidates_++;
+    } else if (invalidation_type == INVALIDATION_EXCLUSIVE) {
+        num_exclusive_invalidates_++;
     }
 }
+
+} // namespace drmemtrace
+} // namespace dynamorio

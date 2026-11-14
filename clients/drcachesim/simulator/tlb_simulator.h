@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2015-2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2015-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -34,13 +34,20 @@
  */
 
 #ifndef _TLB_SIMULATOR_H_
-#define _TLB_SIMULATOR_H_ 1
+#define _TLB_SIMULATOR_H_
 
+#include <string>
 #include <unordered_map>
+
+#include "cache_replacement_policy.h"
+#include "memref.h"
 #include "simulator.h"
+#include "tlb.h"
 #include "tlb_simulator_create.h"
 #include "tlb_stats.h"
-#include "tlb.h"
+
+namespace dynamorio {
+namespace drmemtrace {
 
 class tlb_simulator_t : public simulator_t {
 public:
@@ -50,12 +57,10 @@ public:
     process_memref(const memref_t &memref) override;
     bool
     print_results() override;
+    std::string
+    create_v2p_from_file(std::istream &v2p_file) override;
 
 protected:
-    // Create a tlb_t object with a specific replacement policy.
-    virtual tlb_t *
-    create_tlb(std::string policy);
-
     tlb_simulator_knobs_t knobs_;
 
     // Each CPU core contains a L1 ITLB, L1 DTLB and L2 TLB.
@@ -64,5 +69,8 @@ protected:
     tlb_t **dtlbs_;
     tlb_t **lltlbs_;
 };
+
+} // namespace drmemtrace
+} // namespace dynamorio
 
 #endif /* _TLB_SIMULATOR_H_ */

@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2016 Google, Inc.  All rights reserved.
+ * Copyright (c) 2016-2022 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -33,18 +33,11 @@
 /* Tests the combination of drreg and drutil, along with other inserted control flow */
 
 #include "dr_api.h"
+#include "client_tools.h"
 #include "drmgr.h"
 #include "drreg.h"
 #include "drutil.h"
 #include <string.h> /* memcpy */
-
-#define CHECK(x, msg)                        \
-    do {                                     \
-        if (!(x)) {                          \
-            dr_fprintf(STDERR, "%s\n", msg); \
-            dr_abort();                      \
-        }                                    \
-    } while (0);
 
 static bool verbose;
 
@@ -52,7 +45,7 @@ static void
 event_exit(void);
 static dr_emit_flags_t
 event_bb_app2app(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
-                 bool translating, OUT void **user_data);
+                 bool translating, DR_PARAM_OUT void **user_data);
 static dr_emit_flags_t
 event_bb_analysis(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
                   bool translating, void *user_data);
@@ -75,7 +68,7 @@ dr_init(client_id_t id)
     res = drreg_init(&ops);
     CHECK(res == DRREG_SUCCESS, "drreg init failed");
     drutil_init();
-    dr_register_exit_event(event_exit);
+    drmgr_register_exit_event(event_exit);
 
     ok = drmgr_register_bb_instrumentation_ex_event(event_bb_app2app, event_bb_analysis,
                                                     event_bb_insert, NULL, &priority);
@@ -96,7 +89,7 @@ event_exit(void)
 
 static dr_emit_flags_t
 event_bb_app2app(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
-                 bool translating, OUT void **user_data)
+                 bool translating, DR_PARAM_OUT void **user_data)
 {
     bool *expanded = (bool *)dr_thread_alloc(drcontext, sizeof(bool));
     *user_data = (void *)expanded;

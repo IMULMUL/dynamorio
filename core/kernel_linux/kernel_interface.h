@@ -1,0 +1,184 @@
+/* **********************************************************
+ * Copyright (c) 2026 Google, Inc.  All rights reserved.
+ * Copyright (c) 2013 Peter Feiner.  All rights reserved.
+ * **********************************************************/
+
+/*
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * * Redistributions of source code must retain the above copyright notice,
+ *   this list of conditions and the following disclaimer.
+ *
+ * * Redistributions in binary form must reproduce the above copyright notice,
+ *   this list of conditions and the following disclaimer in the documentation
+ *   and/or other materials provided with the distribution.
+ *
+ * * Neither the name of Google, Inc. nor the names of its contributors may be
+ *   used to endorse or promote products derived from this software without
+ *   specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL VMWARE, INC. OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+ * DAMAGE.
+ */
+
+#ifndef _KERNEL_INTERFACE_H_
+#define _KERNEL_INTERFACE_H_
+
+#include <linux/types.h>
+
+#define KERNEL_MEMPROT_READ 0x1
+#define KERNEL_MEMPROT_WRITE 0x2
+#define KERNEL_MEMPROT_EXEC 0x4
+
+typedef struct {
+    unsigned char *base;
+    size_t size;
+    unsigned int prot; /* KERNEL_MEMPROT_* */
+} kernel_memory_region_t;
+
+typedef void (*kernel_memory_region_callback_t)(const kernel_memory_region_t *region,
+                                                void *arg);
+
+int
+kernel_module_init(size_t dr_heap_size);
+
+void
+kernel_module_exit(void);
+
+size_t
+kernel_get_heap_size(void);
+
+void *
+kernel_allocate_heap(size_t size);
+
+void *
+kernel_find_symbol(const char *name, size_t *size);
+
+int
+kernel_get_cpu_id(void);
+
+int
+kernel_get_online_processor_count(void);
+
+/* Returns the timestamp counter (TSC on x86, CNTVCT_EL0 on arm64) frequency in kHz
+ * (i.e., ticks per millisecond).  Returns 0 if the frequency is unknown.
+ */
+unsigned int
+kernel_get_timestamp_counter_khz(void);
+
+/* Reports the per-CPU buffer capacity and alignment in bytes. Both output pointers
+ * must be non-NULL. Does not require preemption to be disabled.
+ */
+void
+kernel_get_cpu_local_state_layout(size_t *size, size_t *alignment);
+
+/* Returns the current CPU's buffer as an ordinary pointer. The caller must keep
+ * preemption disabled for the entire duration of access through the returned pointer.
+ * Storage is initially zero and remains allocated until module unload.
+ * This function never returns NULL: the module loader allocates dr_cpu_local_storage
+ * before module initialization, and fails the module load if it cannot allocate.
+ */
+void *
+kernel_get_cpu_local_state(void);
+
+/* Returns the gs-relative displacement of the buffer returned by
+ * kernel_get_cpu_local_state(). That is its raw __percpu address on x86-64 SMP.
+ */
+int
+kernel_get_cpu_local_state_segment_offset(void);
+
+size_t
+kernel_get_page_size(void);
+
+void *
+kernel_get_image_start(void);
+
+void *
+kernel_get_image_end(void);
+
+char *
+kernel_get_module_name(void);
+
+void *
+kernel_get_module_text_start(void);
+
+void *
+kernel_get_module_text_end(void);
+
+/* Calls |callback| for each non-empty core memory region of this module (text, data,
+ * rodata, ro_after_init).
+ */
+void
+kernel_walk_module_regions(kernel_memory_region_callback_t callback, void *arg);
+
+/* Walks the present pages between the kernel image base and the end of the modules area,
+ * excluding DR's own heap. Calls |callback| once for each maximal run of virtually
+ * contiguous pages that have identical KERNEL_MEMPROT_* protection.
+ */
+void
+kernel_walk_code_regions(kernel_memory_region_callback_t callback, void *arg);
+
+/* Returns whether the |size| bytes at |addr| can be read without faulting.  Handles both
+ * kernel and user addresses.  A user address is interpreted in the current task's
+ * address space.  Acquires no locks and never sleeps, so it is safe to call in any
+ * context.  A zero |size| returns true.
+ */
+bool
+kernel_is_readable_without_fault(const void *addr, size_t size);
+
+/* Copies up to |size| bytes from |addr| to |out| without faulting and returns the
+ * number of bytes copied.  Handles both kernel and user addresses.  A user address is
+ * interpreted in the current task's address space.  Acquires no locks and never sleeps.
+ */
+size_t
+kernel_read_without_fault(const void *addr, size_t size, void *out);
+
+/* Calls |fn|(|arg|) once on each online CPU, sequentially in ascending CPU ID order.
+ * Stops at the first nonzero return value and returns it, and returns 0 if every call
+ * succeeded. Each call runs in a kernel worker thread bound to that CPU.
+ * This function sleeps and must be called from sleepable context.
+ */
+int
+kernel_run_on_each_online_cpu(int (*fn)(void *), void *arg);
+
+unsigned int
+kernel_query_time_seconds(void);
+
+unsigned long long
+kernel_query_time_nanos(void);
+
+__attribute__((format(__printf__, 1, 2))) void
+kernel_printk(const char *fmt, ...);
+
+__attribute__((noreturn)) void
+kernel_panic(const char *message);
+
+#define KERNEL_ENV_NAME_MAX 64
+#define KERNEL_ENV_VALUE_MAX 2048
+
+/* Sets the environment variable |name| to |value|, overwriting the value of any existing
+ * entry with the same name. Returns 0 on success, -EINVAL for a NULL/empty name, a name
+ * containing '=', or a NULL value, -E2BIG if the name or value exceeds the maximum
+ * length, and -ENOSPC if the table is full and no entry with |name| exists.
+ */
+int
+kernel_setenv(const char *name, const char *value);
+
+/* Returns the value of the environment variable |name|, or NULL if it is not set.
+ * Malformed names (NULL, empty, or containing '=') also return NULL, mirroring
+ * our_getenv() in core/unix/os.c.
+ */
+const char *
+kernel_getenv(const char *name);
+
+#endif /* _KERNEL_INTERFACE_H_ */

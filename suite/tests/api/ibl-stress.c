@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2018 Google, Inc.  All rights reserved.
+ * Copyright (c) 2018-2023 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -107,6 +107,7 @@ generate_stack_push(instrlist_t *ilist, byte *encode_pc, reg_id_t reg_1, reg_id_
         append_ilist(ilist, encode_pc,
                      XINST_CREATE_sub(GLOBAL_DCONTEXT, opnd_create_reg(DR_REG_XSP),
                                       OPND_CREATE_INT(16)));
+    return encode_pc;
 }
 
 static byte *
@@ -121,6 +122,7 @@ generate_stack_pop(instrlist_t *ilist, byte *encode_pc, reg_id_t reg_1, reg_id_t
         append_ilist(ilist, encode_pc,
                      XINST_CREATE_add(GLOBAL_DCONTEXT, opnd_create_reg(DR_REG_XSP),
                                       OPND_CREATE_INT(16)));
+    return encode_pc;
 }
 #endif
 
@@ -249,7 +251,7 @@ generate_indirect_jump(instrlist_t *ilist, drvector_t *tags, byte *encode_pc)
 }
 
 static void
-generate_code()
+generate_code(void)
 {
     const size_t sequence_size = IF_X86_ELSE(73, 340); /* Measured manually. */
     /* The final return takes up 1 byte. */

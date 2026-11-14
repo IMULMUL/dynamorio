@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2017 Google, Inc.  All rights reserved.
+ * Copyright (c) 2017-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -33,9 +33,12 @@
 /* histogram tool creation */
 
 #ifndef _HISTOGRAM_CREATE_H_
-#define _HISTOGRAM_CREATE_H_ 1
+#define _HISTOGRAM_CREATE_H_
 
 #include "analysis_tool.h"
+
+namespace dynamorio {
+namespace drmemtrace {
 
 /**
  * @file drmemtrace/histogram_create.h
@@ -50,5 +53,8 @@
 analysis_tool_t *
 histogram_tool_create(unsigned int line_size = 64, unsigned int report_top = 10,
                       unsigned int verbose = 0);
+
+} // namespace drmemtrace
+} // namespace dynamorio
 
 #endif /* _HISTOGRAM_CREATE_H_ */

@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2013-2015 Google, Inc.  All rights reserved.
+ * Copyright (c) 2013-2022 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -33,17 +33,10 @@
 /* Tests the drx extension with drmgr */
 
 #include "dr_api.h"
+#include "client_tools.h"
 #include "drmgr.h"
 #include "drreg.h"
 #include "drx.h"
-
-#define CHECK(x, msg)                                                                \
-    do {                                                                             \
-        if (!(x)) {                                                                  \
-            dr_fprintf(STDERR, "CHECK failed %s:%d: %s\n", __FILE__, __LINE__, msg); \
-            dr_abort();                                                              \
-        }                                                                            \
-    } while (0);
 
 static uint counterA;
 static uint counterB;
@@ -107,7 +100,7 @@ dr_init(client_id_t id)
     CHECK(ok, "drx_init failed");
     res = drreg_init(&ops);
     CHECK(res == DRREG_SUCCESS, "drreg_init failed");
-    dr_register_exit_event(event_exit);
+    drmgr_register_exit_event(event_exit);
     if (!drmgr_register_bb_instrumentation_event(NULL, event_app_instruction, NULL))
         DR_ASSERT(false);
 }

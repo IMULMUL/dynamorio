@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2015 Google, Inc.  All rights reserved.
+ * Copyright (c) 2015-2023 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -33,7 +33,10 @@
 /* optionlist: generates usage info for documentation */
 
 #include <iostream>
-#include "common/options.h"
+#include "options.h"
+
+using ::dynamorio::droption::droption_parser_t;
+using ::dynamorio::droption::DROPTION_SCOPE_ALL;
 
 int
 main(int argc, const char *argv[])

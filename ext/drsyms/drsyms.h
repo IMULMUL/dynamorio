@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2014 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2009-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -47,7 +47,7 @@
  */
 
 #ifndef _DRSYMS_H_
-#define _DRSYMS_H_ 1
+#define _DRSYMS_H_
 
 /**
  * @file drsyms.h
@@ -70,7 +70,7 @@ extern "C" {
 /**
  * \addtogroup drsyms Symbol Access Library
  */
-/*@{*/ /* begin doxygen group */
+/**@{*/ /* begin doxygen group */
 
 /** Success code for each DRSyms operation */
 typedef enum {
@@ -722,7 +722,7 @@ DR_EXPORT
 drsym_error_t
 drsym_enumerate_lines(const char *modpath, drsym_enumerate_lines_cb callback, void *data);
 
-/*@}*/ /* end doxygen group */
+/**@}*/ /* end doxygen group */
 
 #ifdef __cplusplus
 }

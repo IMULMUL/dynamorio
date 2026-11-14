@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2017 Google, Inc.  All rights reserved.
+ * Copyright (c) 2017-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -33,11 +33,40 @@
 /* compressed_file_reader: reads compressed files containing memory traces. */
 
 #ifndef _COMPRESSED_FILE_READER_H_
-#define _COMPRESSED_FILE_READER_H_ 1
+#define _COMPRESSED_FILE_READER_H_
 
 #include <zlib.h>
-#include "file_reader.h"
 
-typedef file_reader_t<gzFile> compressed_file_reader_t;
+#include "file_reader.h"
+#include "record_file_reader.h"
+#include "trace_entry.h"
+
+namespace dynamorio {
+namespace drmemtrace {
+
+struct gzip_reader_t {
+    gzip_reader_t()
+        : file(nullptr) {};
+    explicit gzip_reader_t(gzFile file)
+        : file(file)
+    {
+    }
+    gzFile file;
+    // Adding our own buffering to gzFile provides an 18% speedup.  We use the same
+    // buffer size as zipfile_reader_t.
+    // If more readers want the same buffering we may want to bake this into the shared
+    // template class to avoid duplication: but some readers have good buffering
+    // already.
+    trace_entry_t buf[4096];
+    trace_entry_t *cur_buf = buf;
+    trace_entry_t *max_buf = buf;
+};
+
+typedef file_reader_t<gzip_reader_t> compressed_file_reader_t;
+typedef dynamorio::drmemtrace::record_file_reader_t<gzip_reader_t>
+    compressed_record_file_reader_t;
+
+} // namespace drmemtrace
+} // namespace dynamorio
 
 #endif /* _COMPRESSED_FILE_READER_H_ */

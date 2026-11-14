@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2019 Google, Inc.  All rights reserved.
+ * Copyright (c) 2019-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2003-2005 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -190,7 +190,7 @@ services_init()
     if (services_initialized)
         return ERROR_ALREADY_INITIALIZED;
 
-    /* FIXME: probably only need read access, except
+    /* XXX: probably only need read access, except
      *  for change config...but that should just open its own
      *  handle. */
     scmdb = OpenSCManager(NULL, NULL, SC_MANAGER_ALL_ACCESS);
@@ -389,8 +389,8 @@ set_service_restart_type(WCHAR *svcname, BOOL disable)
     /* if this buffer size is exceeded then the QueryServiceConfig
      *  will fail with ERROR_INSUFFICIENT_BUFFER, in which case we can
      *  be sure that someone mucked our settings. */
-    BYTE current_actions_buffer[sizeof(SERVICE_FAILURE_ACTIONS) + 5 * sizeof(SC_ACTION)] =
-        { 0 };
+    BYTE current_actions_buffer[sizeof(SERVICE_FAILURE_ACTIONS) +
+                                5 * sizeof(SC_ACTION)] = { 0 };
     SERVICE_FAILURE_ACTIONS *current_actions =
         (SERVICE_FAILURE_ACTIONS *)&current_actions_buffer;
     DWORD res = ERROR_SUCCESS, needed;
@@ -534,7 +534,7 @@ main()
     DO_ASSERT(type == get_service_start_type(sh1));
 
 #    if 0
-    /* FIXME: should have a usable test here */
+    /* XXX: should have a usable test here */
     sh1 = get_service_by_name(L"TomcatSC");
     DO_ASSERT(sh1 != INVALID_SERVICE_HANDLE);
     sh2 = get_service_by_name(L"MySQL");

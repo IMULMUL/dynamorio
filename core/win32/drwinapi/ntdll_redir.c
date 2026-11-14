@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2020 Google, Inc.   All rights reserved.
+ * Copyright (c) 2011-2026 Google, Inc.   All rights reserved.
  * Copyright (c) 2009-2010 Derek Bruening   All rights reserved.
  * **********************************************************/
 
@@ -53,7 +53,7 @@ static strhash_table_t *ntdll_win7_table;
  * of stuff to emulate to really be transparent: we're going to add it
  * incrementally as needed, now that we have the infrastructure.
  *
- * FIXME i#235: redirect the rest of the Ldr* routines.  For
+ * XXX i#235: redirect the rest of the Ldr* routines.  For
  * GetModuleHandle: why does kernel32 seem to do a lot of work?
  * BasepGetModuleHandleExW => RtlPcToFileHeader, RtlComputePrivatizedDllName_U
  * where should we intercept?  why isn't it calling LdrGetDllHandle{,Ex}?
@@ -110,7 +110,7 @@ static const redirect_import_t redirect_ntdll[] = {
     { "RtlFreeUnicodeString", (app_pc)redirect_RtlFreeUnicodeString },
     { "RtlFreeAnsiString", (app_pc)redirect_RtlFreeAnsiString },
     { "RtlFreeOemString", (app_pc)redirect_RtlFreeOemString },
-#if 0 /* FIXME i#235: redirect these: */
+#if 0 /* XXX i#235: redirect these: */
     {"RtlSetUserValueHeap",            (app_pc)redirect_RtlSetUserValueHeap},
     {"RtlGetUserInfoHeap",             (app_pc)redirect_RtlGetUserInfoHeap},
 #endif
@@ -243,7 +243,7 @@ HANDLE WINAPI
 redirect_RtlCreateHeap(ULONG flags, void *base, size_t reserve_sz, size_t commit_sz,
                        void *lock, void *params)
 {
-    if (IF_CLIENT_INTERFACE_ELSE(INTERNAL_OPTION(privlib_privheap), true)) {
+    if (INTERNAL_OPTION(privlib_privheap)) {
         /* We don't want to waste space by letting a Heap be created
          * and not used so we nop this.  We need to return something
          * here, and distinguish a nop-ed from real in Destroy, so we
@@ -261,18 +261,14 @@ redirect_heap_call(HANDLE heap)
     ASSERT(!dynamo_initialized || dynamo_exited || standalone_library ||
            get_thread_private_dcontext() == NULL /*thread exiting*/ ||
            !os_using_app_state(get_thread_private_dcontext()));
-#ifdef CLIENT_INTERFACE
     if (!INTERNAL_OPTION(privlib_privheap))
         return false;
-#endif
     /* either default heap, or one whose creation we intercepted */
     return (
-#ifdef CLIENT_INTERFACE
         /* check both current and private: should be same, but
          * handle case where didn't swap
          */
         heap == get_private_peb()->ProcessHeap ||
-#endif
         heap == get_peb(NT_CURRENT_PROCESS)->ProcessHeap ||
         is_dynamo_address((byte *)heap));
 }
@@ -310,7 +306,7 @@ wrapped_dr_alloc(ULONG flags, SIZE_T size)
         ASSERT_NOT_REACHED();
         return NULL;
     }
-    if (TEST(HEAP_ZERO_MEMORY, flags))
+    if (TESTANY(HEAP_ZERO_MEMORY, flags))
         memset(mem, 0, size);
     return mem;
 }
@@ -348,7 +344,7 @@ RtlReAllocateHeap(HANDLE heap, ULONG flags, PVOID ptr, SIZE_T size);
 void *WINAPI
 redirect_RtlReAllocateHeap(HANDLE heap, ULONG flags, byte *ptr, SIZE_T size)
 {
-    /* FIXME i#235: on x64 using dbghelp, SymLoadModule64 calls
+    /* XXX i#235: on x64 using dbghelp, SymLoadModule64 calls
      * kernel32!CreateFileW which calls
      * ntdll!RtlDosPathNameToRelativeNtPathName_U_WithStatus which calls
      * ntdll!RtlpDosPathNameToRelativeNtPathName_Ustr which directly calls
@@ -362,7 +358,7 @@ redirect_RtlReAllocateHeap(HANDLE heap, ULONG flags, byte *ptr, SIZE_T size)
         return NULL;
     if (redirect_heap_call(heap) && is_dynamo_address(ptr)) {
         byte *buf = NULL;
-        if (TEST(HEAP_REALLOC_IN_PLACE_ONLY, flags)) {
+        if (TESTANY(HEAP_REALLOC_IN_PLACE_ONLY, flags)) {
             ASSERT_NOT_IMPLEMENTED(false);
             return NULL;
         }
@@ -403,7 +399,7 @@ BOOL WINAPI
 redirect_RtlFreeHeap(HANDLE heap, ULONG flags, byte *ptr)
 {
     if (redirect_heap_call(heap) && is_dynamo_address(ptr) /*see above*/) {
-        ASSERT(IF_CLIENT_INTERFACE_ELSE(INTERNAL_OPTION(privlib_privheap), true));
+        ASSERT(INTERNAL_OPTION(privlib_privheap));
         if (ptr != NULL) {
             LOG(GLOBAL, LOG_LOADER, 2, "%s " PFX "\n", __FUNCTION__, ptr);
             wrapped_dr_free(ptr);
@@ -421,7 +417,7 @@ SIZE_T WINAPI
 redirect_RtlSizeHeap(HANDLE heap, ULONG flags, byte *ptr)
 {
     if (redirect_heap_call(heap) && is_dynamo_address(ptr) /*see above*/) {
-        ASSERT(IF_CLIENT_INTERFACE_ELSE(INTERNAL_OPTION(privlib_privheap), true));
+        ASSERT(INTERNAL_OPTION(privlib_privheap));
         if (ptr != NULL)
             return wrapped_dr_size(ptr);
         else
@@ -561,12 +557,11 @@ redirect_RtlInitializeCriticalSectionEx(RTL_CRITICAL_SECTION *crit, ULONG spinco
      * (xref Dr. Memory i#333).
      */
     LOG(GLOBAL, LOG_LOADER, 2, "%s: " PFX "\n", __FUNCTION__, crit);
-    IF_CLIENT_INTERFACE(
-        ASSERT(get_own_teb()->ProcessEnvironmentBlock == get_private_peb() ||
-               standalone_library));
+    ASSERT(get_own_teb()->ProcessEnvironmentBlock == get_private_peb() ||
+           standalone_library);
     if (crit == NULL)
         return STATUS_INVALID_PARAMETER;
-    if (TEST(RTL_CRITICAL_SECTION_FLAG_STATIC_INIT, flags)) {
+    if (TESTANY(RTL_CRITICAL_SECTION_FLAG_STATIC_INIT, flags)) {
         /* We're supposed to use a memory pool but it's not
          * clear whether it really matters so we ignore this flag.
          */
@@ -580,7 +575,7 @@ redirect_RtlInitializeCriticalSectionEx(RTL_CRITICAL_SECTION *crit, ULONG spinco
     else
         crit->SpinCount = (spincount & ~0x80000000);
 
-    if (TEST(RTL_CRITICAL_SECTION_FLAG_NO_DEBUG_INFO, flags))
+    if (TESTANY(RTL_CRITICAL_SECTION_FLAG_NO_DEBUG_INFO, flags))
         crit->DebugInfo = NULL;
     else {
         crit->DebugInfo = wrapped_dr_alloc(0, sizeof(*crit->DebugInfo));
@@ -600,9 +595,8 @@ redirect_RtlDeleteCriticalSection(RTL_CRITICAL_SECTION *crit)
 {
     GET_NTDLL(RtlDeleteCriticalSection, (RTL_CRITICAL_SECTION * crit));
     LOG(GLOBAL, LOG_LOADER, 2, "%s: " PFX "\n", __FUNCTION__, crit);
-    IF_CLIENT_INTERFACE(
-        ASSERT(get_own_teb()->ProcessEnvironmentBlock == get_private_peb() ||
-               standalone_library));
+    ASSERT(get_own_teb()->ProcessEnvironmentBlock == get_private_peb() ||
+           standalone_library);
     if (crit == NULL)
         return STATUS_INVALID_PARAMETER;
     if (crit->DebugInfo != NULL) {
@@ -772,8 +766,10 @@ redirect_NtUnmapViewOfSection(HANDLE process_handle, PVOID base_address)
 }
 
 NTSTATUS NTAPI
-redirect_LdrGetProcedureAddress(IN HMODULE modbase, IN PANSI_STRING func OPTIONAL,
-                                IN WORD ordinal OPTIONAL, OUT PVOID *addr)
+redirect_LdrGetProcedureAddress(DR_PARAM_IN HMODULE modbase,
+                                DR_PARAM_IN PANSI_STRING func OPTIONAL,
+                                DR_PARAM_IN WORD ordinal OPTIONAL,
+                                DR_PARAM_OUT PVOID *addr)
 {
     /* We ignore ordinal.  Our target is private kernel32's GetProcAddress
      * invoked dynamically so we didn't redirect it directly, and it
@@ -792,8 +788,9 @@ redirect_LdrGetProcedureAddress(IN HMODULE modbase, IN PANSI_STRING func OPTIONA
 }
 
 NTSTATUS NTAPI
-redirect_LdrLoadDll(IN PWSTR path OPTIONAL, IN PULONG characteristics OPTIONAL,
-                    IN PUNICODE_STRING name, OUT PVOID *handle)
+redirect_LdrLoadDll(DR_PARAM_IN PWSTR path OPTIONAL,
+                    DR_PARAM_IN PULONG characteristics OPTIONAL,
+                    DR_PARAM_IN PUNICODE_STRING name, DR_PARAM_OUT PVOID *handle)
 {
     app_pc res = NULL;
     char buf[MAXIMUM_PATH];
@@ -875,7 +872,7 @@ ntdll_redir_fls_init(PEB *app_peb, PEB *private_peb)
         UNPROTECTED, 0);
 
     /* Start with empty values, regardless of what app libs did prior to us
-     * taking over.  FIXME: if we ever have attach will have to verify this:
+     * taking over.  XXX: if we ever have attach will have to verify this:
      * can priv libs always live in their own universe that starts empty?
      */
     private_peb->FlsListHead.Flink = (LIST_ENTRY *)&private_peb->FlsListHead;
@@ -901,7 +898,7 @@ ntdll_redir_fls_exit(PEB *private_peb)
 void
 ntdll_redir_fls_thread_exit(PPVOID fls_data_ptr)
 {
-    PEB *peb = IF_CLIENT_INTERFACE_ELSE(get_private_peb(), get_peb(NT_CURRENT_PROCESS));
+    PEB *peb = get_private_peb();
     LIST_ENTRY *fls_data;
     NTSTATUS res;
     if (fls_data_ptr == NULL)
@@ -921,9 +918,9 @@ ntdll_redir_fls_thread_exit(PPVOID fls_data_ptr)
 }
 
 NTSTATUS NTAPI
-redirect_RtlFlsAlloc(IN PFLS_CALLBACK_FUNCTION cb, OUT PDWORD index_out)
+redirect_RtlFlsAlloc(DR_PARAM_IN PFLS_CALLBACK_FUNCTION cb, DR_PARAM_OUT PDWORD index_out)
 {
-    PEB *peb = IF_CLIENT_INTERFACE_ELSE(get_private_peb(), get_peb(NT_CURRENT_PROCESS));
+    PEB *peb = get_private_peb();
     DWORD index;
     NTSTATUS res;
     /* FLS is supported in WinXP-64 or later */
@@ -939,7 +936,7 @@ redirect_RtlFlsAlloc(IN PFLS_CALLBACK_FUNCTION cb, OUT PDWORD index_out)
     index = bitmap_find_free_sequence(peb->FlsBitmap->BitMapBuffer,
                                       peb->FlsBitmap->SizeOfBitMap, 1,
                                       false /*!top_down*/, 0, 0 /*no alignment*/);
-    if (index < 0) {
+    if (index == -1) {
         res = STATUS_NO_MEMORY; /* observed in real ntdll */
     } else {
         *index_out = index;
@@ -958,9 +955,9 @@ redirect_RtlFlsAlloc(IN PFLS_CALLBACK_FUNCTION cb, OUT PDWORD index_out)
 }
 
 NTSTATUS NTAPI
-redirect_RtlFlsFree(IN DWORD index)
+redirect_RtlFlsFree(DR_PARAM_IN DWORD index)
 {
-    PEB *peb = IF_CLIENT_INTERFACE_ELSE(get_private_peb(), get_peb(NT_CURRENT_PROCESS));
+    PEB *peb = get_private_peb();
     TEB *teb = get_own_teb();
     NTSTATUS res;
     /* FLS is supported in WinXP-64 or later */
@@ -993,9 +990,9 @@ redirect_RtlFlsFree(IN DWORD index)
 }
 
 NTSTATUS NTAPI
-redirect_RtlProcessFlsData(IN PLIST_ENTRY fls_data)
+redirect_RtlProcessFlsData(DR_PARAM_IN PLIST_ENTRY fls_data)
 {
-    PEB *peb = IF_CLIENT_INTERFACE_ELSE(get_private_peb(), get_peb(NT_CURRENT_PROCESS));
+    PEB *peb = get_private_peb();
     TEB *teb = get_own_teb();
     /* FlsData is a LIST_ENTRY with as payload an array of void* values.
      * If that changes we'll need to change TEB_FLS_DATA_OFFS.

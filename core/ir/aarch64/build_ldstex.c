@@ -57,7 +57,7 @@
 #include "decode.h"
 #include "disassemble.h"
 #include "instr.h"
-#include "instr_create.h"
+#include "instr_create_shared.h"
 
 #include "build_ldstex.h"
 
@@ -78,7 +78,7 @@ instr_is_nonbranch_pcrel(instr_t *instr)
 
 static void
 instr_create_ldstex(dcontext_t *dcontext, int len, uint *pc, instr_t *instr,
-                    OUT instr_t *instr_ldstex)
+                    DR_PARAM_OUT instr_t *instr_ldstex)
 {
     int num_dsts = 0;
     int num_srcs = 0;

@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2019 Google, Inc.  All rights reserved.
+ * Copyright (c) 2019-2021 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -39,12 +39,6 @@
 #ifndef LINUX
 #    error Only Linux is supported.
 #endif
-/* TODO i#2350: Port this to other platforms and bitwidths.  There is a lot of
- * assembly which makes that non-trivial work.
- */
-#if !defined(X86) || !defined(X64)
-#    error Only x86_64 is supported.
-#endif
 #include "../../core/unix/include/syscall.h"
 #ifndef HAVE_RSEQ
 #    error The linux/rseq header is required.
@@ -62,7 +56,7 @@ handler(int sig, siginfo_t *info, void *ucxt)
 }
 
 int
-main()
+main(int argc, const char *argv[])
 {
     /* Rather than sample app code doing regular rseq things, here we're testing
      * the -disable_rseq option.  It should do two things:

@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2020-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -33,9 +33,12 @@
 /* func_view tool creation */
 
 #ifndef _FUNC_VIEW_CREATE_H_
-#define _FUNC_VIEW_CREATE_H_ 1
+#define _FUNC_VIEW_CREATE_H_
 
 #include "analysis_tool.h"
+
+namespace dynamorio {
+namespace drmemtrace {
 
 /**
  * @file drmemtrace/func_view_create.h
@@ -51,5 +54,8 @@
 analysis_tool_t *
 func_view_tool_create(const std::string &funclist_file_path, bool full_trace,
                       unsigned int verbose = 0);
+
+} // namespace drmemtrace
+} // namespace dynamorio
 
 #endif /* _OPCODE_MIX_CREATE_H_ */

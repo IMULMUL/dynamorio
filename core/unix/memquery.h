@@ -1,5 +1,6 @@
 /* *******************************************************************************
- * Copyright (c) 2013-2017 Google, Inc.  All rights reserved.
+ * Copyright (c) 2013-2025 Google, Inc.  All rights reserved.
+ * Copyright (c) 2026 Meta Platforms, Inc.  All rights reserved.
  * *******************************************************************************/
 
 /*
@@ -35,13 +36,18 @@
  */
 
 #ifndef _MEMQUERY_H_
-#define _MEMQUERY_H_ 1
+#define _MEMQUERY_H_
 
 typedef struct _memquery_iter_t {
     /* --- EXTERNAL OUT PARAMS --- */
     app_pc vm_start;
     app_pc vm_end;
     uint prot;
+#ifdef LINUX
+    bool is_shared;
+    uint device_major;
+    uint device_minor;
+#endif
     size_t offset; /* offset into the file being mapped */
     /* XXX: use ino_t?  We need to know what size code to use for the
      * scanf and I don't trust that we, the maps file, and any clients
@@ -130,7 +136,8 @@ find_vm_areas_via_probe(void);
  * can be used to avoid blocking.
  */
 bool
-memquery_from_os(const byte *pc, OUT dr_mem_info_t *info, OUT bool *have_type);
+memquery_from_os(const byte *pc, DR_PARAM_OUT dr_mem_info_t *info,
+                 DR_PARAM_OUT bool *have_type);
 
 /* The result can change if another thread grabs the lock, but this will identify
  * whether the current thread holds the lock, avoiding a hang.

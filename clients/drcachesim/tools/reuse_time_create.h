@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2017 Google, Inc.  All rights reserved.
+ * Copyright (c) 2017-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -33,9 +33,12 @@
 /* reuse-distance tool creation */
 
 #ifndef _REUSE_TIME_CREATE_H_
-#define _REUSE_TIME_CREATE_H_ 1
+#define _REUSE_TIME_CREATE_H_
 
 #include "analysis_tool.h"
+
+namespace dynamorio {
+namespace drmemtrace {
 
 /**
  * @file drmemtrace/reuse_time_create.h
@@ -51,5 +54,8 @@
 // These options are currently documented in ../common/options.cpp.
 analysis_tool_t *
 reuse_time_tool_create(unsigned int line_size = 64, unsigned int verbose = 0);
+
+} // namespace drmemtrace
+} // namespace dynamorio
 
 #endif /* _REUSE_TIME_CREATE_H_ */

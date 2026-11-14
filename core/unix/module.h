@@ -1,5 +1,6 @@
 /* **********************************************************
  * Copyright (c) 2011-2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2026 Meta Platforms, Inc.  All rights reserved.
  * Copyright (c) 2008-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -60,6 +61,10 @@ typedef struct _os_module_data_t {
      * address references within the file.
      */
     app_pc base_address;
+    /* XXX: All segments are expected to have the same alignment, even though that it is
+     * not a requirement for ELF. To allow a different alignment for each segment we will
+     * need to move this field in the module_segment_t struct.
+     */
     size_t alignment; /* the alignment between segments */
 
     /* Fields for pcaches (PR 295534) */
@@ -119,6 +124,13 @@ module_is_executable(app_pc base);
 bool
 module_is_partial_map(app_pc base, size_t size, uint memprot);
 
+#ifdef LINUX
+/* Requires heap allocation and performs a nested non-allocating maps walk. */
+bool
+module_validate_shared_elf_mapping(app_pc base, size_t view_size, uint device_major,
+                                   uint device_minor, uint64 inode);
+#endif
+
 bool
 module_walk_program_headers(app_pc base, size_t view_size, bool at_map, bool dyn_reloc,
                             app_pc *out_base,
@@ -136,7 +148,7 @@ bool
 module_file_has_module_header(const char *filename);
 
 bool
-module_file_is_module64(file_t f, bool *is64 OUT, bool *also32 OUT);
+module_file_is_module64(file_t f, bool *is64 DR_PARAM_OUT, bool *also32 DR_PARAM_OUT);
 
 /* A Mach-O universal binary may have many bitwidths.  The one used on execve will be
  * returned in "platform" and the 2nd one in "alt_platform".
@@ -145,9 +157,10 @@ bool
 module_get_platform(file_t f, dr_platform_t *platform, dr_platform_t *alt_platform);
 
 void
-module_add_segment_data(OUT os_module_data_t *out_data, uint num_segments /*hint only*/,
-                        app_pc segment_start, size_t segment_size, uint segment_prot,
-                        size_t alignment, bool shared, uint64 offset);
+module_add_segment_data(DR_PARAM_OUT os_module_data_t *out_data,
+                        uint num_segments /*hint only*/, app_pc segment_start,
+                        size_t segment_size, uint segment_prot, size_t alignment,
+                        bool shared, uint64 offset);
 
 #if defined(MACOS) || defined(ANDROID)
 typedef FILE stdfile_t;
@@ -167,7 +180,8 @@ app_pc
 get_private_library_address(app_pc modbase, const char *name);
 
 bool
-get_private_library_bounds(IN app_pc modbase, OUT byte **start, OUT byte **end);
+get_private_library_bounds(DR_PARAM_IN app_pc modbase, DR_PARAM_OUT byte **start,
+                           DR_PARAM_OUT byte **end);
 
 #ifdef MACOS
 /* module_macho.c */
@@ -175,7 +189,7 @@ byte *
 module_dynamorio_lib_base(void);
 
 bool
-module_dyld_shared_region(app_pc *start OUT, app_pc *end OUT);
+module_dyld_shared_region(app_pc *start DR_PARAM_OUT, app_pc *end DR_PARAM_OUT);
 
 void
 module_walk_dyld_list(app_pc dyld_base);

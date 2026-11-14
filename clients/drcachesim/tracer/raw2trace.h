@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2016-2021 Google, Inc.  All rights reserved.
+ * Copyright (c) 2016-2026 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -34,25 +34,51 @@
  */
 
 #ifndef _RAW2TRACE_H_
-#define _RAW2TRACE_H_ 1
+#define _RAW2TRACE_H_
 
 /**
  * @file drmemtrace/raw2trace.h
  * @brief DrMemtrace offline trace post-processing customization.
  */
 
-#include "dr_api.h"
-#include "drmemtrace.h"
-#include "drcovlib.h"
+#define NOMINMAX // Avoid windows.h messing up std::min.
+#include <stddef.h>
+#include <stdint.h>
+
 #include <array>
 #include <atomic>
-#include <memory>
-#include <unordered_map>
-#include "trace_entry.h"
-#include "instru.h"
+#include <bitset>
+#include <deque>
 #include <fstream>
-#include "hashtable.h"
+#include <limits>
+#include <list>
+#include <map>
+#include <memory>
+#include <queue>
+#include <set>
+#include <string>
+#include <type_traits>
+#include <unordered_map>
+#include <utility>
 #include <vector>
+
+#include "archive_ostream.h"
+#include "dr_api.h"
+#include "drmemtrace.h"
+#include "hashtable.h"
+#include "instru.h"
+#include "raw2trace_shared.h"
+#include "reader.h"
+#include "record_file_reader.h"
+#include "schedule_file.h"
+#include "trace_entry.h"
+#include "utils.h"
+#ifdef BUILD_PT_POST_PROCESSOR
+#    include "pt2ir.h"
+#endif
+
+namespace dynamorio {
+namespace drmemtrace {
 
 #ifdef DEBUG
 #    define DEBUG_ASSERT(x) DR_ASSERT(x)
@@ -60,61 +86,71 @@
 #    define DEBUG_ASSERT(x) /* nothing */
 #endif
 
-#define OUTFILE_SUFFIX "raw"
-#ifdef HAS_ZLIB
-#    define OUTFILE_SUFFIX_GZ "raw.gz"
-#endif
-#define OUTFILE_SUBDIR "raw"
-#define TRACE_SUBDIR "trace"
-#ifdef HAS_ZLIB
-#    define TRACE_SUFFIX "trace.gz"
-#else
-#    define TRACE_SUFFIX "trace"
+#ifdef HAS_LZ4
+#    define TRACE_SUFFIX_LZ4 "trace.lz4"
 #endif
 
-#define ALIGN_BACKWARD(x, alignment) (((ptr_uint_t)x) & (~((alignment)-1)))
+#ifdef HAS_ZIP
+#    define TRACE_SUFFIX_ZIP "trace.zip"
+#endif
+
+#ifdef HAS_ZLIB
+#    define TRACE_SUFFIX_GZ "trace.gz"
+#endif
+
+#define TRACE_SUFFIX "trace"
 
 typedef enum {
     RAW2TRACE_STAT_COUNT_ELIDED,
+    RAW2TRACE_STAT_DUPLICATE_SYSCALL,
+    RAW2TRACE_STAT_RSEQ_ABORT,
+    RAW2TRACE_STAT_RSEQ_SIDE_EXIT,
+    RAW2TRACE_STAT_FALSE_SYSCALL,
+    RAW2TRACE_STAT_EARLIEST_TRACE_TIMESTAMP,
+    RAW2TRACE_STAT_LATEST_TRACE_TIMESTAMP,
+    RAW2TRACE_STAT_FINAL_TRACE_INSTRUCTION_COUNT,
+    RAW2TRACE_STAT_KERNEL_INSTR_COUNT,
+    RAW2TRACE_STAT_SYSCALL_TRACES_CONVERTED,
+    // Count of PT syscall traces that could not be converted and were skipped
+    // in the final trace.
+    RAW2TRACE_STAT_SYSCALL_TRACES_CONVERSION_FAILED,
+    // Count of decoding errors that were not fatal to the conversion of the
+    // RAW2TRACE_STAT_SYSCALL_TRACES_CONVERTED traces. These result in some
+    // 1-instr PC discontinuities in the syscall trace (<= 1 per non-fatal
+    // error).
+    RAW2TRACE_STAT_SYSCALL_TRACES_NON_FATAL_DECODING_ERROR_COUNT,
+    // Count of PT syscall traces that turned up empty. This may have been
+    // simply because the syscall was interrupted and therefore no PT data
+    // was recorded.
+    RAW2TRACE_STAT_SYSCALL_TRACES_CONVERSION_EMPTY,
+    RAW2TRACE_STAT_SYSCALL_TRACES_INJECTED,
+    // Count of negative times that were corrected.
+    RAW2TRACE_STAT_NEGATIVE_TIMES_CORRECTED,
+    // Count of addresses found with non-canonical top bits.
+    RAW2TRACE_STAT_NON_CANONICAL_TOP_BITS,
+    // We add a MAX member so that we can iterate over all stats in unit tests.
+    RAW2TRACE_STAT_MAX,
 } raw2trace_statistic_t;
-
-struct module_t {
-    module_t(const char *path, app_pc orig, byte *map, size_t offs, size_t size,
-             size_t total_size, bool external = false)
-        : path(path)
-        , orig_seg_base(orig)
-        , map_seg_base(map)
-        , seg_offs(offs)
-        , seg_size(size)
-        , total_map_size(total_size)
-        , is_external(external)
-    {
-    }
-    const char *path;
-    // We have to handle segments within a module separately, as there can be
-    // gaps between them that contain other objects (xref i#4731).
-    app_pc orig_seg_base;
-    byte *map_seg_base;
-    size_t seg_offs;
-    size_t seg_size;
-    // Despite tracking segments separately, we have a single mapping.
-    // The first segment stores that mapping size here; subsequent segments
-    // have 0 for this field.
-    size_t total_map_size;
-    bool is_external; // If true, the data is embedded in drmodtrack custom fields.
-};
 
 /**
  * instr_summary_t is a compact encapsulation of the information needed by trace
  * conversion from decoded instructions.
  */
 struct instr_summary_t final {
-    /** Caches information about a single memory reference. */
+    /**
+     * Caches information about a single memory reference.
+     * Note that we reuse the same memref_summary_t object in raw2trace for all
+     * memrefs of a scatter/gather instr. To avoid any issues due to mismatch
+     * between instru_offline (which sees the expanded scatter/gather instr seq)
+     * and raw2trace (which sees the original app scatter/gather instr only), we
+     * disable address elision for scatter/gather bbs.
+     */
     struct memref_summary_t {
         memref_summary_t(opnd_t opnd)
             : opnd(opnd)
             , remember_base(0)
             , use_remembered_base(0)
+            , base_delta(0)
         {
         }
         /** The addressing mode of this reference. */
@@ -132,6 +168,10 @@ struct instr_summary_t final {
          * a rip-relative reference.
          */
         bool use_remembered_base : 1;
+        /**
+         * Additional offset from base register modifications.
+         */
+        int base_delta;
     };
 
     instr_summary_t()
@@ -144,8 +184,8 @@ struct instr_summary_t final {
      * (using orig_pc and verbosity).
      */
     static bool
-    construct(void *dcontext, app_pc block_pc, INOUT app_pc *pc, app_pc orig_pc,
-              OUT instr_summary_t *desc, uint verbosity = 0);
+    construct(void *dcontext, app_pc block_pc, DR_PARAM_INOUT app_pc *pc, app_pc orig_pc,
+              DR_PARAM_OUT instr_summary_t *desc, uint verbosity = 0);
 
     /**
      * Get the pc after the instruction that was used to produce this instr_summary_t.
@@ -153,7 +193,7 @@ struct instr_summary_t final {
     app_pc
     next_pc() const
     {
-        return next_pc_;
+        return pc_ + length_;
     }
     /** Get the pc of the start of this instrucion. */
     app_pc
@@ -164,32 +204,38 @@ struct instr_summary_t final {
 
     /**
      * Sets properties of the "pos"-th source memory operand by OR-ing in the
-     * two boolean values.
+     * two boolean values. "base_delta" is only set if "use_remembered_base" is true.
      */
     void
-    set_mem_src_flags(size_t pos, bool use_remembered_base, bool remember_base)
+    set_mem_src_flags(size_t pos, bool use_remembered_base, bool remember_base,
+                      int base_delta)
     {
         DEBUG_ASSERT(pos < mem_srcs_and_dests_.size());
         auto target = &mem_srcs_and_dests_[pos];
         target->use_remembered_base = target->use_remembered_base || use_remembered_base;
         target->remember_base = target->remember_base || remember_base;
+        if (use_remembered_base)
+            target->base_delta = base_delta;
     }
 
     /**
      * Sets properties of the "pos"-th destination memory operand by OR-ing in the
-     * two boolean values.
+     * two boolean values. "base_delta" is only set if "use_remembered_base" is true.
      */
     void
-    set_mem_dest_flags(size_t pos, bool use_remembered_base, bool remember_base)
+    set_mem_dest_flags(size_t pos, bool use_remembered_base, bool remember_base,
+                       int base_delta)
     {
         DEBUG_ASSERT(num_mem_srcs_ + pos < mem_srcs_and_dests_.size());
         auto target = &mem_srcs_and_dests_[num_mem_srcs_ + pos];
         target->use_remembered_base = target->use_remembered_base || use_remembered_base;
         target->remember_base = target->remember_base || remember_base;
+        if (use_remembered_base)
+            target->base_delta = base_delta;
     }
 
 private:
-    template <typename T> friend class trace_converter_t;
+    friend class raw2trace_t;
 
     byte
     length() const
@@ -244,6 +290,21 @@ private:
     {
         return TESTANY(kIsCtiMask, packed_);
     }
+    bool
+    is_scatter_or_gather() const
+    {
+        return TESTANY(kIsScatterOrGatherMask, packed_);
+    }
+    bool
+    is_syscall() const
+    {
+        return TESTANY(kIsSyscallMask, packed_);
+    }
+    bool
+    is_rep_string() const
+    {
+        return TESTANY(kIsRepStringMask, packed_);
+    }
 
     const memref_summary_t &
     mem_src_at(size_t pos) const
@@ -265,6 +326,27 @@ private:
     {
         return mem_srcs_and_dests_.size() - num_mem_srcs_;
     }
+    // Returns 0 for indirect branches or non-branches.
+    app_pc
+    branch_target_pc() const
+    {
+        return branch_target_pc_;
+    }
+
+    // Returns the vector element size in bytes for a scatter/gather instruction.
+    // Returns 0 for non-scatter-gather instructions.
+    byte
+    scatter_gather_element_size() const
+    {
+        return scatter_gather_element_size_;
+    }
+
+    // Some scatter/gather read from or write to 2, 3, or 4 vector registers at once.
+    byte
+    scatter_gather_vector_count() const
+    {
+        return scatter_gather_vector_count_;
+    }
 
     static const int kReadsMemMask = 0x0001;
     static const int kWritesMemMask = 0x0002;
@@ -276,6 +358,12 @@ private:
     // it's intended for use only for AArch64 traces. This declaration reserves the
     // assigned mask and makes it unavailable for future masks.
     static const int kIsAarch64DcZvaMask = 0x0020;
+
+    static const int kIsScatterOrGatherMask = 0x0040;
+
+    static const int kIsSyscallMask = 0x0080;
+
+    static const int kIsRepStringMask = 0x0100;
 
     instr_summary_t(const instr_summary_t &other) = delete;
     instr_summary_t &
@@ -289,15 +377,20 @@ private:
     uint16_t prefetch_type_ = 0;
     uint16_t flush_type_ = 0;
     byte length_ = 0;
-    app_pc next_pc_ = 0;
+    uint8_t num_mem_srcs_ = 0;
+
+    app_pc branch_target_pc_ = 0;
 
     // Squash srcs and dests to save memory usage. We may want to
     // bulk-allocate pages of instr_summary_t objects, instead
     // of piece-meal allocating them on the heap one at a time.
     // One vector and a byte is smaller than 2 vectors.
     std::vector<memref_summary_t> mem_srcs_and_dests_;
-    uint8_t num_mem_srcs_ = 0;
-    byte packed_ = 0;
+    uint16_t packed_ = 0;
+
+    byte scatter_gather_element_size_ = 0; // Size in bytes.
+    // Some scatter/gather read from or write to 2, 3, or 4 vector registers at once.
+    byte scatter_gather_vector_count_ = 0;
 };
 
 /**
@@ -308,6 +401,8 @@ private:
 struct trace_metadata_writer_t {
     static int
     write_thread_exit(byte *buffer, thread_id_t tid);
+    static trace_marker_type_t
+    canonicalize_marker_type(trace_marker_type_t marker_type);
     static int
     write_marker(byte *buffer, trace_marker_type_t type, uintptr_t val);
     static int
@@ -321,179 +416,6 @@ struct trace_metadata_writer_t {
 };
 
 /**
- * Functions for decoding and verifying raw memtrace data headers.
- */
-struct trace_metadata_reader_t {
-    static bool
-    is_thread_start(const offline_entry_t *entry, OUT std::string *error,
-                    OUT int *version, OUT offline_file_type_t *file_type);
-    static std::string
-    check_entry_thread_start(const offline_entry_t *entry);
-};
-
-/**
- * module_mapper_t maps and unloads application modules.
- * Using it assumes a dr_context has already been setup.
- * This class is not thread-safe.
- */
-class module_mapper_t final {
-public:
-    /**
-     * Parses and iterates over the list of modules.  This is provided to give the user a
-     * method for iterating modules in the presence of the custom field used by drmemtrace
-     * that prevents direct use of drmodtrack_offline_read(). Its parsing of the module
-     * data will invoke \p parse_cb, which should advance the module data pointer passed
-     * in \p src and return it as its return value (or nullptr on error), returning
-     * the resulting parsed data in \p data.  The \p data pointer will afterwards be
-     * passed to both \p process_cb, which can update the module path inside \p info
-     * (and return a non-empty string on error), and \b free_cb, which can perform
-     * cleanup.
-     *
-     * The callbacks will only be called during object construction.
-     *
-     * On success, calls the \p process_cb function for every module in the list.
-     * On failure, get_last_error() is non-empty, and indicates the cause.
-     */
-    static std::unique_ptr<module_mapper_t>
-    create(const char *module_map,
-           const char *(*parse_cb)(const char *src, OUT void **data) = nullptr,
-           std::string (*process_cb)(drmodtrack_info_t *info, void *data,
-                                     void *user_data) = nullptr,
-           void *process_cb_user_data = nullptr, void (*free_cb)(void *data) = nullptr,
-           uint verbosity = 0, const std::string &alt_module_dir = "")
-    {
-        return std::unique_ptr<module_mapper_t>(
-            new module_mapper_t(module_map, parse_cb, process_cb, process_cb_user_data,
-                                free_cb, verbosity, alt_module_dir));
-    }
-
-    /**
-     * All APIs on this type, including constructor, may fail. get_last_error() returns
-     * the last error message. The object should be considered unusable if
-     * !get_last_error().empty().
-     */
-    std::string
-    get_last_error(void) const
-    {
-        return last_error_;
-    }
-
-    /**
-     * module_t vector corresponding to the application modules. Lazily loads and caches
-     * modules. If the object is invalid, returns an empty vector. The user may check
-     * get_last_error() to ensure no error has occurred, or get the applicable error
-     * message.
-     */
-    const std::vector<module_t> &
-    get_loaded_modules()
-    {
-        if (last_error_.empty() && modvec_.empty())
-            read_and_map_modules();
-        return modvec_;
-    }
-
-    /**
-     * This interface is meant to be used with a final trace rather than a raw
-     * trace, using the module log file saved from the raw2trace conversion.
-     * After the a call to get_loaded_modules(), this routine may be used
-     * to convert an instruction program counter in a trace into an address in the
-     * current process where the instruction bytes for that instruction are mapped,
-     * allowing decoding for obtaining further information than is stored in the trace.
-     * Returns the mapped address. Check get_last_error_() if an error occurred.
-     */
-    app_pc
-    find_mapped_trace_address(app_pc trace_address);
-
-    /**
-     * This is identical to find_mapped_trace_address() but it also returns the
-     * bounds of the containing region, allowing the caller to perform its own
-     * mapping for any address that is also within those bounds.
-     */
-    app_pc
-    find_mapped_trace_bounds(app_pc trace_address, OUT app_pc *module_start,
-                             OUT size_t *module_size);
-
-    /**
-     * Unload modules loaded with read_and_map_modules(), freeing associated resources.
-     */
-    ~module_mapper_t();
-
-    /**
-     * Writes out the module list to \p buf, whose capacity is \p buf_size.
-     * The written data includes any modifications made by the \p process_cb
-     * passed to create().  Any custom data returned by the \p parse_cb passed to
-     * create() is passed to \p print_cb here for serialization.  The \p print_cb
-     * must return the number of characters printed or -1 on error.
-     */
-    drcovlib_status_t
-    write_module_data(char *buf, size_t buf_size,
-                      int (*print_cb)(void *data, char *dst, size_t max_len),
-                      OUT size_t *wrote);
-
-private:
-    module_mapper_t(const char *module_map,
-                    const char *(*parse_cb)(const char *src, OUT void **data) = nullptr,
-                    std::string (*process_cb)(drmodtrack_info_t *info, void *data,
-                                              void *user_data) = nullptr,
-                    void *process_cb_user_data = nullptr,
-                    void (*free_cb)(void *data) = nullptr, uint verbosity = 0,
-                    const std::string &alt_module_dir = "");
-    module_mapper_t(const module_mapper_t &) = delete;
-    module_mapper_t &
-    operator=(const module_mapper_t &) = delete;
-#ifndef WINDOWS
-    module_mapper_t(module_mapper_t &&) = delete;
-    module_mapper_t &
-    operator=(module_mapper_t &&) = delete;
-#endif
-    // We store this in drmodtrack_info_t.custom to combine our binary contents
-    // data with any user-added module data from drmemtrace_custom_module_data.
-    struct custom_module_data_t {
-        size_t contents_size;
-        const char *contents;
-        void *user_data;
-    };
-
-    void
-    read_and_map_modules(void);
-
-    std::string
-    do_module_parsing();
-
-    const char *modmap_ = nullptr;
-    void *modhandle_ = nullptr;
-    std::vector<module_t> modvec_;
-    void (*const cached_user_free_)(void *data) = nullptr;
-
-    // Custom module fields that use drmodtrack are global.
-    static const char *(*user_parse_)(const char *src, OUT void **data);
-    static void (*user_free_)(void *data);
-    static int (*user_print_)(void *data, char *dst, size_t max_len);
-    static const char *
-    parse_custom_module_data(const char *src, OUT void **data);
-    static int
-    print_custom_module_data(void *data, char *dst, size_t max_len);
-    static void
-    free_custom_module_data(void *data);
-    static bool has_custom_data_global_;
-
-    bool has_custom_data_ = false;
-
-    // We store module info for do_module_parsing.
-    std::vector<drmodtrack_info_t> modlist_;
-    std::string (*user_process_)(drmodtrack_info_t *info, void *data,
-                                 void *user_data) = nullptr;
-    void *user_process_data_ = nullptr;
-    app_pc last_orig_base_ = 0;
-    size_t last_map_size_ = 0;
-    byte *last_map_base_ = nullptr;
-
-    uint verbosity_ = 0;
-    std::string alt_module_dir_;
-    std::string last_error_;
-};
-
-/**
  * Header of raw trace.
  */
 struct trace_header_t {
@@ -503,873 +425,85 @@ struct trace_header_t {
     size_t cache_line_size;
 };
 
-// XXX: DR should export this
-#define INVALID_THREAD_ID 0
-
-/* XXX i#4062: We are no longer using this split interface.
- * Should we refactor and merge trace_converter_t into raw2trace_t for simpler code?
- */
-
 /**
- * #trace_converter_t is a reusable component that encapsulates raw trace conversion.
- *
- * Conversion happens from a data source abstracted by the type parameter T. We make no
- * assumption about how thread buffers are organized. We do assume the internal
- * composition of thread buffers is "as written" by the thread. For example, all thread
- * buffers belonging to different threads may be in a separate files; or buffers may be
- * co-located in one large file, or spread accross multiple, mixed-thread files.
- *
- * #trace_converter_t expects to be instantiated with its type template T which should
- * provide the following APIs.  These pass through an opaque pointer which provides
- * per-traced-thread-local data to the converter:
- *
- * <UL> <LI>const offline_entry_t *get_next_entry(void *tls)
- *
- * Point to the next offline entry_t. There is no assumption about the underlying source
- * of the data, and #trace_converter_t will not attempt to dereference past the provided
- * pointer.</LI>
- *
- * <LI>void unread_last_entry(void *tls)
- *
- * Ensure that the next call to get_next_entry() re-reads the last value.</LI>
- *
- * <LI>trace_entry_t *get_write_buffer(void *tls)
- *
- * Return a writable buffer guaranteed to be at least #WRITE_BUFFER_SIZE large.
- *  get_write_buffer() may reuse the same buffer after write() or write_delayed_branches()
- * is called.</LI>
- *
- * <LI>bool write(void *tls, const trace_entry_t *start, const trace_entry_t *end)
- *
- * Writes the converted traces between start and end, where end is past the last
- * item to write. Both start and end are assumed to be pointers inside a buffer
- * returned by get_write_buffer().</LI>
- *
- * <LI>std::string write_delayed_branches(const trace_entry_t *start, const trace_entry_t
- * *end)
- *
- * Similar to write(), but treat the provided traces as delayed branches: if they
- * are the last values in a record, they belong to the next record of the same
- * thread.</LI>
- *
- * <LI>std::string on_thread_end(void *tls)
- *
- * Callback notifying the currently-processed thread has exited. #trace_converter_t
- * extenders are expected to track record metadata themselves. #trace_converter_t offers
- * APIs for extracting that metadata.</LI>
- *
- * <LI>void log(uint level, const char *fmt, ...)
- *
- * Implementers are given the opportunity to implement their own logging. The level
- * parameter represents severity: the lower the level, the higher the severity.</LI>
- *
- * <LI>void log_instruction(uint level, app_pc decode_pc, app_pc orig_pc);
- *
- * Similar to log() but this disassembles the given PC.</LI>
- *
- * <LI>void add_to_statistic(void *tls, raw2trace_statistic_t stat, int value)
- *
- * Increases the per-thread counter for the statistic identified by stat by value.
- * </LI>
- *
- * <LI>bool raw2trace_t::instr_summary_exists(void *tls, uint64 modidx, uint64 modoffs,
- * app_pc block_start_pc, app_pc pc) const
- *
- * Returns whether an #instr_summary_t representation of the instruction at pc inside
- * the block that begins at block_start_pc in the specified module exists.
- * </LI>
- *
- * <LI>const instr_summary_t *get_instr_summary(void *tls, uint64 modidx, uint64 modoffs,
- * app_pc block_start_pc, int instr_count, int index, INOUT app_pc *pc, app_pc orig)
- *
- * Return the #instr_summary_t representation of the index-th instruction (at *pc)
- * inside the block that begins at block_start_pc and contains instr_count
- * instructions in the specified module.  Updates the value at pc to the PC of the
- * next instruction. It is assumed the app binaries have already been loaded using
- * #module_mapper_t, and the values at *pc point within memory mapped by the module
- * mapper. This API provides an opportunity to cache decoded instructions.  </LI>
- *
- * <LI>bool set_instr_summary_flags(void *tls, uint64 modidx, uint64 modoffs,
- * app_pc block_start_pc, int instr_count, int index, app_pc pc, app_pc orig,
- * bool write, int memop_index, bool use_remembered_base, bool remember_base)
- *
- * Sets two flags stored in the memref_summary_t inside the instr_summary_t for the
- * index-th instruction (at pc) inside the block that begins at block_start_pc and
- * contains instr_count instructions in the specified module.  The flags
- * use_remembered_base and remember_base are set for the source (write==false) or
- * destination (write==true) operand of index memop_index. The flags are OR-ed in: i.e.,
- * they are never cleared.
- * </LI>
- *
- * <LI>void set_prev_instr_rep_string(void *tls, bool value)
- *
- * Sets a per-traced-thread cached flag that is read by was_prev_instr_rep_string().
- * </LI>
- *
- * <LI>bool was_prev_instr_rep_string(void *tls)
- *
- * Queries a per-traced-thread cached flag that is set by set_prev_instr_rep_string().
- * </LI>
- *
- * <LI>int get_version(void *tls)
- *
- * Returns the trace file version (an OFFLINE_FILE_VERSION* constant).
- * </LI>
- *
- * <LI>offline_file_type_t get_file_type(void *tls)
- *
- * Returns the trace file type (a combination of OFFLINE_FILE_TYPE* constants).
- * </LI>
- * </UL>
+ * Bitset hash table for balancing search time in case of enormous count of pc.
+ * Each pc represented as pair of high 64-BLOCK_SIZE_BIT bits and
+ * lower BLOCK_SIZE_BIT bits.
+ * High bits is the key in hash table and give bitset table with BLOCK_SIZE size.
+ * Lower bits set bit in bitset that means this pc was processed.
+ * BLOCK_SIZE_BIT=13 was picked up to exclude hash collision and save speed up.
  */
-template <typename T> class trace_converter_t {
-#define DR_CHECK(val, msg) \
-    do {                   \
-        if (!(val))        \
-            return msg;    \
-    } while (0)
-public:
-    trace_converter_t(const trace_converter_t &) = delete;
-    trace_converter_t &
-    operator=(const trace_converter_t &) = delete;
-#ifndef WINDOWS
-    trace_converter_t(trace_converter_t &&) = default;
-    trace_converter_t &
-    operator=(trace_converter_t &&) = default;
-#endif
 
-protected:
-    /**
-     * Construct a new #trace_converter_t object. If a nullptr dcontext is passed,
-     * creates a new DR context va dr_standalone_init().
-     */
-    trace_converter_t(void *dcontext)
-        : dcontext_(dcontext == nullptr ? dr_standalone_init() : dcontext)
-        , passed_dcontext_(dcontext != nullptr)
-    {
-    }
-
-    /**
-     * Destroys this #trace_converter_t object.  If a nullptr dcontext_in was passed
-     * to the constructor, calls dr_standalone_exit().
-     */
-    ~trace_converter_t()
-    {
-        if (!passed_dcontext_)
-            dr_standalone_exit();
-    }
-
-    /**
-     * Convert starting from in_entry, and reading more entries as required.
-     * Sets end_of_record to true if processing hit the end of a record.
-     * set_modvec_() must have been called by the implementation before calling this API.
-     */
-    std::string
-    process_offline_entry(void *tls, const offline_entry_t *in_entry, thread_id_t tid,
-                          OUT bool *end_of_record, OUT bool *last_bb_handled)
-    {
-        trace_entry_t *buf_base = impl()->get_write_buffer(tls);
-        byte *buf = reinterpret_cast<byte *>(buf_base);
-        if (in_entry->extended.type == OFFLINE_TYPE_EXTENDED) {
-            if (in_entry->extended.ext == OFFLINE_EXT_TYPE_FOOTER) {
-                DR_CHECK(tid != INVALID_THREAD_ID, "Missing thread id");
-                impl()->log(2, "Thread %d exit\n", (uint)tid);
-                buf += trace_metadata_writer_t::write_thread_exit(buf, tid);
-                *end_of_record = true;
-                if (!impl()->write(tls, buf_base, reinterpret_cast<trace_entry_t *>(buf)))
-                    return "Failed to write to output file";
-                // Let the user determine what other actions to take, e.g. account for
-                // the ending of the current thread, etc.
-                return impl()->on_thread_end(tls);
-            } else if (in_entry->extended.ext == OFFLINE_EXT_TYPE_MARKER) {
-                uintptr_t marker_val = 0;
-                std::string err = get_marker_value(tls, &in_entry, &marker_val);
-                if (!err.empty())
-                    return err;
-                buf += trace_metadata_writer_t::write_marker(
-                    buf, (trace_marker_type_t)in_entry->extended.valueB, marker_val);
-                if (in_entry->extended.valueB == TRACE_MARKER_TYPE_KERNEL_EVENT) {
-                    impl()->log(4, "Signal/exception between bbs\n");
-                }
-                impl()->log(3, "Appended marker type %u value " PIFX "\n",
-                            (trace_marker_type_t)in_entry->extended.valueB,
-                            (uintptr_t)in_entry->extended.valueA);
-            } else {
-                std::stringstream ss;
-                ss << "Invalid extension type " << (int)in_entry->extended.ext;
-                return ss.str();
-            }
-        } else if (in_entry->addr.type == OFFLINE_TYPE_MEMREF ||
-                   in_entry->addr.type == OFFLINE_TYPE_MEMREF_HIGH) {
-            if (!*last_bb_handled) {
-                // For currently-unhandled non-module code, memrefs are handled here
-                // where we can easily handle the transition out of the bb.
-                trace_entry_t *entry = reinterpret_cast<trace_entry_t *>(buf);
-                entry->type = TRACE_TYPE_READ; // Guess.
-                entry->size = 1;               // Guess.
-                entry->addr = (addr_t)in_entry->combined_value;
-                impl()->log(4, "Appended non-module memref to " PFX "\n",
-                            (ptr_uint_t)entry->addr);
-                buf += sizeof(*entry);
-            } else {
-                // We should see an instr entry first
-                return "memref entry found outside of bb";
-            }
-        } else if (in_entry->pc.type == OFFLINE_TYPE_PC) {
-            DR_CHECK(reinterpret_cast<trace_entry_t *>(buf) == buf_base,
-                     "We shouldn't have buffered anything before calling "
-                     "append_bb_entries");
-            std::string result = append_bb_entries(tls, in_entry, last_bb_handled);
-            if (!result.empty())
-                return result;
-        } else if (in_entry->addr.type == OFFLINE_TYPE_IFLUSH) {
-            const offline_entry_t *entry = impl()->get_next_entry(tls);
-            if (entry == nullptr || entry->addr.type != OFFLINE_TYPE_IFLUSH)
-                return "Flush missing 2nd entry";
-            impl()->log(2, "Flush " PFX "-" PFX "\n", (ptr_uint_t)in_entry->addr.addr,
-                        (ptr_uint_t)entry->addr.addr);
-            buf += trace_metadata_writer_t::write_iflush(
-                buf, in_entry->addr.addr,
-                (size_t)(entry->addr.addr - in_entry->addr.addr));
-        } else {
-            std::stringstream ss;
-            ss << "Unknown trace type " << (int)in_entry->timestamp.type;
-            return ss.str();
-        }
-        size_t size = reinterpret_cast<trace_entry_t *>(buf) - buf_base;
-        DR_CHECK((uint)size < WRITE_BUFFER_SIZE, "Too many entries");
-        if (size > 0) {
-            if (!impl()->write(tls, buf_base, reinterpret_cast<trace_entry_t *>(buf)))
-                return "Failed to write to output file";
-        }
-        return "";
-    }
-
-    /**
-     * Read the header of a thread, by calling T's get_next_entry() successively to
-     * populate the header values. The timestamp field is populated only
-     * for legacy traces.
-     */
-    std::string
-    read_header(void *tls, OUT trace_header_t *header)
-    {
-        const offline_entry_t *in_entry = impl()->get_next_entry(tls);
-        if (in_entry == nullptr)
-            return "Failed to read header from input file";
-        // Handle legacy traces which have the timestamp first.
-        if (in_entry->tid.type == OFFLINE_TYPE_TIMESTAMP) {
-            header->timestamp = in_entry->timestamp.usec;
-            in_entry = impl()->get_next_entry(tls);
-            if (in_entry == nullptr)
-                return "Failed to read header from input file";
-        }
-        DR_ASSERT(in_entry->tid.type == OFFLINE_TYPE_THREAD);
-        header->tid = in_entry->tid.tid;
-
-        in_entry = impl()->get_next_entry(tls);
-        if (in_entry == nullptr)
-            return "Failed to read header from input file";
-        DR_ASSERT(in_entry->pid.type == OFFLINE_TYPE_PID);
-        header->pid = in_entry->pid.pid;
-
-        in_entry = impl()->get_next_entry(tls);
-        if (in_entry == nullptr)
-            return "Failed to read header from input file";
-        if (in_entry->extended.type == OFFLINE_TYPE_EXTENDED &&
-            in_entry->extended.ext == OFFLINE_EXT_TYPE_MARKER &&
-            in_entry->extended.valueB == TRACE_MARKER_TYPE_CACHE_LINE_SIZE) {
-            header->cache_line_size = in_entry->extended.valueA;
-        } else {
-            impl()->log(2,
-                        "Cache line size not found in raw trace header. Adding "
-                        "current processor's cache line size to final trace instead.\n");
-            header->cache_line_size = proc_get_cache_line_size();
-            impl()->unread_last_entry(tls);
-        }
-        return "";
-    }
-
-    /**
-     * The trace_entry_t buffer returned by get_write_buffer() is assumed to be at least
-     * #WRITE_BUFFER_SIZE large.
-     */
-    static const uint WRITE_BUFFER_SIZE = 64;
-
-    /**
-     * The pointer to the DR context.
-     */
-    void *const dcontext_;
-
-    /**
-     * Whether a non-nullptr dcontext was passed to the constructor.
-     */
-    bool passed_dcontext_ = false;
-
-    /**
-     * Get the module map.
-     */
-    const std::vector<module_t> &
-    modvec_() const
-    {
-        return *modvec_ptr_;
-    }
-
-    /**
-     * Set the module map. Must be called before process_offline_entry() is called.
-     */
-    void
-    set_modvec_(const std::vector<module_t> *modvec)
-    {
-        modvec_ptr_ = modvec;
-    }
-
+template <typename T> class bitset_hash_table_t {
 private:
-    T *
-    impl()
+    const static size_t BLOCK_SIZE_BIT = 13;
+    const static size_t BLOCK_SIZE = (1 << BLOCK_SIZE_BIT);
+    const size_t BASIC_BUCKET_COUNT = (1 << 15);
+    std::unordered_map<T, std::bitset<BLOCK_SIZE>> page_table_;
+    typename std::unordered_map<T, std::bitset<BLOCK_SIZE>>::iterator last_block_ =
+        page_table_.end();
+
+    inline std::pair<T, ushort>
+    convert(T pc)
     {
-        return static_cast<T *>(this);
+        return std::pair<T, ushort>(
+            reinterpret_cast<T>(reinterpret_cast<size_t>(pc) & (~(BLOCK_SIZE - 1))),
+            static_cast<ushort>(reinterpret_cast<size_t>(pc) & (BLOCK_SIZE - 1)));
     }
 
-    std::string
-    analyze_elidable_addresses(void *tls, uint64 modidx, uint64 modoffs, app_pc start_pc,
-                               uint instr_count)
+public:
+    bitset_hash_table_t()
     {
-        int version = impl()->get_version(tls);
-        // Old versions have no elision.
-        if (version <= OFFLINE_FILE_VERSION_NO_ELISION)
-            return "";
-        // Filtered and instruction-only traces have no elision.
-        if (TESTANY(OFFLINE_FILE_TYPE_FILTERED | OFFLINE_FILE_TYPE_NO_OPTIMIZATIONS |
-                        OFFLINE_FILE_TYPE_INSTRUCTION_ONLY,
-                    impl()->get_file_type(tls)))
-            return "";
-        // Avoid type complaints for 32-bit.
-        size_t modidx_typed = static_cast<size_t>(modidx);
-        // We build an ilist to use identify_elidable_addresses() and fill in
-        // state needed to reconstruct elided addresses.
-        instrlist_t *ilist = instrlist_create(dcontext_);
-        app_pc pc = start_pc;
-        for (uint count = 0; count < instr_count; ++count) {
-            instr_t *inst = instr_create(dcontext_);
-            app_pc next_pc = decode(dcontext_, pc, inst);
-            DR_ASSERT(next_pc != NULL);
-            instr_set_translation(inst, pc);
-            instr_set_note(inst, reinterpret_cast<void *>(static_cast<ptr_int_t>(count)));
-            pc = next_pc;
-            instrlist_append(ilist, inst);
-        }
-        instru_offline_.identify_elidable_addresses(dcontext_, ilist, version);
-        for (instr_t *inst = instrlist_first(ilist); inst != nullptr;
-             inst = instr_get_next(inst)) {
-            int index, memop_index;
-            bool write, needs_base;
-            if (!instru_offline_.label_marks_elidable(inst, &index, &memop_index, &write,
-                                                      &needs_base))
-                continue;
-            // There could be multiple labels for one instr (e.g., "push (%rsp)".
-            instr_t *meminst = instr_get_next(inst);
-            while (meminst != nullptr && instr_is_label(meminst))
-                meminst = instr_get_next(meminst);
-            DR_ASSERT(meminst != nullptr);
-            pc = instr_get_app_pc(meminst);
-            int index_in_bb =
-                static_cast<int>(reinterpret_cast<ptr_int_t>(instr_get_note(meminst)));
-            app_pc orig_pc = pc - modvec_()[modidx_typed].map_seg_base +
-                modvec_()[modidx_typed].orig_seg_base;
-            impl()->log(5, "Marking < " PFX ", " PFX "> %s #%d to use remembered base\n",
-                        start_pc, pc, write ? "write" : "read", memop_index);
-            if (!impl()->set_instr_summary_flags(
-                    tls, modidx, modoffs, start_pc, instr_count, index_in_bb, pc, orig_pc,
-                    write, memop_index, true /*use_remembered*/,
-                    false /*don't change "remember"*/))
-                return "Failed to set flags for elided base address";
-            // We still need to set the use_remember flag for rip-rel, even though it
-            // does not need a prior base, because we do not elide *all* rip-rels
-            // (e.g., predicated rip-rels).
-            if (!needs_base)
-                continue;
-            // Find the source of the base.  It has to be the first instance when
-            // walking backward.
-            opnd_t elided_op =
-                write ? instr_get_dst(meminst, index) : instr_get_src(meminst, index);
-            reg_id_t base;
-            bool got_base = instru_offline_.opnd_is_elidable(elided_op, base, version);
-            DR_ASSERT(got_base && base != DR_REG_NULL);
-            int remember_index = -1;
-            for (instr_t *prev = meminst; prev != nullptr; prev = instr_get_prev(prev)) {
-                if (!instr_is_app(prev))
-                    continue;
-                // Use instr_{reads,writes}_memory() to rule out LEA and NOP.
-                if (!instr_reads_memory(prev) && !instr_writes_memory(prev))
-                    continue;
-                bool remember_write = false;
-                int mem_count = 0;
-                if (prev != meminst || write) {
-                    for (int i = 0; i < instr_num_srcs(prev); i++) {
-                        reg_id_t prev_base;
-                        if (opnd_is_memory_reference(instr_get_src(prev, i))) {
-                            if (instru_offline_.opnd_is_elidable(instr_get_src(prev, i),
-                                                                 prev_base, version) &&
-                                prev_base == base) {
-                                remember_index = mem_count;
-                                break;
-                            }
-                            ++mem_count;
-                        }
-                    }
-                }
-                if (remember_index == -1 && prev != meminst) {
-                    mem_count = 0;
-                    for (int i = 0; i < instr_num_dsts(prev); i++) {
-                        reg_id_t prev_base;
-                        if (opnd_is_memory_reference(instr_get_dst(prev, i))) {
-                            if (instru_offline_.opnd_is_elidable(instr_get_dst(prev, i),
-                                                                 prev_base, version) &&
-                                prev_base == base) {
-                                remember_index = mem_count;
-                                remember_write = true;
-                                break;
-                            }
-                            ++mem_count;
-                        }
-                    }
-                }
-                if (remember_index == -1)
-                    continue;
-                app_pc pc_prev = instr_get_app_pc(prev);
-                app_pc orig_pc_prev = pc_prev - modvec_()[modidx_typed].map_seg_base +
-                    modvec_()[modidx_typed].orig_seg_base;
-                int index_prev =
-                    static_cast<int>(reinterpret_cast<ptr_int_t>(instr_get_note(prev)));
-                if (!impl()->set_instr_summary_flags(
-                        tls, modidx, modoffs, start_pc, instr_count, index_prev, pc_prev,
-                        orig_pc_prev, remember_write, remember_index,
-                        false /*don't change "use_remembered"*/, true /*remember*/))
-                    return "Failed to set flags for elided base address";
-                impl()->log(5, "Asking <" PFX ", " PFX "> %s #%d to remember base\n",
-                            start_pc, pc_prev, remember_write ? "write" : "read",
-                            remember_index);
-                break;
-            }
-            if (remember_index == -1)
-                return "Failed to find the source of the elided base";
-        }
-        instrlist_clear_and_destroy(dcontext_, ilist);
-        return "";
+        static_assert(std::is_pointer<T>::value || std::is_integral<T>::value,
+                      "Pointer or integral type required");
+        page_table_.reserve(BASIC_BUCKET_COUNT);
+        page_table_.emplace(T(0), std::move(std::bitset<BLOCK_SIZE>()));
+        last_block_ = page_table_.begin();
     }
 
-    std::string
-    append_bb_entries(void *tls, const offline_entry_t *in_entry, OUT bool *handled)
+    bool
+    find_and_insert(T pc)
     {
-        std::string error = "";
-        uint instr_count = in_entry->pc.instr_count;
-        const instr_summary_t *instr = nullptr;
-        app_pc start_pc = modvec_()[in_entry->pc.modidx].map_seg_base +
-            (in_entry->pc.modoffs - modvec_()[in_entry->pc.modidx].seg_offs);
-        app_pc pc, decode_pc = start_pc;
-        if ((in_entry->pc.modidx == 0 && in_entry->pc.modoffs == 0) ||
-            modvec_()[in_entry->pc.modidx].map_seg_base == NULL) {
-            // FIXME i#2062: add support for code not in a module (vsyscall, JIT, etc.).
-            // Once that support is in we can remove the bool return value and handle
-            // the memrefs up here.
-            impl()->log(3, "Skipping ifetch for %u instrs not in a module\n",
-                        instr_count);
-            *handled = false;
-            return "";
-        } else {
-            impl()->log(3, "Appending %u instrs in bb " PFX " in mod %u +" PIFX " = %s\n",
-                        instr_count, (ptr_uint_t)start_pc, (uint)in_entry->pc.modidx,
-                        (ptr_uint_t)in_entry->pc.modoffs,
-                        modvec_()[in_entry->pc.modidx].path);
-        }
-        bool skip_icache = false;
-        // This indicates that each memref has its own PC entry and that each
-        // icache entry does not need to be considered a memref PC entry as well.
-        bool instrs_are_separate =
-            TESTANY(OFFLINE_FILE_TYPE_FILTERED, impl()->get_file_type(tls));
-        bool is_instr_only_trace =
-            TESTANY(OFFLINE_FILE_TYPE_INSTRUCTION_ONLY, impl()->get_file_type(tls));
-        uint64_t cur_modoffs = in_entry->pc.modoffs;
-        std::unordered_map<reg_id_t, addr_t> reg_vals;
-        if (instr_count == 0) {
-            // L0 filtering adds a PC entry with a count of 0 prior to each memref.
-            skip_icache = true;
-            instr_count = 1;
-            // We should have set a flag to avoid peeking forward on instr entries
-            // based on OFFLINE_FILE_TYPE_FILTERED.
-            DR_ASSERT(instrs_are_separate);
-        } else {
-            if (!impl()->instr_summary_exists(tls, in_entry->pc.modidx,
-                                              in_entry->pc.modoffs, start_pc, 0,
-                                              decode_pc)) {
-                std::string res = analyze_elidable_addresses(tls, in_entry->pc.modidx,
-                                                             in_entry->pc.modoffs,
-                                                             start_pc, instr_count);
-                if (!res.empty())
-                    return res;
+        auto block = convert(pc);
+        if (block.first != last_block_->first) {
+            last_block_ = page_table_.find(block.first);
+            if (last_block_ == page_table_.end()) {
+                last_block_ = (page_table_.emplace(std::make_pair(
+                                   block.first, std::move(std::bitset<BLOCK_SIZE>()))))
+                                  .first;
+                last_block_->second[block.second] = 1;
+                return true;
             }
         }
-        DR_CHECK(!instrs_are_separate || instr_count == 1,
-                 "cannot mix 0-count and >1-count");
-        for (uint i = 0; i < instr_count; ++i) {
-            trace_entry_t *buf_start = impl()->get_write_buffer(tls);
-            trace_entry_t *buf = buf_start;
-            app_pc orig_pc = decode_pc - modvec_()[in_entry->pc.modidx].map_seg_base +
-                modvec_()[in_entry->pc.modidx].orig_seg_base;
-            // To avoid repeatedly decoding the same instruction on every one of its
-            // dynamic executions, we cache the decoding in a hashtable.
-            pc = decode_pc;
-            impl()->log_instruction(4, decode_pc, orig_pc);
-            instr =
-                impl()->get_instr_summary(tls, in_entry->pc.modidx, in_entry->pc.modoffs,
-                                          start_pc, instr_count, i, &pc, orig_pc);
-            if (instr == nullptr) {
-                // We hit some error somewhere, and already reported it. Just exit the
-                // loop.
-                break;
-            }
-            DR_CHECK(pc > decode_pc, "error advancing inside block");
-            DR_CHECK(!instr->is_cti() || i == instr_count - 1, "invalid cti");
-            // FIXME i#1729: make bundles via lazy accum until hit memref/end.
-            buf->type = instr->type();
-            if (buf->type == TRACE_TYPE_INSTR_MAYBE_FETCH) {
-                // We want it to look like the original rep string, with just one instr
-                // fetch for the whole loop, instead of the drutil-expanded loop.
-                // We fix up the maybe-fetch here so our offline file doesn't have to
-                // rely on our own reader.
-                if (!impl()->was_prev_instr_rep_string(tls)) {
-                    impl()->set_prev_instr_rep_string(tls, true);
-                    buf->type = TRACE_TYPE_INSTR;
-                } else {
-                    impl()->log(3, "Skipping instr fetch for " PFX "\n",
-                                (ptr_uint_t)decode_pc);
-                    // We still include the instr to make it easier for core simulators
-                    // (i#2051).
-                    buf->type = TRACE_TYPE_INSTR_NO_FETCH;
-                }
-            } else
-                impl()->set_prev_instr_rep_string(tls, false);
-            buf->size = (ushort)(skip_icache ? 0 : instr->length());
-            buf->addr = (addr_t)orig_pc;
-            ++buf;
-            decode_pc = pc;
-            // Check for a signal *after* the instruction.  The trace is recording
-            // instruction *fetches*, not instruction retirement, and we want to
-            // include a faulting instruction before its raised signal.
-            bool interrupted = false;
-            error = handle_kernel_interrupt_and_markers(
-                tls, &buf, cur_modoffs, instr->length(), instrs_are_separate,
-                &interrupted);
-            if (!error.empty())
-                return error;
-            if (interrupted) {
-                impl()->log(3, "Stopping bb at kernel interruption point +" PIFX "\n",
-                            cur_modoffs);
-            }
-            // We need to interleave instrs with memrefs.
-            // There is no following memref for (instrs_are_separate && !skip_icache).
-            if (!interrupted && (!instrs_are_separate || skip_icache) &&
-                // Rule out OP_lea.
-                (instr->reads_memory() || instr->writes_memory()) &&
-                // No following memref for instruction-only trace type.
-                !is_instr_only_trace) {
-                for (uint j = 0; j < instr->num_mem_srcs(); j++) {
-                    error = append_memref(tls, &buf, instr, instr->mem_src_at(j), false,
-                                          reg_vals);
-                    if (!error.empty())
-                        return error;
-                    error = handle_kernel_interrupt_and_markers(
-                        tls, &buf, cur_modoffs, instr->length(), instrs_are_separate,
-                        &interrupted);
-                    if (!error.empty())
-                        return error;
-                    if (interrupted)
-                        break;
-                }
-                // We break before subsequent memrefs on an interrupt, though with
-                // today's tracer that will never happen (i#3958).
-                for (uint j = 0; !interrupted && j < instr->num_mem_dests(); j++) {
-                    error = append_memref(tls, &buf, instr, instr->mem_dest_at(j), true,
-                                          reg_vals);
-                    if (!error.empty())
-                        return error;
-                    error = handle_kernel_interrupt_and_markers(
-                        tls, &buf, cur_modoffs, instr->length(), instrs_are_separate,
-                        &interrupted);
-                    if (!error.empty())
-                        return error;
-                    if (interrupted)
-                        break;
-                }
-            }
-            cur_modoffs += instr->length();
-            DR_CHECK((size_t)(buf - buf_start) < WRITE_BUFFER_SIZE, "Too many entries");
-            if (instr->is_cti()) {
-                // In case this is the last branch prior to a thread switch, buffer it. We
-                // avoid swapping threads immediately after a branch so that analyzers can
-                // more easily find the branch target.  Doing this in the tracer would
-                // incur extra overhead, and in the reader would be more complex and messy
-                // than here (and we are ok bailing on doing this for online traces), so
-                // we handle it in post-processing by delaying a thread-block-final branch
-                // (and its memrefs) to that thread's next block.  This changes the
-                // timestamp of the branch, which we live with.
-                error = impl()->write_delayed_branches(tls, buf_start, buf);
-                if (!error.empty())
-                    return error;
-            } else {
-                if (!impl()->write(tls, buf_start, buf))
-                    return "Failed to write to output file";
-            }
-            if (interrupted)
-                break;
-        }
-        *handled = true;
-        return "";
+        if (last_block_->second[block.second] == 1)
+            return false;
+        last_block_->second[block.second] = 1;
+        return true;
     }
 
-    // Returns true if a kernel interrupt happened at cur_modoffs.
-    // Outputs a kernel interrupt if this is the right location.
-    // Outputs any other markers observed if !instrs_are_separate, since they
-    // are part of this block and need to be inserted now.
-    std::string
-    handle_kernel_interrupt_and_markers(void *tls, INOUT trace_entry_t **buf_in,
-                                        uint64_t cur_modoffs, int instr_length,
-                                        bool instrs_are_separate, OUT bool *interrupted)
+    void
+    erase(T pc)
     {
-        // To avoid having to backtrack later, we read ahead to ensure we insert
-        // an interrupt at the right place between memrefs or between instructions.
-        *interrupted = false;
-        bool append = false;
-        trace_entry_t *buf_start = impl()->get_write_buffer(tls);
-        do {
-            const offline_entry_t *in_entry = impl()->get_next_entry(tls);
-            if (in_entry == nullptr)
-                return "";
-            append = false;
-            if (in_entry->extended.type != OFFLINE_TYPE_EXTENDED ||
-                in_entry->extended.ext != OFFLINE_EXT_TYPE_MARKER) {
-                // Not a marker: just put it back below.
-            } else if (in_entry->extended.valueB == TRACE_MARKER_TYPE_KERNEL_EVENT) {
-                // A signal/exception marker in the next entry could be at any point
-                // among non-memref instrs, or it could be after this bb.
-                // We check the stored offset.
-                uint64_t int_modoffs = (uint64_t)in_entry->extended.valueA;
-                impl()->log(4,
-                            "Checking whether reached signal/exception +" PIFX
-                            " vs cur +" PIFX "\n",
-                            int_modoffs, cur_modoffs);
-                if (int_modoffs == 0 || int_modoffs == cur_modoffs) {
-                    impl()->log(4, "Signal/exception interrupted the bb @ +" PIFX "\n",
-                                int_modoffs);
-                    append = true;
-                    *interrupted = true;
-                    if (int_modoffs == 0) {
-                        // This happens on rseq native aborts, where the trace instru
-                        // includes the rseq committing store before the native rseq
-                        // execution hits the native abort.  Pretend the native abort
-                        // happened *before* the committing store by walking the store
-                        // backward.  We will not get here for Windows callbacks, the
-                        // other event with a 0 modoffs, because they are always between
-                        // bbs.  (Unfortunately there's no simple way to assert or check
-                        // that here or in the tracer.)
-                        trace_type_t skipped_type;
-                        do {
-                            --*buf_in;
-                            skipped_type = static_cast<trace_type_t>((*buf_in)->type);
-                            DR_ASSERT(*buf_in >= buf_start);
-                        } while (!type_is_instr(skipped_type) &&
-                                 skipped_type != TRACE_TYPE_INSTR_NO_FETCH);
-                    }
-                } else {
-                    // Put it back. We do not have a problem with other markers
-                    // following this, because we will have to hit the correct point
-                    // for this interrupt marker before we hit a memref entry, avoiding
-                    // the danger of wanting a memref entry, seeing a marker, continuing,
-                    // and hitting a fatal error when we find the memref back in the
-                    // not-inside-a-block main loop.
-                }
-            } else {
-                // It's some other marker, such as for function tracing.  Output it now,
-                // to avoid confusion with memrefs.
-                // For instrs_are_separate, however, we're only processing a single
-                // instruction here and want to avoid dealing with a long string of
-                // markers (say, from function tracing) before the next instr overflowing
-                // our buffer.  Better to return to the main loop.
-                append = !instrs_are_separate;
-            }
-            if (append) {
-                uintptr_t marker_val = 0;
-                std::string err = get_marker_value(tls, &in_entry, &marker_val);
-                if (!err.empty())
-                    return err;
-                byte *buf = reinterpret_cast<byte *>(*buf_in);
-                buf += trace_metadata_writer_t::write_marker(
-                    buf, (trace_marker_type_t)in_entry->extended.valueB, marker_val);
-                *buf_in = reinterpret_cast<trace_entry_t *>(buf);
-                impl()->log(3, "Appended marker type %u value " PIFX "\n",
-                            (trace_marker_type_t)in_entry->extended.valueB, marker_val);
-                // There can be many markers in a row, esp for function tracing on
-                // longjmp or some other xfer that skips many post-call points.
-                // But, we can't easily write the buffer out, b/c we want to defer
-                // it for branches, and roll it back for rseq.
-                // XXX i#4159: We could switch to dynamic storage (and update all uses
-                // that assume no re-allocation), but this should be pathological so for
-                // now we have a release-build failure.
-                DR_CHECK((size_t)(*buf_in - buf_start) < WRITE_BUFFER_SIZE,
-                         "Too many entries");
-            } else {
-                // Put it back.
-                impl()->unread_last_entry(tls);
-            }
-        } while (append);
-        return "";
+        auto block = convert(pc);
+        if (last_block_->first != block.first)
+            last_block_ = page_table_.find(block.first);
+        if (last_block_ != page_table_.end())
+            last_block_->second[block.second] = 0;
     }
 
-    std::string
-    get_marker_value(void *tls, INOUT const offline_entry_t **entry, OUT uintptr_t *value)
+    void
+    clear()
     {
-        uintptr_t marker_val = static_cast<uintptr_t>((*entry)->extended.valueA);
-        if ((*entry)->extended.valueB == TRACE_MARKER_TYPE_SPLIT_VALUE) {
-#ifdef X64
-            const offline_entry_t *next = impl()->get_next_entry(tls);
-            if (next == nullptr || next->extended.ext != OFFLINE_EXT_TYPE_MARKER)
-                return "SPLIT_VALUE marker is not adjacent to 2nd entry";
-            marker_val =
-                (marker_val << 32) | static_cast<uintptr_t>(next->extended.valueA);
-            *entry = next;
-#else
-            return "TRACE_MARKER_TYPE_SPLIT_VALUE unexpected for 32-bit";
-#endif
-        }
-        *value = marker_val;
-        return "";
+        page_table_.clear();
+        page_table_.reserve(BASIC_BUCKET_COUNT);
+        page_table_.emplace(T(0), std::move(std::bitset<BLOCK_SIZE>()));
+        last_block_ = page_table_.begin();
     }
 
-    std::string
-    append_memref(void *tls, INOUT trace_entry_t **buf_in, const instr_summary_t *instr,
-                  instr_summary_t::memref_summary_t memref, bool write,
-                  std::unordered_map<reg_id_t, addr_t> &reg_vals)
+    ~bitset_hash_table_t()
     {
-        DR_ASSERT(
-            !TESTANY(OFFLINE_FILE_TYPE_INSTRUCTION_ONLY, impl()->get_file_type(tls)));
-        trace_entry_t *buf = *buf_in;
-        const offline_entry_t *in_entry = nullptr;
-        bool have_addr = false;
-        bool have_type = false;
-        reg_id_t base;
-        int version = impl()->get_version(tls);
-        if (memref.use_remembered_base) {
-            DR_ASSERT(!TESTANY(OFFLINE_FILE_TYPE_FILTERED, impl()->get_file_type(tls)));
-            bool is_elidable =
-                instru_offline_.opnd_is_elidable(memref.opnd, base, version);
-            DR_ASSERT(is_elidable);
-            if (base == DR_REG_NULL) {
-                DR_ASSERT(IF_REL_ADDRS(opnd_is_near_rel_addr(memref.opnd) ||)
-                              opnd_is_near_abs_addr(memref.opnd));
-                buf->addr = reinterpret_cast<addr_t>(opnd_get_addr(memref.opnd));
-                impl()->log(4, "Filling in elided rip-rel addr with %p\n", buf->addr);
-            } else {
-                buf->addr = reg_vals[base];
-                impl()->log(4, "Filling in elided addr with remembered %s: %p\n",
-                            get_register_name(base), buf->addr);
-            }
-            have_addr = true;
-            impl()->add_to_statistic(tls, RAW2TRACE_STAT_COUNT_ELIDED, 1);
-        }
-        if (!have_addr) {
-            if (memref.use_remembered_base)
-                return "Non-elided base mislabeled to use remembered base";
-            in_entry = impl()->get_next_entry(tls);
-        }
-        if (in_entry != nullptr && in_entry->extended.type == OFFLINE_TYPE_EXTENDED &&
-            in_entry->extended.ext == OFFLINE_EXT_TYPE_MEMINFO) {
-            // For -L0_filter we have to store the type for multi-memref instrs where
-            // we can't tell which memref it is (we'll still come here for the subsequent
-            // memref operands but we'll exit early in the check below).
-            have_type = true;
-            buf->type = in_entry->extended.valueB;
-            buf->size = in_entry->extended.valueA;
-            impl()->log(4, "Found type entry type %d size %d\n", buf->type, buf->size);
-            in_entry = impl()->get_next_entry(tls);
-            if (in_entry == nullptr)
-                return "Trace ends mid-block";
-        }
-        if (!have_addr &&
-            (in_entry == nullptr ||
-             (in_entry->addr.type != OFFLINE_TYPE_MEMREF &&
-              in_entry->addr.type != OFFLINE_TYPE_MEMREF_HIGH))) {
-            // This happens when there are predicated memrefs in the bb, or for a
-            // zero-iter rep string loop, or for a multi-memref instr with -L0_filter.
-            // For predicated memrefs, they could be earlier, so "instr"
-            // may not itself be predicated.
-            // XXX i#2015: if there are multiple predicated memrefs, our instr vs
-            // data stream may not be in the correct order here.
-            impl()->log(4,
-                        "Missing memref from predication, 0-iter repstr, or filter "
-                        "(next type is 0x" ZHEX64_FORMAT_STRING ")\n",
-                        in_entry == nullptr ? 0 : in_entry->combined_value);
-            if (in_entry != nullptr) {
-                impl()->unread_last_entry(tls);
-            }
-            return "";
-        }
-        if (!have_type) {
-            if (instr->is_prefetch()) {
-                buf->type = instr->prefetch_type();
-                buf->size = 1;
-            } else if (instr->is_flush()) {
-                buf->type = instr->flush_type();
-                // TODO i#4398: Handle flush sizes larger than ushort.
-                // TODO i#4406: Handle flush instrs with sizes other than cache line.
-                buf->size = (ushort)impl()->get_cache_line_size(tls);
-            } else {
-                if (write)
-                    buf->type = TRACE_TYPE_WRITE;
-                else
-                    buf->type = TRACE_TYPE_READ;
-                buf->size = (ushort)opnd_size_in_bytes(opnd_get_size(memref.opnd));
-            }
-        }
-        if (!have_addr) {
-            DR_ASSERT(in_entry != nullptr);
-            // We take the full value, to handle low or high.
-            buf->addr = (addr_t)in_entry->combined_value;
-        }
-        if (memref.remember_base &&
-            instru_offline_.opnd_is_elidable(memref.opnd, base, version)) {
-            impl()->log(5, "Remembering base " PFX " for %s\n", buf->addr,
-                        get_register_name(base));
-            reg_vals[base] = buf->addr;
-        }
-        if (!TESTANY(OFFLINE_FILE_TYPE_NO_OPTIMIZATIONS, impl()->get_file_type(tls)) &&
-            instru_offline_.opnd_disp_is_elidable(memref.opnd)) {
-            // We stored only the base reg, as an optimization.
-            buf->addr += opnd_get_disp(memref.opnd);
-        }
-        impl()->log(4, "Appended memref type %d size %d to " PFX "\n", buf->type,
-                    buf->size, (ptr_uint_t)buf->addr);
-
-#ifdef AARCH64
-        // TODO i#4400: Following is a workaround to correctly represent DC ZVA in
-        // offline traces. Note that this doesn't help with online traces.
-        // TODO i#3339: This workaround causes us to lose the address that was present
-        // in the original instruction. For re-encoding fidelity, we may want the
-        // original address in the IR.
-        if (instr->is_aarch64_dc_zva()) {
-            buf->addr = ALIGN_BACKWARD(buf->addr, impl()->get_cache_line_size(tls));
-            buf->size = impl()->get_cache_line_size(tls);
-            buf->type = TRACE_TYPE_WRITE;
-        }
-#endif
-
-        *buf_in = ++buf;
-        return "";
+        clear();
     }
-
-    offline_instru_t instru_offline_;
-    const std::vector<module_t> *modvec_ptr_ = nullptr;
-
-#undef DR_CHECK
 };
 
 /**
@@ -1377,14 +511,32 @@ private:
  * expected by analysis tools.  It requires access to the binary files for the
  * libraries and executable that were present during tracing.
  */
-class raw2trace_t : public trace_converter_t<raw2trace_t> {
+class raw2trace_t {
 public:
-    // module_map, thread_files and out_files are all owned and opened/closed by the
-    // caller.  module_map is not a string and can contain binary data.
-    raw2trace_t(const char *module_map, const std::vector<std::istream *> &thread_files,
-                const std::vector<std::ostream *> &out_files, void *dcontext = NULL,
-                unsigned int verbosity = 0, int worker_count = -1,
-                const std::string &alt_module_dir = "");
+    /* TODO i#6145: The argument list of raw2trace_t has become excessively long. It would
+     * be more manageable to have an options struct instead.
+     */
+    // Only one of out_files and out_archives should be non-empty: archives support fast
+    // seeking and are preferred but require zlib.
+    // module_map, encoding_file, serial_schedule_file, cpu_schedule_file, thread_files,
+    // and out_files are all owned and opened/closed by the caller.  module_map is not a
+    // string and can contain binary data.
+    // If a nullptr dcontext is passed, creates a new DR context va dr_standalone_init().
+    raw2trace_t(
+        const char *module_map, const std::vector<std::istream *> &thread_files,
+        const std::vector<std::ostream *> &out_files,
+        const std::vector<archive_ostream_t *> &out_archives,
+        file_t encoding_file = INVALID_FILE, std::ostream *serial_schedule_file = nullptr,
+        archive_ostream_t *cpu_schedule_file = nullptr, void *dcontext = nullptr,
+        unsigned int verbosity = 0, int worker_count = -1,
+        const std::string &alt_module_dir = "",
+        uint64_t chunk_instr_count = 10 * 1000 * 1000,
+        const std::unordered_map<thread_id_t, std::istream *> &kthread_files_map = {},
+        const std::string &kcore_path = "", const std::string &kallsyms_path = "",
+        std::unique_ptr<dynamorio::drmemtrace::record_reader_t> syscall_template_file =
+            nullptr,
+        bool pt2ir_best_effort = false);
+    // If a nullptr dcontext_in was passed to the constructor, calls dr_standalone_exit().
     virtual ~raw2trace_t();
 
     /**
@@ -1406,7 +558,7 @@ public:
      * Returns a non-empty error message on failure.
      */
     std::string
-    handle_custom_data(const char *(*parse_cb)(const char *src, OUT void **data),
+    handle_custom_data(const char *(*parse_cb)(const char *src, DR_PARAM_OUT void **data),
                        std::string (*process_cb)(drmodtrack_info_t *info, void *data,
                                                  void *user_data),
                        void *process_cb_user_data, void (*free_cb)(void *data));
@@ -1420,7 +572,7 @@ public:
      * for every module in the list, and returns an empty string at the end.
      * Returns a non-empty error message on failure.
      *
-     * \deprecated #module_mapper_t should be used instead.
+     * \deprecated #dynamorio::drmemtrace::module_mapper_t should be used instead.
      */
     std::string
     do_module_parsing();
@@ -1436,7 +588,8 @@ public:
      * the current process.
      * Returns a non-empty error message on failure.
      *
-     * \deprecated #module_mapper_t::get_loaded_modules() should be used instead.
+     * \deprecated #dynamorio::drmemtrace::module_mapper_t::get_loaded_modules() should be
+     * used instead.
      */
     std::string
     do_module_parsing_and_mapping();
@@ -1450,10 +603,11 @@ public:
      * allowing decoding for obtaining further information than is stored in the trace.
      * Returns a non-empty error message on failure.
      *
-     * \deprecated #module_mapper_t::find_mapped_trace_address() should be used instead.
+     * \deprecated #dynamorio::drmemtrace::module_mapper_t::find_mapped_trace_address()
+     * should be used instead.
      */
     std::string
-    find_mapped_trace_address(app_pc trace_address, OUT app_pc *mapped_address);
+    find_mapped_trace_address(app_pc trace_address, DR_PARAM_OUT app_pc *mapped_address);
 
     /**
      * Performs the conversion from raw data to finished trace files.
@@ -1465,21 +619,46 @@ public:
     static std::string
     check_thread_file(std::istream *f);
 
+    /**
+     * Writes the essential header entries to the given buffer. This is useful for other
+     * libraries that want to create a trace that works with our tools like the analyzer
+     * framework.
+     */
+    static void
+    create_essential_header_entries(byte *&buf_ptr, int version,
+                                    offline_file_type_t file_type, thread_id_t tid,
+                                    process_id_t pid);
+
+#ifdef BUILD_PT_POST_PROCESSOR
+    /**
+     *  Checks whether the given file is a valid kernel PT file.
+     */
+    static std::string
+    check_kthread_file(std::istream *f);
+
+    /**
+     *  Return the tid of the given kernel PT file.
+     */
+    static std::string
+    get_kthread_file_tid(std::istream *f, DR_PARAM_OUT thread_id_t *tid);
+#endif
+
     uint64
     get_statistic(raw2trace_statistic_t stat);
 
 protected:
-    // Overridable parts of the interface expected by trace_converter_t.
-    virtual const offline_entry_t *
-    get_next_entry(void *tls);
-    virtual void
-    unread_last_entry(void *tls);
-    virtual std::string
-    on_thread_end(void *tls);
-    virtual void
-    log(uint level, const char *fmt, ...);
-    virtual void
-    log_instruction(uint level, app_pc decode_pc, app_pc orig_pc);
+    /**
+     * The trace_entry_t buffer returned by get_write_buffer() is assumed to be at least
+     * #WRITE_BUFFER_SIZE large.
+     *
+     * WRITE_BUFFER_SIZE needs to be large enough to hold one instruction and its
+     * memrefs.
+     * Some of the AArch64 SVE scatter/gather instructions have a lot of memref entries.
+     * For example ld4b loads 4 registers with byte sized elements, so that is
+     *     (vl_bits / 8) * 4
+     * entries. With a 512-bit vector length that is (512 / 8) * 4 = 256 memref entries.
+     */
+    static const uint WRITE_BUFFER_SIZE = 260;
 
     struct block_summary_t {
         block_summary_t(app_pc start, int instr_count)
@@ -1489,24 +668,53 @@ protected:
         }
         app_pc start_pc;
         std::vector<instr_summary_t> instrs;
+        int total_mem_count = -1;
+    };
+
+    struct branch_info_t {
+        branch_info_t(app_pc pc, app_pc target, int idx)
+            : pc(pc)
+            , target_pc(target)
+            , buf_idx(idx)
+        {
+        }
+        branch_info_t()
+            : pc(0)
+            , target_pc(0)
+            , buf_idx(-1)
+        {
+        }
+        app_pc pc;
+        app_pc target_pc;
+        int buf_idx; // Index into rseq_buffer_.
     };
 
     // Per-traced-thread data is stored here and accessed without locks by having each
     // traced thread processed by only one processing thread.
-    // This is what trace_converter_t passes as void* to our routines.
     struct raw2trace_thread_data_t {
         raw2trace_thread_data_t()
             : index(0)
             , tid(0)
             , worker(0)
             , thread_file(nullptr)
+            , out_archive(nullptr)
             , out_file(nullptr)
             , version(0)
             , file_type(OFFLINE_FILE_TYPE_DEFAULT)
             , saw_header(false)
+            , last_entry_is_split(false)
             , prev_instr_was_rep_string(false)
             , last_decode_block_start(nullptr)
+            , last_decode_modidx(0)
+            , last_decode_modoffs(0)
             , last_block_summary(nullptr)
+#ifdef BUILD_PT_POST_PROCESSOR
+            , kthread_file(nullptr)
+#endif
+        {
+        }
+        // Support subclasses extending this struct.
+        virtual ~raw2trace_thread_data_t()
         {
         }
 
@@ -1514,46 +722,356 @@ protected:
         thread_id_t tid;
         int worker;
         std::istream *thread_file;
-        std::ostream *out_file;
+        archive_ostream_t *out_archive; // May be nullptr.
+        std::ostream *out_file;         // Always set; for archive, == "out_archive".
         std::string error;
         int version;
         offline_file_type_t file_type;
-        size_t cache_line_size;
-        std::vector<offline_entry_t> pre_read;
+        // Remember the type at the start ("file_type" above will be updated mid-run
+        // if we see a TRACE_MARKER_TYPE_FILTER_ENDPOINT marker).
+        offline_file_type_t start_file_type;
+        size_t cache_line_size = 0;
+        std::deque<offline_entry_t> pre_read;
+        std::vector<offline_entry_t> kernel_event_lookahead;
+        offline_instru_t instru_offline;
 
         // Used to delay a thread-buffer-final branch to keep it next to its target.
-        std::vector<char> delayed_branch;
+        std::vector<trace_entry_t> delayed_branch;
+        // This is the first step of optimization of using delayed_branch_ vector.
+        // Checking the bool value is cheaper than delayed_branch.empty().
+        // In general it's better to avoid this vector at all.
+        bool delayed_branch_empty_ = true;
+        // Records the decode pcs for delayed_branch instructions for re-inserting
+        // encodings across a chunk boundary.
+        std::vector<app_pc> delayed_branch_decode_pcs;
+        // Records the targets for delayed branches.  We don't merge this with
+        // delayed_branch and delayed_branch_decode_pcs as the other vectors are
+        // passed as raw arrays to write().
+        std::vector<app_pc> delayed_branch_target_pcs;
 
         // Current trace conversion state.
         bool saw_header;
         offline_entry_t last_entry;
+        // For 2-entry markers we need a 2nd current-entry struct we can unread.
+        bool last_entry_is_split;
+        offline_entry_t last_split_first_entry;
         std::array<trace_entry_t, WRITE_BUFFER_SIZE> out_buf;
         bool prev_instr_was_rep_string;
+        // There is no sentinel available for modidx+modoffs so we use the pc for that.
         app_pc last_decode_block_start;
+        uint64 last_decode_modidx;
+        uint64 last_decode_modoffs;
         block_summary_t *last_block_summary;
+        uint64 last_window = 0;
 
         // Statistics on the processing.
         uint64 count_elided = 0;
+        uint64 count_duplicate_syscall = 0;
+        uint64 count_false_syscall = 0;
+        uint64 count_rseq_abort = 0;
+        uint64 count_rseq_side_exit = 0;
+        uint64 earliest_trace_timestamp = (std::numeric_limits<uint64>::max)();
+        uint64 latest_trace_timestamp = 0;
+        uint64 final_trace_instr_count = 0;
+        uint64 kernel_instr_count = 0;
+        uint64 syscall_traces_converted = 0;
+        uint64 syscall_traces_conversion_failed = 0;
+        uint64 syscall_traces_non_fatal_decoding_error_count = 0;
+        uint64 syscall_traces_conversion_empty = 0;
+        uint64 syscall_traces_injected = 0;
+        uint64 negative_times_corrected = 0;
+        uint64 non_canonical_top_bits = 0;
+
+        uint64 cur_chunk_instr_count = 0;
+        uint64 cur_chunk_ref_count = 0;
+        memref_counter_t memref_counter;
+        uint64 chunk_count_ = 0;
+        uint64 last_timestamp_ = 0;
+        uint last_cpu_ = 0;
+        app_pc last_pc_fallthrough_if_syscall_ = 0;
+
+        bitset_hash_table_t<app_pc> encoding_emitted;
+        app_pc last_encoding_emitted = nullptr;
+
+        schedule_file_t::per_shard_t sched_data;
+
+        // State for rolling back rseq aborts and side exits.
+        bool rseq_want_rollback_ = false;
+        bool rseq_ever_saw_entry_ = false;
+        bool rseq_buffering_enabled_ = false;
+        bool rseq_past_end_ = false;
+        addr_t rseq_commit_pc_ = 0;
+        addr_t rseq_start_pc_ = 0;
+        addr_t rseq_end_pc_ = 0;
+        int to_inject_syscall_ = INJECT_NONE;
+        bool saw_first_func_id_marker_after_syscall_ = false;
+        std::vector<trace_entry_t> rseq_buffer_;
+        int rseq_commit_idx_ = -1; // Index into rseq_buffer_.
+        std::vector<branch_info_t> rseq_branch_targets_;
+        std::vector<app_pc> rseq_decode_pcs_;
+
+#ifdef BUILD_PT_POST_PROCESSOR
+        std::unique_ptr<drir_t> pt_decode_state_ = nullptr;
+        std::istream *kthread_file;
+        bool pt_metadata_processed = false;
+        pt2ir_t pt2ir;
+#endif
+
+        bool has_v2p = false;
+        virtual2physical_repeater_t v2p;
+
+        // Sentinel value for to_inject_syscall.
+        static constexpr int INJECT_NONE = -1;
     };
 
-    std::string
+    struct trace_template_t {
+        std::vector<trace_entry_t> entries;
+        int instr_count = 0;
+    };
+
+#ifdef BUILD_PT_POST_PROCESSOR
+    /**
+     * Returns the next #pt_data_buf_t entry from the thread's kernel raw file. If the
+     * next entry is also the first one, the thread's pt_metadata is also returned in the
+     * provided parameter.
+     */
+    virtual std::unique_ptr<pt_data_buf_t>
+    get_next_kernel_entry(raw2trace_thread_data_t *tdata,
+                          std::unique_ptr<pt_metadata_buf_t> &pt_metadata,
+                          uint64_t syscall_idx);
+
+#endif
+
+    /**
+     * Convert starting from in_entry, and reading more entries as required.
+     * Sets end_of_record to true if processing hit the end of a record.
+     * read_and_map_modules() must have been called by the implementation before
+     * calling this API.
+     */
+    bool
+    process_offline_entry(raw2trace_thread_data_t *tdata, const offline_entry_t *in_entry,
+                          thread_id_t tid, DR_PARAM_OUT bool *end_of_record,
+                          DR_PARAM_OUT bool *last_bb_handled,
+                          DR_PARAM_OUT bool *flush_decode_cache);
+
+    /**
+     * Called for each record in an output buffer prior to writing out the buffer.
+     * The entry cannot be modified.  A subclass can override this to compute
+     * per-shard statistics which can then be used for a variety of tasks including
+     * late removal of shards for targeted filtering.
+     */
+    virtual void
+    observe_entry_output(raw2trace_thread_data_t *tls, const trace_entry_t *entry);
+
+    /**
+     * Performs processing actions for the marker "marker_type" with value
+     * "marker_val", including writing out a marker record.  Further records can also
+     * be written to "buf".  Returns whether successful.
+     */
+    virtual bool
+    process_marker(raw2trace_thread_data_t *tdata, trace_marker_type_t marker_type,
+                   uintptr_t marker_val, byte *&buf,
+                   DR_PARAM_OUT bool *flush_decode_cache);
+    /**
+     * Read the header of a thread, by calling get_next_entry() successively to
+     * populate the header values. The timestamp field is populated only
+     * for legacy traces.
+     */
+    bool
+    read_header(raw2trace_thread_data_t *tdata, DR_PARAM_OUT trace_header_t *header);
+
+    /**
+     * Point to the next offline entry_t.  Will not attempt to dereference past the
+     * returned pointer.
+     */
+    virtual const offline_entry_t *
+    get_next_entry(raw2trace_thread_data_t *tdata);
+
+    /**
+     * Records the currently stored last entry in order to remember two entries at once
+     * (for handling split two-entry markers) and then reads and returns a pointer to the
+     * next entry.  A subsequent call to unread_last_entry() will put back both entries.
+     * Returns an emptry string on success or an error description on an error.
+     */
+    virtual const offline_entry_t *
+    get_next_entry_keep_prior(raw2trace_thread_data_t *tdata);
+
+    /* Adds the last read entry to the front of the read queue for get_next_entry(). */
+    virtual void
+    unread_last_entry(raw2trace_thread_data_t *tdata);
+
+    /* Adds "entry" to the back of the read queue for get_next_entry(). */
+    void
+    queue_entry(raw2trace_thread_data_t *tdata, offline_entry_t &entry);
+
+    /**
+     * Callback notifying the currently-processed thread has exited. Subclasses are
+     * expected to track record metadata themselves.  APIs for extracting that metadata
+     * are exposed.
+     */
+    virtual bool
+    on_thread_end(raw2trace_thread_data_t *tdata);
+
+    /**
+     * The level parameter represents severity: the lower the level, the higher the
+     * severity.
+     */
+    virtual void
+    log(uint level, const char *fmt, ...);
+
+    /**
+     * Similar to log() but this disassembles the given PC.
+     */
+    virtual void
+    log_instruction(uint level, app_pc decode_pc, app_pc orig_pc);
+
+    virtual std::string
     read_and_map_modules();
 
-    // Processes a raw buffer which must be the next buffer in the desired (typically
-    // timestamp-sorted) order for its traced thread.  For concurrent buffer processing,
-    // all buffers from any one traced thread must be processed by the same worker
-    // thread, both for correct ordering and correct synchronization.
-    std::string
-    process_next_thread_buffer(raw2trace_thread_data_t *tdata, OUT bool *end_of_record);
+#ifdef BUILD_PT_POST_PROCESSOR
+    /**
+     * Process the PT data associated with the provided syscall index.
+     */
+    bool
+    process_syscall_pt(raw2trace_thread_data_t *tdata, uint64_t syscall_idx);
+#endif
+
+    /**
+     * Processes a raw buffer which must be the next buffer in the desired (typically
+     * timestamp-sorted) order for its traced thread.  For concurrent buffer processing,
+     * all buffers from any one traced thread must be processed by the same worker
+     * thread, both for correct ordering and correct synchronization.
+     */
+    bool
+    process_next_thread_buffer(raw2trace_thread_data_t *tdata,
+                               DR_PARAM_OUT bool *end_of_record);
+
+    bool
+    maybe_inject_pending_syscall_sequence(raw2trace_thread_data_t *tdata,
+                                          const offline_entry_t &entry, byte *buf_base);
 
     std::string
-    write_footer(void *tls);
+    aggregate_and_write_schedule_files();
+
+    bool
+    write_footer(raw2trace_thread_data_t *tdata);
+
+    bool
+    open_new_chunk(raw2trace_thread_data_t *tdata);
+
+    /**
+     * Reads entries in the given system call template file. These will be added
+     * to the final trace at the locations of the corresponding system call number
+     * markers.
+     */
+    std::string
+    read_syscall_template_file();
+
+    /**
+     * Returns the app pc of the first instruction in the given system call template.
+     * Returns nullptr if it could not find it.
+     */
+    app_pc
+    get_first_app_pc_for_syscall_template(trace_template_t *trace_template);
+
+    /**
+     * Returns the trace template for the given syscall num, or the default
+     * syscall template if one is available.
+     */
+    trace_template_t *
+    get_syscall_template(int syscall_num);
+
+    /**
+     * Writes the system call template to the output trace, if any was provided in
+     * the system call template file for the given syscall_num.
+     */
+    bool
+    write_syscall_template(raw2trace_thread_data_t *tdata, byte *&buf,
+                           trace_entry_t *buf_base, int syscall_num);
+
+    /**
+     * The pointer to the DR context.
+     */
+    void *const dcontext_;
+
+    /**
+     * Whether a non-nullptr dcontext was passed to the constructor.
+     */
+    bool passed_dcontext_ = false;
+
+    /* TODO i#2062: Remove this after replacing all uses in favor of queries to
+     * module_mapper_t to handle both generated and module code.
+     */
+    /**
+     * Get the module map.
+     */
+    const std::vector<module_t> &
+    modvec_() const
+    {
+        return *modvec_ptr_;
+    }
+
+    /* TODO i#2062: Remove this after replacing all uses in favor of queries to
+     * module_mapper_t to handle both generated and module code.
+     */
+    /**
+     * Set the module map. Must be called before process_offline_entry() is called.
+     */
+    void
+    set_modvec_(const std::vector<module_t> *modvec)
+    {
+        modvec_ptr_ = modvec;
+    }
+
+    /**
+     * Get the module mapper.
+     */
+    const module_mapper_t &
+    modmap_() const
+    {
+        return *modmap_ptr_;
+    }
+
+    /**
+     * Set the module mapper. Must be called before process_offline_entry() is called.
+     */
+    void
+    set_modmap_(const module_mapper_t *modmap)
+    {
+        modmap_ptr_ = modmap;
+    }
+
+    /** Returns whether this system number *might* block. */
+    virtual bool
+    is_maybe_blocking_syscall(uintptr_t number);
+
+    void
+    clear_decode_and_last_block_info(raw2trace_thread_data_t *tdata);
+
+    const module_mapper_t *modmap_ptr_ = nullptr;
 
     uint64 count_elided_ = 0;
+    uint64 count_duplicate_syscall_ = 0;
+    uint64 count_false_syscall_ = 0;
+    uint64 count_rseq_abort_ = 0;
+    uint64 count_rseq_side_exit_ = 0;
+    uint64 earliest_trace_timestamp_ = (std::numeric_limits<uint64>::max)();
+    uint64 latest_trace_timestamp_ = 0;
+    uint64 final_trace_instr_count_ = 0;
+    uint64 kernel_instr_count_ = 0;
+    uint64 syscall_traces_converted_ = 0;
+    uint64 syscall_traces_conversion_failed_ = 0;
+    uint64 syscall_traces_non_fatal_decoding_error_count_ = 0;
+    uint64 syscall_traces_conversion_empty_ = 0;
+    uint64 syscall_traces_injected_ = 0;
+    uint64 negative_times_corrected_ = 0;
+    uint64 non_canonical_top_bits_ = 0;
+
+    std::unique_ptr<module_mapper_t> module_mapper_;
+
+    std::vector<std::unique_ptr<raw2trace_thread_data_t>> thread_data_;
 
 private:
-    friend class trace_converter_t<raw2trace_t>;
-
     // We store this in drmodtrack_info_t.custom to combine our binary contents
     // data with any user-added module data from drmemtrace_custom_module_data.
     struct custom_module_data_t {
@@ -1562,87 +1080,358 @@ private:
         void *user_data;
     };
 
-    // Non-overridable parts of the interface expected by trace_converter_t.
+    // Return a writable buffer guaranteed to be at least #WRITE_BUFFER_SIZE large.
+    //  get_write_buffer() may reuse the same buffer after write() or
+    //  write_delayed_branches()
+    // is called.
     trace_entry_t *
-    get_write_buffer(void *tls);
+    get_write_buffer(raw2trace_thread_data_t *tdata);
+
+    // Writes the converted traces between start and end, where end is past the last
+    // item to write. Both start and end are assumed to be pointers inside a buffer
+    // returned by get_write_buffer().  decode_pcs is only needed if there is more
+    // than one instruction in the buffer; in that case it must contain one entry per
+    // instruction.
     bool
-    write(void *tls, const trace_entry_t *start, const trace_entry_t *end);
-    std::string
-    write_delayed_branches(void *tls, const trace_entry_t *start,
-                           const trace_entry_t *end);
+    write(raw2trace_thread_data_t *tdata, const trace_entry_t *start,
+          const trace_entry_t *end, app_pc *decode_pcs = nullptr,
+          size_t decode_pcs_size = 0);
+
+    // Similar to write(), but treat the provided traces as delayed branches: if they
+    // are the last values in a record, they belong to the next record of the same
+    // thread.  The start..end sequence must contain one instruction.
     bool
-    instr_summary_exists(void *tls, uint64 modidx, uint64 modoffs, app_pc block_start,
-                         int index, app_pc pc);
+    write_delayed_branches(raw2trace_thread_data_t *tdata, const trace_entry_t *start,
+                           const trace_entry_t *end, app_pc decode_pc = nullptr,
+                           app_pc target_pc = nullptr);
+
+    // Helper used by write() when outputting chunked pieces. This consolidates
+    // logic repeating v2p markers in new chunks.
+    bool
+    write_with_repeats(raw2trace_thread_data_t *tdata, const trace_entry_t *start,
+                       const trace_entry_t *end);
+
+    // Writes encoding entries for pc..pc+instr_length to buf.
+    bool
+    append_encoding(raw2trace_thread_data_t *tdata, app_pc pc, size_t instr_length,
+                    trace_entry_t *&buf, trace_entry_t *buf_start);
+
+    bool
+    insert_post_chunk_encodings(raw2trace_thread_data_t *tdata,
+                                const trace_entry_t *instr, app_pc decode_pc);
+
+    // Returns true if there are currently delayed branches that have not been emitted
+    // yet.
+    bool
+    delayed_branches_exist(raw2trace_thread_data_t *tdata);
+
+    // Returns false if an encoding was already emitted.
+    // Otherwise, remembers that an encoding is being emitted now, and returns true.
+    bool
+    record_encoding_emitted(raw2trace_thread_data_t *tdata, app_pc pc);
+
+    // Removes the record of the last encoding remembered in record_encoding_emitted().
+    // This can only be called once between calls to record_encoding_emitted()
+    // and only after record_encoding_emitted() returns true.
+    void
+    rollback_last_encoding(raw2trace_thread_data_t *tdata);
+
+    // Writes out the buffered entries for an rseq region, after rolling back to
+    // a side exit or abort if necessary.
+    bool
+    adjust_and_emit_rseq_buffer(raw2trace_thread_data_t *tdata, addr_t next_pc,
+                                addr_t abort_pc = 0);
+
+    // Removes entries from tdata->rseq_buffer_ between and including the instructions
+    // starting at or after remove_start_rough_idx and before or equal to
+    // remove_end_rough_idx.  These "rough" indices can be on the encoding or instr
+    // fetch to include that instruction.
+    bool
+    rollback_rseq_buffer(raw2trace_thread_data_t *tdata, int remove_start_rough_idx,
+                         // This is inclusive.
+                         int remove_end_rough_idx);
+
+    // Returns whether an #instr_summary_t representation of the instruction at pc inside
+    // the block that begins at block_start_pc in the specified module exists.
+    bool
+    instr_summary_exists(raw2trace_thread_data_t *tdata, uint64 modidx, uint64 modoffs,
+                         app_pc block_start, int index, app_pc pc);
     block_summary_t *
-    lookup_block_summary(void *tls, app_pc block_start);
+    lookup_block_summary(raw2trace_thread_data_t *tdata, uint64 modidx, uint64 modoffs,
+                         app_pc block_start);
+    block_summary_t *
+    create_block_summary(raw2trace_thread_data_t *tdata, uint64 modidx, uint64 modoffs,
+                         app_pc block_start, int instr_count);
+    // Creates a new block summary if one doesn't exist.
+    bool
+    set_block_mem_count(raw2trace_thread_data_t *tdata, uint64 modidx, uint64 modoffs,
+                        app_pc block_start, int instr_count, int total_traced_mem_count);
+
     instr_summary_t *
-    lookup_instr_summary(void *tls, uint64 modidx, uint64 modoffs, app_pc block_start,
-                         int index, app_pc pc, OUT block_summary_t **block_summary);
+    lookup_instr_summary(raw2trace_thread_data_t *tdata, uint64 modidx, uint64 modoffs,
+                         app_pc block_start, int index, app_pc pc,
+                         DR_PARAM_OUT block_summary_t **block_summary);
     instr_summary_t *
-    create_instr_summary(void *tls, uint64 modidx, uint64 modoffs, block_summary_t *block,
-                         app_pc block_start, int instr_count, int index, INOUT app_pc *pc,
-                         app_pc orig);
+    create_instr_summary(raw2trace_thread_data_t *tdata, uint64 modidx, uint64 modoffs,
+                         block_summary_t *block, app_pc block_start, int instr_count,
+                         int index, DR_PARAM_INOUT app_pc *pc, app_pc orig);
+
+    // Return the #instr_summary_t representation of the index-th instruction (at *pc)
+    // inside the block that begins at block_start_pc and contains instr_count
+    // instructions in the specified module.  Updates the value at pc to the PC of the
+    // next instruction. It is assumed the app binaries have already been loaded using
+    // #module_mapper_t, and the values at *pc point within memory mapped by the module
+    // mapper. This API provides an opportunity to cache decoded instructions.
     const instr_summary_t *
-    get_instr_summary(void *tls, uint64 modidx, uint64 modoffs, app_pc block_start,
-                      int instr_count, int index, INOUT app_pc *pc, app_pc orig);
+    get_instr_summary(raw2trace_thread_data_t *tdata, uint64 modidx, uint64 modoffs,
+                      app_pc block_start, int instr_count, int index,
+                      DR_PARAM_INOUT app_pc *pc, app_pc orig);
+
+    // Sets two flags stored in the memref_summary_t inside the instr_summary_t for the
+    // index-th instruction (at pc) inside the block that begins at block_start_pc and
+    // contains instr_count instructions in the specified module.  The flags
+    // use_remembered_base and remember_base are set for the source (write==false) or
+    // destination (write==true) operand of index memop_index. The flags are OR-ed in:
+    // i.e., they are never cleared.
     bool
-    set_instr_summary_flags(void *tls, uint64 modidx, uint64 modoffs, app_pc block_start,
-                            int instr_count, int index, app_pc pc, app_pc orig,
-                            bool write, int memop_index, bool use_remembered_base,
-                            bool remember_base);
+    set_instr_summary_flags(raw2trace_thread_data_t *tdata, uint64 modidx, uint64 modoffs,
+                            app_pc block_start, int instr_count, int index, app_pc pc,
+                            app_pc orig, bool write, int memop_index,
+                            bool use_remembered_base, bool remember_base,
+                            int base_delta = 0);
     void
-    set_prev_instr_rep_string(void *tls, bool value);
+    set_last_pc_fallthrough_if_syscall(raw2trace_thread_data_t *tdata, app_pc value);
+    app_pc
+    get_last_pc_fallthrough_if_syscall(raw2trace_thread_data_t *tdata);
+
+    // Sets a per-traced-thread cached flag that is read by was_prev_instr_rep_string().
+    void
+    set_prev_instr_rep_string(raw2trace_thread_data_t *tdata, bool value);
+
+    // Queries a per-traced-thread cached flag that is set by set_prev_instr_rep_string().
     bool
-    was_prev_instr_rep_string(void *tls);
+    was_prev_instr_rep_string(raw2trace_thread_data_t *tdata);
+
+    // Returns the trace file version (an OFFLINE_FILE_VERSION* constant).
     int
-    get_version(void *tls);
+    get_version(raw2trace_thread_data_t *tdata);
+
+    // Returns the trace file type (a combination of OFFLINE_FILE_TYPE* constants).
     offline_file_type_t
-    get_file_type(void *tls);
-    size_t
-    get_cache_line_size(void *tls);
+
+    get_file_type(raw2trace_thread_data_t *tdata);
     void
-    add_to_statistic(void *tls, raw2trace_statistic_t stat, int value);
+    set_file_type(raw2trace_thread_data_t *tdata, offline_file_type_t file_type);
+
+    size_t
+    get_cache_line_size(raw2trace_thread_data_t *tdata);
+
+    // Accumulates the given value into the per-thread value for the statistic
+    // identified by stat. This may involve a simple addition, or any other operation
+    // like std::min or std::max, depending on the statistic.
+    void
+    accumulate_to_statistic(raw2trace_thread_data_t *tdata, raw2trace_statistic_t stat,
+                            uint64 value);
     void
     log_instruction(app_pc decode_pc, app_pc orig_pc);
 
-    std::string
-    append_delayed_branch(void *tls);
+    // Flush the branches sent to write_delayed_branches().
+    bool
+    append_delayed_branch(raw2trace_thread_data_t *tdata, app_pc next_pc);
 
     bool
-    thread_file_at_eof(void *tls);
-    std::string
+    thread_file_at_eof(raw2trace_thread_data_t *tdata);
+    bool
     process_header(raw2trace_thread_data_t *tdata);
 
-    std::string
+    bool
     process_thread_file(raw2trace_thread_data_t *tdata);
 
     void
     process_tasks(std::vector<raw2trace_thread_data_t *> *tasks);
 
-    std::vector<raw2trace_thread_data_t> thread_data_;
+    bool
+    emit_new_chunk_header(raw2trace_thread_data_t *tdata);
+
+    void
+    update_reg_deltas(raw2trace_thread_data_t *tdata, int version, instr_t *inst,
+                      reg_id_t only_reg, bool reg_remembered[DR_NUM_GPR_REGS],
+                      int reg_delta[DR_NUM_GPR_REGS]);
+
+    bool
+    analyze_elidable_addresses(raw2trace_thread_data_t *tdata, uint64 modidx,
+                               uint64 modoffs, app_pc start_pc, uint instr_count);
+
+    // Returns true if a kernel interrupt happened at cur_pc. The check skips
+    // memrefs to search for a kernel event marker. If the kernel event marker has
+    // the value of cur_pc, it returns true.
+    bool
+    interrupted_by_kernel_event(raw2trace_thread_data_t *tdata, uint64_t cur_pc,
+                                uint64_t cur_offs);
+
+    bool
+    append_bb_entries(raw2trace_thread_data_t *tdata, const offline_entry_t *in_entry,
+                      DR_PARAM_OUT bool *handled);
+
+    // Returns true if an rseq abort happened at cur_pc.
+    // Outputs a kernel interrupt if this is the right location.
+    // Outputs any other markers observed if !instrs_are_separate, since they
+    // are part of this block and need to be inserted now. Inserts all
+    // intra-block markers (i.e., the higher level process_offline_entry() will
+    // never insert a marker intra-block) and all inter-block markers are
+    // handled at a higher level (process_offline_entry()) and are never
+    // inserted here.
+    bool
+    handle_rseq_abort_marker(raw2trace_thread_data_t *tdata,
+                             DR_PARAM_INOUT trace_entry_t **buf_in, uint64_t cur_pc,
+                             uint64_t cur_offs, DR_PARAM_OUT bool *rseq_aborted);
+
+    bool
+    get_marker_value(raw2trace_thread_data_t *tdata,
+                     DR_PARAM_INOUT const offline_entry_t **entry,
+                     DR_PARAM_OUT uintptr_t *value);
+
+    bool
+    could_entry_be_address(offline_entry_t entry);
+
+    bool
+    append_scatter_gather(raw2trace_thread_data_t *tdata, const instr_summary_t *instr,
+                          DR_PARAM_INOUT trace_entry_t **buf_in,
+                          std::unordered_map<reg_id_t, addr_t> &reg_vals,
+                          bool expect_all_memrefs, DR_PARAM_OUT int &consumed_memrefs,
+                          app_pc orig_pc);
+
+    bool
+    append_repstring(raw2trace_thread_data_t *tdata, const instr_summary_t *instr,
+                     app_pc orig_pc, DR_PARAM_INOUT trace_entry_t **buf_in,
+                     std::unordered_map<reg_id_t, addr_t> &reg_vals,
+                     bool expect_all_memrefs, DR_PARAM_OUT int &consumed_memrefs,
+                     app_pc *saved_decode_pc, bool interrupted, bool added_encoding);
+
+    bool
+    append_memref(raw2trace_thread_data_t *tdata, DR_PARAM_INOUT trace_entry_t **buf_in,
+                  const instr_summary_t *instr, instr_summary_t::memref_summary_t memref,
+                  bool write, std::unordered_map<reg_id_t, addr_t> &reg_vals,
+                  DR_PARAM_OUT bool *reached_end_of_memrefs, bool expect_all_memrefs,
+                  DR_PARAM_OUT int &consumed_memrefs, app_pc orig_pc);
+
+    bool
+    should_omit_syscall(raw2trace_thread_data_t *tdata);
+
+    bool
+    is_marker_type(const offline_entry_t *entry, trace_marker_type_t marker_type);
 
     int worker_count_;
     std::vector<std::vector<raw2trace_thread_data_t *>> worker_tasks_;
 
-    // We use a hashtable to cache decodings.  We compared the performance of
-    // hashtable_t to std::map.find, std::map.lower_bound, std::tr1::unordered_map,
-    // and c++11 std::unordered_map (including tuning its load factor, initial size,
-    // and hash function), and hashtable_t outperformed the others (i#2056).
-    // Update: that measurement was when we did a hashtable lookup on every
-    // instruction pc.  Now that we use block_summary_t and only look up each block,
-    // the hashtable performance matters much less.
+    class block_hashtable_t {
+        // We use a hashtable to cache decodings.  We compared the performance of
+        // hashtable_t to std::map.find, std::map.lower_bound, std::tr1::unordered_map,
+        // and c++11 std::unordered_map (including tuning its load factor, initial size,
+        // and hash function), and hashtable_t outperformed the others (i#2056).
+        // Update: that measurement was when we did a hashtable lookup on every
+        // instruction pc.  Now that we use block_summary_t and only look up each block,
+        // the hashtable performance matters much less.
+        // Plus, for 32-bit we cannot fit our modidx:modoffs key in the 32-bit-limited
+        // hashtable_t key, so we now use std::unordered_map there.
+    public:
+        explicit block_hashtable_t(int worker_count)
+        {
+#ifdef X64
+            // We go ahead and start with a reasonably large capacity.
+            // We do not want the built-in mutex: this is per-worker so it can be
+            // lockless.
+            hashtable_init_ex(&table, 16, HASH_INTPTR, false, false, free_payload,
+                              nullptr, nullptr);
+            // We pay a little memory to get a lower load factor, unless we have
+            // many duplicated tables.
+            hashtable_config_t config = { sizeof(config), true,
+                                          worker_count <= 8
+                                              ? 40U
+                                              : (worker_count <= 16 ? 50U : 60U) };
+            hashtable_configure(&table, &config);
+#endif
+        }
+#ifdef X64
+        ~block_hashtable_t()
+        {
+            hashtable_delete(&table);
+        }
+#else
+        // Work around a known Visual Studio issue where it complains about deleted copy
+        // constructors for unique_ptr by deleting our copies and defaulting our moves.
+        block_hashtable_t(const block_hashtable_t &) = delete;
+        block_hashtable_t &
+        operator=(const block_hashtable_t &) = delete;
+        block_hashtable_t(block_hashtable_t &&) = default;
+        block_hashtable_t &
+        operator=(block_hashtable_t &&) = default;
+#endif
+        block_summary_t *
+        lookup(uint64 modidx, uint64 modoffs)
+        {
+#ifdef X64
+            return static_cast<block_summary_t *>(hashtable_lookup(
+                &table, reinterpret_cast<void *>(hash_key(modidx, modoffs))));
+#else
+            return table[hash_key(modidx, modoffs)].get();
+#endif
+        }
+        // Takes ownership of "block".
+        void
+        add(uint64 modidx, uint64 modoffs, block_summary_t *block)
+        {
+#ifdef X64
+            hashtable_add(&table, reinterpret_cast<void *>(hash_key(modidx, modoffs)),
+                          block);
+#else
+            table[hash_key(modidx, modoffs)].reset(block);
+#endif
+        }
+
+        void
+        clear()
+        {
+#ifdef X64
+            hashtable_clear(&table);
+#else
+            table.clear();
+#endif
+        }
+
+    private:
+        static void
+        free_payload(void *ptr)
+        {
+            delete (static_cast<block_summary_t *>(ptr));
+        }
+        static inline uint64
+        hash_key(uint64 modidx, uint64 modoffs)
+        {
+            return (modidx << PC_MODOFFS_BITS) | modoffs;
+        }
+
+#ifdef X64
+        hashtable_t table;
+#else
+        std::unordered_map<uint64, std::unique_ptr<block_summary_t>> table;
+#endif
+    };
+
     // We use a per-worker cache to avoid locks.
-    std::vector<hashtable_t> decode_cache_;
+    std::vector<block_hashtable_t> decode_cache_;
 
     // Store optional parameters for the module_mapper_t until we need to construct it.
-    const char *(*user_parse_)(const char *src, OUT void **data) = nullptr;
+    const char *(*user_parse_)(const char *src, DR_PARAM_OUT void **data) = nullptr;
     void (*user_free_)(void *data) = nullptr;
     std::string (*user_process_)(drmodtrack_info_t *info, void *data,
                                  void *user_data) = nullptr;
     void *user_process_data_ = nullptr;
 
-    const char *modmap_;
-    std::unique_ptr<module_mapper_t> module_mapper_;
+    const char *modmap_bytes_;
+    file_t encoding_file_ = INVALID_FILE;
+    std::ostream *serial_schedule_file_ = nullptr;
+    archive_ostream_t *cpu_schedule_file_ = nullptr;
 
     unsigned int verbosity_ = 0;
 
@@ -1651,6 +1440,33 @@ private:
     // Our decode_cache duplication will not scale forever on very large code
     // footprint traces, so we set a cap for the default.
     static const int kDefaultJobMax = 16;
+
+    // Chunking for seeking support in compressed files.
+    uint64_t chunk_instr_count_ = 0;
+
+    const std::vector<module_t> *modvec_ptr_ = nullptr;
+
+    // For decoding kernel PT traces.
+    const std::unordered_map<thread_id_t, std::istream *> kthread_files_map_;
+    const std::string kcore_path_;
+    const std::string kallsyms_path_;
+
+    // For inserting system call traces from provided templates.
+    std::unique_ptr<dynamorio::drmemtrace::record_reader_t> syscall_template_file_reader_;
+
+    std::unordered_map<int, trace_template_t> syscall_trace_templates_;
+    memref_counter_t syscall_trace_template_encodings_;
+    offline_file_type_t syscall_template_file_type_ = OFFLINE_FILE_TYPE_DEFAULT;
+
+    // Whether conversion of PT raw traces is done on a best-effort basis. This includes
+    // ignoring various types of non-fatal decoding errors and still producing a syscall
+    // trace where possible (which may have some PC discontinuities), and also dropping
+    // some syscall traces completely from the final trace where the PT trace could
+    // not be converted.
+    bool pt2ir_best_effort_ = false;
 };
+
+} // namespace drmemtrace
+} // namespace dynamorio
 
 #endif /* _RAW2TRACE_H_ */

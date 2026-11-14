@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2026 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -34,18 +34,18 @@
 
 #include "configure.h"
 #include "dr_api.h"
+#include "dr_project_wide_defines.h"
+#include "tools.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define GD GLOBAL_DCONTEXT
 
-#define ASSERT(x)                                                                    \
-    ((void)((!(x)) ? (printf("ASSERT FAILURE: %s:%d: %s\n", __FILE__, __LINE__, #x), \
-                      abort(), 0)                                                    \
+#define ASSERT(x)                                                                   \
+    ((void)((!(x)) ? (print("ASSERT FAILURE: %s:%d: %s\n", __FILE__, __LINE__, #x), \
+                      abort(), 0)                                                   \
                    : 0))
-
-#define BUFFER_SIZE_BYTES(buf) sizeof(buf)
-#define BUFFER_SIZE_ELEMENTS(buf) (BUFFER_SIZE_BYTES(buf) / sizeof(buf[0]))
 
 static void
 test_disasm_style(void)
@@ -54,13 +54,41 @@ test_disasm_style(void)
     byte *pc, *end;
     instrlist_t *ilist = instrlist_create(GD);
     instrlist_append(ilist,
-                     INSTR_CREATE_mov_st(GD, OPND_CREATE_MEM32(REG_XCX, 37),
+                     /* With a negative displacement we stress signed type handling. */
+                     INSTR_CREATE_mov_st(GD, OPND_CREATE_MEM32(REG_XCX, -3),
                                          opnd_create_reg(REG_EAX)));
     instrlist_append(
         ilist, INSTR_CREATE_mov_imm(GD, opnd_create_reg(REG_EDI), OPND_CREATE_INT32(17)));
+    /* Test instructions with custom suffixes. */
+    instrlist_append(ilist, INSTR_CREATE_iret(GD));
+    instrlist_append(ilist, INSTR_CREATE_pushf(GD));
+    instrlist_append(ilist, INSTR_CREATE_popf(GD));
+#ifndef X64
+    instrlist_append(ilist, INSTR_CREATE_pusha(GD));
+    instrlist_append(ilist, INSTR_CREATE_popa(GD));
+#endif
     end = instrlist_encode(GD, ilist, buf, false);
+    ASSERT(end != NULL && end - buf < BUFFER_SIZE_ELEMENTS(buf));
+    /* It's a pain to synthesize the data16 versions so we use the encoding. */
+    *end++ = 0x66;
+    *end++ = 0xcf; /* iret */
+    *end++ = 0x66;
+    *end++ = 0x9c; /* push */
+    *end++ = 0x66;
+    *end++ = 0x9d; /* popf */
+#ifndef X64
+    *end++ = 0x66;
+    *end++ = 0x60; /* pusha */
+    *end++ = 0x66;
+    *end++ = 0x61; /* popa */
+#endif
     ASSERT(end - buf < BUFFER_SIZE_ELEMENTS(buf));
 
+    pc = buf;
+    while (pc < end)
+        pc = disassemble_with_info(GD, pc, STDOUT, false /*no pc*/, true);
+
+    disassemble_set_syntax(DR_DISASM_ATT);
     pc = buf;
     while (pc < end)
         pc = disassemble_with_info(GD, pc, STDOUT, false /*no pc*/, true);
@@ -154,8 +182,137 @@ test_noalloc(void)
      */
 }
 
+#define CHECK_CATEGORY(dcontext, instr, pc, categories, category_names)               \
+    do {                                                                              \
+        byte *instr_encoded_pc = instr_encode(dcontext, instr, pc);                   \
+        ASSERT(instr_encoded_pc - pc < BUFFER_SIZE_ELEMENTS(pc));                     \
+        instr_reset(dcontext, instr);                                                 \
+        instr_set_operands_valid(instr, true);                                        \
+        byte *instr_decoded_pc = decode(dcontext, pc, instr);                         \
+        ASSERT(instr_decoded_pc != NULL);                                             \
+        for (int i = 0; i < BUFFER_SIZE_ELEMENTS(categories); ++i) {                  \
+            if (categories[i] == DR_INSTR_CATEGORY_UNCATEGORIZED) {                   \
+                ASSERT(instr_get_category(instr) == categories[i]);                   \
+            } else {                                                                  \
+                ASSERT(TESTANY(categories[i], instr_get_category(instr)));            \
+            }                                                                         \
+            ASSERT(strncmp(instr_get_category_name(categories[i]), category_names[i], \
+                           strlen(category_names[i])) == 0);                          \
+        }                                                                             \
+        instr_destroy(dcontext, instr);                                               \
+    } while (0);
+
+static void
+test_categories(void)
+{
+    instr_t *instr;
+    byte buf[128];
+
+    /*  55 OP_mov_ld */
+    instr = XINST_CREATE_load(GD, opnd_create_reg(DR_REG_XAX),
+                              OPND_CREATE_MEMPTR(DR_REG_XAX, 42));
+    const dr_instr_category_t categories_load[] = { DR_INSTR_CATEGORY_LOAD };
+    const char *category_names_load[] = { "load" };
+    CHECK_CATEGORY(GD, instr, buf, categories_load, category_names_load);
+
+    /*  14 OP_cmp */
+    instr =
+        XINST_CREATE_cmp(GD, opnd_create_reg(DR_REG_EAX), opnd_create_reg(DR_REG_EAX));
+    const dr_instr_category_t categories_cmp[] = { DR_INSTR_CATEGORY_MATH };
+    const char *category_names_cmp[] = { "math" };
+    CHECK_CATEGORY(GD, instr, buf, categories_cmp, category_names_cmp);
+
+    /* 46 OP_jmp */
+    instr_t *after_callee = INSTR_CREATE_label(GD);
+    instr = XINST_CREATE_jump(GD, opnd_create_instr(after_callee));
+    const dr_instr_category_t categories_jmp[] = { DR_INSTR_CATEGORY_BRANCH };
+    const char *category_names_jmp[] = { "branch" };
+    CHECK_CATEGORY(GD, instr, buf, categories_jmp, category_names_jmp);
+
+    /* OP_fwait */
+    instr = INSTR_CREATE_fwait(GD);
+    const dr_instr_category_t categories_fwait[] = { DR_INSTR_CATEGORY_FP,
+                                                     DR_INSTR_CATEGORY_STATE };
+    const char *category_names_fwait[] = { "fp", "state" };
+    CHECK_CATEGORY(GD, instr, buf, categories_fwait, category_names_fwait);
+
+    /* OP_in */
+    instr = INSTR_CREATE_in_1(GD);
+    const dr_instr_category_t categories_in[] = { DR_INSTR_CATEGORY_UNCATEGORIZED };
+    const char *category_names_in[] = { "uncategorized" };
+    CHECK_CATEGORY(GD, instr, buf, categories_in, category_names_in);
+}
+
+static void
+test_store_source(void)
+{
+    instr_t *in = XINST_CREATE_store(GD, OPND_CREATE_MEMPTR(DR_REG_XAX, 42),
+                                     opnd_create_reg(DR_REG_XDX));
+    ASSERT(!instr_is_opnd_store_source(in, -1)); /* Out of bounds. */
+    ASSERT(instr_is_opnd_store_source(in, 0));   /* xdx. */
+    ASSERT(!instr_is_opnd_store_source(in, 1));  /* Out of bounds. */
+    instr_destroy(GD, in);
+
+    in = INSTR_CREATE_add(GD, OPND_CREATE_MEMPTR(DR_REG_XAX, 42),
+                          opnd_create_reg(DR_REG_XDX));
+    ASSERT(!instr_is_opnd_store_source(in, -1)); /* Out of bounds. */
+    ASSERT(instr_is_opnd_store_source(in, 0));   /* xdx. */
+    ASSERT(instr_is_opnd_store_source(in, 1));   /* memop. */
+    ASSERT(!instr_is_opnd_store_source(in, 2));  /* Out of bounds. */
+    instr_destroy(GD, in);
+
+    in = INSTR_CREATE_cmpxchg8b(
+        GD, opnd_create_base_disp(DR_REG_XAX, DR_REG_NULL, 0, 42, OPSZ_8));
+    ASSERT(!instr_is_opnd_store_source(in, 0)); /* Memop. */
+    ASSERT(!instr_is_opnd_store_source(in, 1)); /* xax. */
+    ASSERT(!instr_is_opnd_store_source(in, 2)); /* xdx. */
+    ASSERT(instr_is_opnd_store_source(in, 3));  /* xcx. */
+    ASSERT(instr_is_opnd_store_source(in, 4));  /* xbx. */
+    instr_destroy(GD, in);
+
+#ifndef X64
+    in = INSTR_CREATE_pusha(GD);
+    ASSERT(instr_is_opnd_store_source(in, 0)); /* xsp. */
+    ASSERT(instr_is_opnd_store_source(in, 1)); /* xax. */
+    ASSERT(instr_is_opnd_store_source(in, 2)); /* xbx. */
+    ASSERT(instr_is_opnd_store_source(in, 3)); /* xcx. */
+    ASSERT(instr_is_opnd_store_source(in, 4)); /* xdx. */
+    ASSERT(instr_is_opnd_store_source(in, 5)); /* xbp. */
+    ASSERT(instr_is_opnd_store_source(in, 6)); /* xsi. */
+    ASSERT(instr_is_opnd_store_source(in, 7)); /* xdi. */
+    instr_destroy(GD, in);
+#endif
+}
+
+static void
+test_isa_features(void)
+{
+    /* TODO i#7842: Until instr_get_isa_feature() and instr_get_isa_feature_name() are
+     * implemented for X86, we can only test ISA_FEAT_UNKNOWN.
+     */
+    uint unused_buf = 0;
+    instr_t *instr = NULL;
+    uint isa_feat = ISA_FEAT_INVALID;
+
+    instr = XINST_CREATE_load(GD, opnd_create_reg(DR_REG_XAX),
+                              OPND_CREATE_MEMPTR(DR_REG_XAX, 42));
+    isa_feat = instr_get_isa_feature((byte *)&unused_buf, instr);
+    ASSERT(isa_feat == ISA_FEAT_UNKNOWN);
+    ASSERT(strncmp(instr_get_isa_feature_name(isa_feat), "<unknown>",
+                   strlen("<unknown>")) == 0);
+    instr_destroy(GD, instr);
+
+    instr = XINST_CREATE_store(GD, OPND_CREATE_MEMPTR(DR_REG_XAX, 42),
+                               opnd_create_reg(DR_REG_XDX));
+    isa_feat = instr_get_isa_feature((byte *)&unused_buf, instr);
+    ASSERT(isa_feat == ISA_FEAT_UNKNOWN);
+    ASSERT(strncmp(instr_get_isa_feature_name(isa_feat), "<unknown>",
+                   strlen("<unknown>")) == 0);
+    instr_destroy(GD, instr);
+}
+
 int
-main()
+main(int argc, const char *argv[])
 {
     test_disasm_style();
 
@@ -165,7 +322,13 @@ main()
 
     test_noalloc();
 
-    printf("done\n");
+    test_categories();
+
+    test_store_source();
+
+    test_isa_features();
+
+    print("done\n");
 
     return 0;
 }

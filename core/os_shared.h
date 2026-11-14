@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2010-2021 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2026 Google, Inc.  All rights reserved.
  * Copyright (c) 2003-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -40,6 +40,13 @@
 #ifndef OS_SHARED_H
 #define OS_SHARED_H
 
+#include "os_api.h"
+
+/* Keep in sync with the ptrace_attach.c OS_SRCS guard in core/CMakeLists.txt. */
+#if defined(LINUX) && !defined(ANDROID) && (defined(AARCH64) || defined(X86))
+#    define PTRACE_TAKEOVER_SUPPORTED 1
+#endif
+
 enum { VM_ALLOCATION_BOUNDARY = 64 * 1024 }; /* 64KB allocation size for Windows */
 
 struct _local_state_t; /* in arch_exports.h */
@@ -78,7 +85,7 @@ void
 os_thread_under_dynamo(dcontext_t *dcontext);
 /* must only be called for the executing thread */
 void
-os_thread_not_under_dynamo(dcontext_t *dcontext);
+os_thread_not_under_dynamo(dcontext_t *dcontext, bool restore_sigblocked);
 void
 os_process_under_dynamorio_initiate(dcontext_t *dcontext);
 void
@@ -88,6 +95,11 @@ os_process_not_under_dynamorio(dcontext_t *dcontext);
 
 bool
 os_take_over_all_unknown_threads(dcontext_t *dcontext);
+
+#ifdef PTRACE_TAKEOVER_SUPPORTED
+bool
+os_unmask_suspend_signal_via_ptrace(thread_id_t skip_tid);
+#endif
 
 bool
 detach_do_not_translate(thread_record_t *tr);
@@ -202,15 +214,21 @@ is_thread_currently_native(thread_record_t *tr);
  */
 bool
 thread_get_mcontext(thread_record_t *tr, priv_mcontext_t *mc);
+
+#ifdef LINUX
+bool
+thread_get_nudged_mcontext(thread_record_t *tr, priv_mcontext_t *mc);
+#endif
+
 bool
 thread_set_mcontext(thread_record_t *tr, priv_mcontext_t *mc);
 
 /* Takes an os-specific context. Does not return. */
 void
-thread_set_self_context(void *cxt);
+thread_set_self_context(void *cxt, bool is_detach_external);
 /* Only sets the priv_mcontext_t state.  Does not return. */
 void
-thread_set_self_mcontext(priv_mcontext_t *mc);
+thread_set_self_mcontext(priv_mcontext_t *mc, bool is_detach_external);
 
 /* Assumes target thread is suspended */
 bool
@@ -231,12 +249,26 @@ get_thread_private_dcontext(void);
 void
 set_thread_private_dcontext(dcontext_t *dcontext);
 
-/* converts a local_state_t offset to a segment offset */
-ushort
+/* Converts a local-state slot offset to a signed segment displacement. */
+int
 os_tls_offset(ushort tls_offs);
 
-ushort
-os_local_state_offset(ushort seg_offs);
+/* Converts a signed segment displacement to a local-state slot offset relative
+ * to tls_base. Returns false if the local-state offset does not fit in ushort.
+ * Pass os_tls_offset(0) for the current OS's local-state base displacement.
+ */
+static inline bool
+os_local_state_offset(int seg_offs, int tls_base, ushort *local_offs)
+{
+    /* Widen before subtracting: the two signed displacements can differ by more
+     * than INT_MAX, even though valid local-state offsets fit in a ushort.
+     */
+    int64 offs = (int64)seg_offs - tls_base;
+    if (offs < 0 || offs > USHRT_MAX)
+        return false;
+    *local_offs = (ushort)offs;
+    return true;
+}
 
 struct _local_state_t;          /* in arch_exports.h */
 struct _local_state_extended_t; /* in arch_exports.h */
@@ -255,44 +287,12 @@ get_segment_base(uint seg);
 byte *
 get_app_segment_base(uint seg);
 
-#ifdef CLIENT_INTERFACE
 /* Allocates num_slots tls slots aligned with alignment align */
 bool
-os_tls_calloc(OUT uint *offset, uint num_slots, uint alignment);
+os_tls_calloc(DR_PARAM_OUT uint *offset, uint num_slots, uint alignment);
 
 bool
 os_tls_cfree(uint offset, uint num_slots);
-#endif
-
-/* DR_API EXPORT TOFILE dr_tools.h */
-/* DR_API EXPORT BEGIN */
-/**************************************************
- * STATE SWAPPING TYPES
- */
-
-/**
- * Flags that control the behavior of dr_switch_to_app_state_ex()
- * and dr_switch_to_dr_state_ex().
- */
-typedef enum {
-#ifdef WINDOWS
-    DR_STATE_PEB = 0x0001,          /**< Switch the PEB pointer. */
-    DR_STATE_TEB_MISC = 0x0002,     /**< Switch miscellaneous TEB fields. */
-    DR_STATE_STACK_BOUNDS = 0x0004, /**< Switch the TEB stack bounds fields. */
-    DR_STATE_ALL = ~0,              /**< Switch all state. */
-#else
-    /**
-     * On Linux, DR's own TLS can optionally be swapped, but this is risky
-     * and not recommended as incoming signals are not properly handled when in
-     * such a state.  Thus DR_STATE_ALL does *not* swap it.
-     */
-    DR_STATE_DR_TLS = 0x0001,
-    DR_STATE_ALL = (~0) & (~DR_STATE_DR_TLS), /**< Switch all normal state. */
-    DR_STATE_GO_NATIVE = ~0,                  /**< Switch all state.  Use with care. */
-#endif
-} dr_state_flags_t;
-
-/* DR_API EXPORT END */
 
 bool
 os_should_swap_state(void);
@@ -315,44 +315,10 @@ get_application_pid(void);
 char *
 get_application_name(void);
 
-/* DR_API EXPORT BEGIN */
-/**
- * Encodings of an application's command-line argument.
- */
-typedef enum {
-    /**
-     * C String Encoding.
-     */
-    DR_APP_ARG_CSTR_COMPAT,
-    /**
-     * UTF 16 String Encoding.
-     */
-    DR_APP_ARG_UTF_16,
-} dr_app_arg_encoding_t;
-
-/**
- * Contains information regarding an application's command-line argument.
- */
-typedef struct _dr_app_arg_t {
-    /**
-     * The start boundary where the content of the arg begins.
-     */
-    void *start;
-    /**
-     * The size, in bytes, of the argument.
-     */
-    size_t size;
-    /**
-     * The encoding of the argument.
-     */
-    dr_app_arg_encoding_t encoding;
-} dr_app_arg_t;
-/* DR_API EXPORT END */
-
 int
-num_app_args();
+num_app_args(void);
 int
-get_app_args(OUT dr_app_arg_t *args_array, int args_count);
+get_app_args(DR_PARAM_OUT dr_app_arg_t *args_array, int args_count);
 const char *
 get_application_short_name(void);
 char *
@@ -410,9 +376,7 @@ enum {
     DUMPCORE_DEADLOCK = 0x0004,
     DUMPCORE_ASSERTION = 0x0008,
     DUMPCORE_FATAL_USAGE_ERROR = 0x0010,
-#ifdef CLIENT_INTERFACE
     DUMPCORE_CLIENT_EXCEPTION = 0x0020,
-#endif
     DUMPCORE_TIMEOUT = 0x0040,
     DUMPCORE_CURIOSITY = 0x0080,
 #ifdef HOT_PATCHING_INTERFACE /* Part of fix for 5357 & 5988. */
@@ -429,9 +393,7 @@ enum {
     DUMPCORE_HOTP_DETECTION = 0x2000,  /* not on by default in DEBUG */
     DUMPCORE_HOTP_PROTECTION = 0x4000, /* not on by default in DEBUG */
 #endif
-#ifdef CLIENT_INTERFACE
     DUMPCORE_DR_ABORT = 0x8000,
-#endif
     /* all exception cases here are off by default since we expect them to
      * usually be the app's fault (or normal behavior for the app) */
     DUMPCORE_FORGE_ILLEGAL_INST = 0x10000,
@@ -449,15 +411,9 @@ enum {
 #ifdef UNIX
     DUMPCORE_OPTION_PAUSE = DUMPCORE_WAIT_FOR_DEBUGGER | DUMPCORE_INTERNAL_EXCEPTION |
         DUMPCORE_SECURITY_VIOLATION | DUMPCORE_DEADLOCK | DUMPCORE_ASSERTION |
-        DUMPCORE_FATAL_USAGE_ERROR |
-#    ifdef CLIENT_INTERFACE
-        DUMPCORE_CLIENT_EXCEPTION |
-#    endif
+        DUMPCORE_FATAL_USAGE_ERROR | DUMPCORE_CLIENT_EXCEPTION |
         DUMPCORE_UNSUPPORTED_APP | DUMPCORE_TIMEOUT | DUMPCORE_CURIOSITY |
-#    ifdef CLIENT_INTERFACE
-        DUMPCORE_DR_ABORT |
-#    endif
-        DUMPCORE_OUT_OF_MEM | DUMPCORE_OUT_OF_MEM_SILENT,
+        DUMPCORE_DR_ABORT | DUMPCORE_OUT_OF_MEM | DUMPCORE_OUT_OF_MEM_SILENT,
 #endif
 };
 void
@@ -470,48 +426,17 @@ void
 os_syslog(syslog_event_type_t priority, uint message_id, uint substitutions_num,
           va_list args);
 
-/* DR_API EXPORT TOFILE dr_tools.h */
-/* DR_API EXPORT BEGIN */
-/**************************************************
- * CLIENT AUXILIARY LIBRARY TYPES
- */
-
-#if defined(CLIENT_INTERFACE) || defined(HOT_PATCHING_INTERFACE)
-/**
- * A handle to a loaded client auxiliary library.  This is a different
- * type than module_handle_t and is not necessarily the base address.
- */
-typedef void *dr_auxlib_handle_t;
-/** An exported routine in a loaded client auxiliary library. */
-typedef void (*dr_auxlib_routine_ptr_t)();
-#    if defined(WINDOWS) && !defined(X64)
-/**
- * A handle to a loaded 64-bit client auxiliary library.  This is a different
- * type than module_handle_t and is not necessarily the base address.
- */
-typedef uint64 dr_auxlib64_handle_t;
-/** An exported routine in a loaded 64-bit client auxiliary library. */
-typedef uint64 dr_auxlib64_routine_ptr_t;
-#    endif
-/* DR_API EXPORT END */
-
 /* Note that this is NOT identical to module_handle_t: on Linux this
  * is a pointer to a loader data structure and NOT the base address
  * (xref PR 366195).
  * XXX: we're duplicating these types above as dr_auxlib*
  */
 typedef void *shlib_handle_t;
-typedef void (*shlib_routine_ptr_t)();
+typedef void (*shlib_routine_ptr_t)(void);
 
 shlib_handle_t
 load_shared_library(const char *name, bool reachable);
-#elif defined(WINDOWS) && !defined(X64)
-/* Used for non-CLIENT_INTERFACE as well */
-typedef uint64 dr_auxlib64_handle_t;
-typedef uint64 dr_auxlib64_routine_ptr_t;
-#endif
 
-#if defined(CLIENT_INTERFACE)
 shlib_routine_ptr_t
 lookup_library_routine(shlib_handle_t lib, const char *name);
 void
@@ -522,94 +447,11 @@ shared_library_error(char *buf, int maxlen);
  * for linux, one of addr or name is needed; for windows, neither is needed.
  */
 bool
-shared_library_bounds(IN shlib_handle_t lib, IN byte *addr, IN const char *name,
-                      OUT byte **start, OUT byte **end);
-#endif
+shared_library_bounds(DR_PARAM_IN shlib_handle_t lib, DR_PARAM_IN byte *addr,
+                      DR_PARAM_IN const char *name, DR_PARAM_OUT byte **start,
+                      DR_PARAM_OUT byte **end);
 char *
 get_dynamorio_library_path(void);
-
-/* DR_API EXPORT TOFILE dr_tools.h */
-/* DR_API EXPORT BEGIN */
-/**************************************************
- * MEMORY INFORMATION TYPES
- */
-
-#define DR_MEMPROT_NONE 0x00  /**< No read, write, or execute privileges. */
-#define DR_MEMPROT_READ 0x01  /**< Read privileges. */
-#define DR_MEMPROT_WRITE 0x02 /**< Write privileges. */
-#define DR_MEMPROT_EXEC 0x04  /**< Execute privileges. */
-#define DR_MEMPROT_GUARD 0x08 /**< Guard page (Windows only) */
-/**
- * DR's default cache consistency strategy modifies the page protection of
- * pages containing code, making them read-only.  It pretends on application
- * and client queries that the page is writable.  On a write fault
- * to such a region by the application or by client-added instrumentation, DR
- * automatically handles the fault and makes the page writable.  This requires
- * flushing the code from the code cache, which can only be done safely when in
- * an application context.  Thus, a client writing to such a page is only
- * supported when these criteria are met:
- *
- * -# The client code must be in an application code cache context.  This rules
- *    out all event callbacks (including the basic block event) except for the
- *    pre and post system call events and the nudge event.
- * -# The client must not hold any locks.  An exception is a lock marked as
- *    an application lock (via dr_mutex_mark_as_app(), dr_rwlock_mark_as_app(),
- *    or dr_recurlock_mark_as_app()).
- * -# The client code must not rely on returning to a particular point in the
- *    code cache, as that point might be flushed and removed during the write
- *    fault processing.  This rules out a clean call (unless
- *    dr_redirect_execution() is used), but does allow something like
- *    drwrap_replace_native() which uses a continuation strategy.
- *
- * A client write fault that does not meet the first two criteria will result in
- * a fatal error report and an abort.  It is up to the client to ensure it
- * satisifies the third criterion.
- *
- * Even when client writes do meet these criteria, for performance it's best for
- * clients to avoid writing to such memory.
- */
-#define DR_MEMPROT_PRETEND_WRITE 0x10
-/**
- * In addition to the appropriate DR_MEMPROT_READ and/or DR_MEMPROT_EXEC flags,
- * this flag will be set for the VDSO and VVAR pages on Linux.
- * The VVAR pages may only be identified by DR on kernels that explicitly label
- * the pages in the /proc/self/maps file (kernel 3.15 and above).
- * In some cases, accessing the VVAR pages can cause problems
- * (e.g., https://github.com/DynamoRIO/drmemory/issues/1778).
- */
-#define DR_MEMPROT_VDSO 0x20
-
-/**
- * Flags describing memory used by dr_query_memory_ex().
- */
-typedef enum {
-    DR_MEMTYPE_FREE,     /**< No memory is allocated here */
-    DR_MEMTYPE_IMAGE,    /**< An executable file is mapped here */
-    DR_MEMTYPE_DATA,     /**< Some other data is allocated here */
-    DR_MEMTYPE_RESERVED, /**< Reserved address space with no physical storage */
-    DR_MEMTYPE_ERROR,    /**< Query failed for unspecified reason */
-    /**
-     * Query failed due to the address being located in Windows kernel space.
-     * No further information is available so iteration must stop.
-     */
-    DR_MEMTYPE_ERROR_WINKERNEL,
-} dr_mem_type_t;
-
-/**
- * Describes a memory region.  Used by dr_query_memory_ex().
- */
-typedef struct _dr_mem_info_t {
-    /** Starting address of memory region */
-    byte *base_pc;
-    /** Size of region */
-    size_t size;
-    /** Protection of region (DR_MEMPROT_* flags) */
-    uint prot;
-    /** Type of region */
-    dr_mem_type_t type;
-} dr_mem_info_t;
-
-/* DR_API EXPORT END */
 
 #define MEMPROT_NONE DR_MEMPROT_NONE
 #define MEMPROT_READ DR_MEMPROT_READ
@@ -641,21 +483,24 @@ typedef struct _dr_mem_info_t {
 size_t
 os_page_size(void);
 #ifdef UNIX
+/* This also tries to set other auxv values. */
 void
 os_page_size_init(const char **env, bool env_followed_by_auxv);
+size_t
+os_minsigstksz(void);
 #endif
 bool
 get_memory_info(const byte *pc, byte **base_pc, size_t *size, uint *prot);
 bool
-query_memory_ex(const byte *pc, OUT dr_mem_info_t *info);
+query_memory_ex(const byte *pc, DR_PARAM_OUT dr_mem_info_t *info);
 /* We provide this b/c getting the bounds is expensive on Windows (i#1462) */
 bool
-query_memory_cur_base(const byte *pc, OUT dr_mem_info_t *info);
+query_memory_cur_base(const byte *pc, DR_PARAM_OUT dr_mem_info_t *info);
 #ifdef UNIX
 bool
 get_memory_info_from_os(const byte *pc, byte **base_pc, size_t *size, uint *prot);
 bool
-query_memory_ex_from_os(const byte *pc, OUT dr_mem_info_t *info);
+query_memory_ex_from_os(const byte *pc, DR_PARAM_OUT dr_mem_info_t *info);
 void
 os_check_new_app_module(dcontext_t *dcontext, app_pc pc);
 #endif
@@ -743,7 +588,7 @@ enum {
     /* .data == variables written only at init or exit time or rarely in between */
     SELFPROT_DATA_RARE = 0x001,
     /* .fspdata == frequently written enough that we separate from .data.
-     * FIXME case 8073: currently these are unprotected on every cxt switch
+     * XXX case 8073: currently these are unprotected on every cxt switch
      */
     SELFPROT_DATA_FREQ = 0x002,
     /* .cspdata == so frequently written that to protect them requires unprotecting
@@ -761,24 +606,24 @@ enum {
     SELFPROT_DCONTEXT = 0x010, /* means we split out unprotected_context_t --
                                 * no actual protection unless SELFPROT_GLOBAL */
     SELFPROT_LOCAL = 0x020,
-    SELFPROT_CACHE = 0x040, /* FIXME: thread-safe NYI when doing all units */
+    SELFPROT_CACHE = 0x040, /* TODO: thread-safe NYI when doing all units */
     SELFPROT_STACK = 0x080, /* essentially always on with clean-dstack d_r_dispatch()
                              * design, leaving as a bit in case we do more later */
     /* protect our generated thread-shared and thread-private code */
     SELFPROT_GENCODE = 0x100,
-    /* FIXME: TEB page on Win32
+    /* XXX: TEB page on Win32
      * Other global structs, like thread-local callbacks on Win32?
      * PEB page?
      */
     /* options that require action on every context switch
-     * FIXME: global heap used to be much rarer before shared
+     * XXX: global heap used to be much rarer before shared
      * fragments, only containing "important" data, which is why we
      * un-protected on every context switch.  We should re-think that
      * now that most things are shared.
      */
     SELFPROT_ON_CXT_SWITCH = (SELFPROT_DATA_CXTSW |
                               SELFPROT_GLOBAL
-                              /* FIXME case 8073: this is only temporary until
+                              /* XXX case 8073: this is only temporary until
                                * we finish implementing .fspdata unprots */
                               | SELFPROT_DATA_FREQ),
     SELFPROT_ANY_DATA_SECTION =
@@ -850,34 +695,34 @@ extern uint datasec_writable_cxtswprot;
      INTERNAL_OPTION(single_privileged_thread))
 
 /* macros to put mask check outside of function, for efficiency */
-#define SELF_PROTECT_LOCAL(dc, w)                              \
-    do {                                                       \
-        if (TEST(SELFPROT_LOCAL, dynamo_options.protect_mask)) \
-            protect_local_heap(dc, w);                         \
+#define SELF_PROTECT_LOCAL(dc, w)                                 \
+    do {                                                          \
+        if (TESTANY(SELFPROT_LOCAL, dynamo_options.protect_mask)) \
+            protect_local_heap(dc, w);                            \
     } while (0);
 
-#define SELF_PROTECT_GLOBAL(w)                                  \
-    do {                                                        \
-        if (TEST(SELFPROT_GLOBAL, dynamo_options.protect_mask)) \
-            protect_global_heap(w);                             \
+#define SELF_PROTECT_GLOBAL(w)                                     \
+    do {                                                           \
+        if (TESTANY(SELFPROT_GLOBAL, dynamo_options.protect_mask)) \
+            protect_global_heap(w);                                \
     } while (0);
 
-#define ASSERT_LOCAL_HEAP_PROTECTED(dcontext)                    \
-    ASSERT(!TEST(SELFPROT_LOCAL, dynamo_options.protect_mask) || \
+#define ASSERT_LOCAL_HEAP_PROTECTED(dcontext)                       \
+    ASSERT(!TESTANY(SELFPROT_LOCAL, dynamo_options.protect_mask) || \
            local_heap_protected(dcontext))
-#define ASSERT_LOCAL_HEAP_UNPROTECTED(dcontext)                  \
-    ASSERT(!TEST(SELFPROT_LOCAL, dynamo_options.protect_mask) || \
+#define ASSERT_LOCAL_HEAP_UNPROTECTED(dcontext)                     \
+    ASSERT(!TESTANY(SELFPROT_LOCAL, dynamo_options.protect_mask) || \
            !local_heap_protected(dcontext))
 
-#define SELF_PROTECT_DATASEC(which)                                     \
-    do {                                                                \
-        if (TEST(DATASEC_SELFPROT[which], DYNAMO_OPTION(protect_mask))) \
-            protect_data_section(which, READONLY);                      \
+#define SELF_PROTECT_DATASEC(which)                                        \
+    do {                                                                   \
+        if (TESTANY(DATASEC_SELFPROT[which], DYNAMO_OPTION(protect_mask))) \
+            protect_data_section(which, READONLY);                         \
     } while (0);
-#define SELF_UNPROTECT_DATASEC(which)                                   \
-    do {                                                                \
-        if (TEST(DATASEC_SELFPROT[which], DYNAMO_OPTION(protect_mask))) \
-            protect_data_section(which, WRITABLE);                      \
+#define SELF_UNPROTECT_DATASEC(which)                                      \
+    do {                                                                   \
+        if (TESTANY(DATASEC_SELFPROT[which], DYNAMO_OPTION(protect_mask))) \
+            protect_data_section(which, WRITABLE);                         \
     } while (0);
 
 /***************************************************************************/
@@ -1008,7 +853,7 @@ os_rename_file(const char *orig_name, const char *new_name, bool replace);
  * and handling it is covered by PR 214097.
  */
 byte *
-os_map_file(file_t f, size_t *size INOUT, uint64 offs, app_pc addr, uint prot,
+os_map_file(file_t f, size_t *size DR_PARAM_INOUT, uint64 offs, app_pc addr, uint prot,
             map_flags_t map_flags);
 bool
 os_unmap_file(byte *map, size_t size);
@@ -1032,6 +877,10 @@ os_get_disk_free_space(/*IN*/ file_t file_handle,
                        /*OUT*/ uint64 *AvailableQuotaBytes /*OPTIONAL*/,
                        /*OUT*/ uint64 *TotalQuotaBytes /*OPTIONAL*/,
                        /*OUT*/ uint64 *TotalVolumeBytes /*OPTIONAL*/);
+file_t
+redirect_open(const char *fname, int flags, int mode);
+void
+redirect_close(file_t f);
 
 #ifdef PROFILE_RDTSC
 extern uint kilo_hertz;
@@ -1115,7 +964,7 @@ ksynch_var_initialized(KSYNCH_TYPE *var);
  * \p mc must be valid (e.g. PC, control, integer, MMX fields).
  */
 void
-mutex_wait_contended_lock(mutex_t *lock _IF_CLIENT_INTERFACE(priv_mcontext_t *mc));
+mutex_wait_contended_lock(mutex_t *lock, priv_mcontext_t *mc);
 void
 mutex_notify_released_lock(mutex_t *lock);
 void
@@ -1161,6 +1010,11 @@ wait_for_event(event_t e, int timeout_ms);
 timestamp_t
 get_timer_frequency(void);
 
+/* DR has standardized on UTC time which counts from Jan 1, 1601.
+ * That's the Windows standard.  But Linux uses the Epoch of Jan 1, 1970.
+ */
+#define UTC_TO_EPOCH_SECONDS 11644473600
+
 /* Returns the number of seconds since Jan 1, 1601 (this is
  * the current UTC time).
  */
@@ -1175,7 +1029,7 @@ query_time_millis(void);
 
 /* microseconds since 1601 */
 uint64
-query_time_micros();
+query_time_micros(void);
 
 /* gives a good but not necessarily crypto-strength random seed */
 uint
@@ -1188,7 +1042,7 @@ rct_process_module_mmap(app_pc module_base, size_t module_size, bool add,
                         bool already_relocated);
 
 /* module boundary and code section analysis for RCT policies */
-/* FIXME: should be better abstracted by calling a routine that
+/* XXX: should be better abstracted by calling a routine that
  * enumerates code sections, while keeping the general driver in rct.c
  */
 bool
@@ -1263,7 +1117,14 @@ enum {
 };
 #elif defined(AARCHXX)
 enum {
-    /* FIXME i#1551, i#1569: this is for A32 for now to get things compiling */
+    /* XXX i#1551, i#1569: this is for A32 for now to get things compiling */
+    JMP_REL32_OPCODE = 0xec000000,
+    JMP_REL32_SIZE = 4,
+    CALL_REL32_OPCODE = 0xed000000,
+};
+#elif defined(RISCV64)
+enum {
+    /* XXX i#3544: Fix proper values. Those are for compilation only. */
     JMP_REL32_OPCODE = 0xec000000,
     JMP_REL32_SIZE = 4,
     CALL_REL32_OPCODE = 0xed000000,

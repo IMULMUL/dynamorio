@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2012-2019 Google, Inc.  All rights reserved.
+ * Copyright (c) 2012-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -36,7 +36,7 @@
  */
 
 #ifndef _CONFIG_H_
-#define _CONFIG_H_ 1
+#define _CONFIG_H_
 
 #include "dr_config.h" /* for dr_platform_t */
 
@@ -45,6 +45,9 @@ d_r_config_init(void);
 
 void
 d_r_config_exit(void);
+
+bool
+d_r_config_initialized(void);
 
 void
 config_heap_init(void);
@@ -58,6 +61,9 @@ config_reread(void);
 
 const char *
 get_config_val(const char *var);
+
+const char *
+get_config_paths(void);
 
 const char *
 get_config_val_ex(const char *var, bool *app_specific, bool *from_env);
@@ -99,7 +105,7 @@ get_unqualified_parameter(const char *name, char *value, int maxlen);
 #    ifdef UNIX
 bool
 should_inject_from_rununder(const char *runstr, bool app_specific, bool from_env,
-                            bool *rununder_on OUT);
+                            bool *rununder_on DR_PARAM_OUT);
 #    endif
 
 #endif /* PARAMS_IN_REGISTRY */

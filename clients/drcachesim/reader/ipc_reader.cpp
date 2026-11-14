@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2015-2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2015-2023 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -36,6 +36,9 @@
 #include "../common/memref.h"
 #include "../common/utils.h"
 
+namespace dynamorio {
+namespace drmemtrace {
+
 #ifdef VERBOSE
 #    include <iostream>
 #endif
@@ -47,7 +50,7 @@ ipc_reader_t::ipc_reader_t()
 }
 
 ipc_reader_t::ipc_reader_t(const char *ipc_name, int verbosity)
-    : reader_t(verbosity, "IPC")
+    : reader_t(/*online=*/true, verbosity, "IPC")
     , pipe_(ipc_name)
 {
     // We create the pipe here so the user can set up a pipe writer
@@ -65,7 +68,7 @@ ipc_reader_t::operator!()
 }
 
 std::string
-ipc_reader_t::get_pipe_name() const
+ipc_reader_t::get_stream_name() const
 {
     return pipe_.get_name();
 }
@@ -96,6 +99,9 @@ ipc_reader_t::read_next_entry()
     if (cur_buf_ >= end_buf_) {
         ssize_t sz = pipe_.read(buf_, sizeof(buf_)); // blocking read
         if (sz < 0 || sz % sizeof(*end_buf_) != 0) {
+            // If called again at eof, do not return the footer: return an error.
+            if (at_eof_)
+                return nullptr;
             // We aren't able to easily distinguish truncation from a clean
             // end (we could at least ensure the prior entry was a thread exit
             // I suppose).
@@ -113,3 +119,6 @@ ipc_reader_t::read_next_entry()
         at_eof_ = true;
     return cur_buf_;
 }
+
+} // namespace drmemtrace
+} // namespace dynamorio

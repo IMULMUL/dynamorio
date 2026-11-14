@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2015-2019 Google, Inc.  All rights reserved.
+ * Copyright (c) 2015-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2003-2009 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -74,7 +74,7 @@
 #if BATCH_MODE
 #    define DEBUGGER_COMMAND "where\nquit\n"
 #else
-/* FIXME: want to have some <enter>s to handle multi-page,
+/* XXX: want to have some <enter>s to handle multi-page,
  * but don't want to repeat where cmd, so I use pwd, which is
  * useful.  Hopefully two pages is enough.
  */
@@ -102,7 +102,7 @@ int
 fork_syscall(void)
 {
 #if FORK_BROKEN_CASE_4967
-    /* FIXME: SYS_fork on dereksha is creating a child whose pid is
+    /* XXX: SYS_fork on dereksha is creating a child whose pid is
      * same as parent but has a different tid, and the abort() to dump
      * core kills the parent process -- looks just like a separate
      * thread, not a separate process!
@@ -223,7 +223,6 @@ d_r_stackdump(void)
         int fd;
         const char *argv[16];
         int i;
-        int execve_errno;
 
         /* Open a temporary file for the input: the "where" command */
         fp = os_open(tmp_name, OS_OPEN_REQUIRE_NEW | OS_OPEN_WRITE);
@@ -258,7 +257,7 @@ d_r_stackdump(void)
         close_syscall(fd);
 
         /* avoid running the debugger under us!
-         * FIXME: just remove our libraries, instead of entire env var?
+         * XXX: just remove our libraries, instead of entire env var?
          */
         unsetenv("LD_PRELOAD");
 
@@ -280,7 +279,8 @@ d_r_stackdump(void)
         argv[i++] = exec_name;
         argv[i++] = core_name;
         argv[i++] = NULL;
-        execve_errno = execve_syscall("/usr/bin/env", argv, our_environ);
+        DEBUG_DECLARE(int execve_errno =)
+        execve_syscall("/usr/bin/env", argv, our_environ);
         SYSLOG_INTERNAL_ERROR("ERROR: execve failed for debugger: %d", -execve_errno);
         exit_process_syscall(1);
     } else if (pid == -1) {

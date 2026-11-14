@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2026 Google, Inc.  All rights reserved.
  * Copyright (c) 2001-2009 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -54,11 +54,13 @@
 
 #include "../globals.h"
 #include "arch.h"
+#include "encode_api.h"
 #include "instr.h"
 #include "decode.h"
 #include "decode_fast.h"
 #include "disassemble.h"
 #include "../module_shared.h"
+#include "isa_regdeps/disassemble.h"
 
 /* these are only needed for symbolic address lookup: */
 #include "../fragment.h" /* for fragment_pclookup */
@@ -66,51 +68,63 @@
 
 #include "../fcache.h" /* for in_fcache */
 
-#if defined(INTERNAL) || defined(DEBUG) || defined(CLIENT_INTERFACE)
-
-#    ifdef DEBUG
+#ifdef DEBUG
 /* case 10450: give messages to clients */
 /* we can't undef ASSERT b/c of DYNAMO_OPTION */
-#        undef ASSERT_TRUNCATE
-#        undef ASSERT_BITFIELD_TRUNCATE
-#        undef ASSERT_NOT_REACHED
-#        define ASSERT_TRUNCATE DO_NOT_USE_ASSERT_USE_CLIENT_ASSERT_INSTEAD
-#        define ASSERT_BITFIELD_TRUNCATE DO_NOT_USE_ASSERT_USE_CLIENT_ASSERT_INSTEAD
-#        define ASSERT_NOT_REACHED DO_NOT_USE_ASSERT_USE_CLIENT_ASSERT_INSTEAD
-#    endif
+#    undef ASSERT_TRUNCATE
+#    undef ASSERT_BITFIELD_TRUNCATE
+#    undef ASSERT_NOT_REACHED
+#    define ASSERT_TRUNCATE DO_NOT_USE_ASSERT_USE_CLIENT_ASSERT_INSTEAD
+#    define ASSERT_BITFIELD_TRUNCATE DO_NOT_USE_ASSERT_USE_CLIENT_ASSERT_INSTEAD
+#    define ASSERT_NOT_REACHED DO_NOT_USE_ASSERT_USE_CLIENT_ASSERT_INSTEAD
+#endif
 
 /****************************************************************************
  * Arch-specific routines
  */
 
 int
-print_bytes_to_buffer(char *buf, size_t bufsz, size_t *sofar INOUT, byte *pc,
-                      byte *next_pc, instr_t *instr);
+d_r_print_encoding_first_line_to_buffer(char *buf, size_t bufsz,
+                                        size_t *sofar DR_PARAM_INOUT, byte *pc,
+                                        byte *next_pc, instr_t *instr);
 
 void
-print_extra_bytes_to_buffer(char *buf, size_t bufsz, size_t *sofar INOUT, byte *pc,
-                            byte *next_pc, int extra_sz, const char *extra_bytes_prefix);
+d_r_print_encoding_second_line_to_buffer(char *buf, size_t bufsz,
+                                         size_t *sofar DR_PARAM_INOUT, byte *pc,
+                                         byte *next_pc, int extra_sz,
+                                         const char *extra_bytes_prefix);
 
 void
-opnd_base_disp_scale_disassemble(char *buf, size_t bufsz, size_t *sofar INOUT,
+opnd_base_disp_scale_disassemble(char *buf, size_t bufsz, size_t *sofar DR_PARAM_INOUT,
                                  opnd_t opnd);
 
 bool
-opnd_disassemble_arch(char *buf, size_t bufsz, size_t *sofar INOUT, opnd_t opnd);
+opnd_disassemble_arch(char *buf, size_t bufsz, size_t *sofar DR_PARAM_INOUT, opnd_t opnd);
 
 bool
-opnd_disassemble_noimplicit(char *buf, size_t bufsz, size_t *sofar INOUT,
+opnd_disassemble_noimplicit(char *buf, size_t bufsz, size_t *sofar DR_PARAM_INOUT,
                             dcontext_t *dcontext, instr_t *instr, byte optype,
                             opnd_t opnd, bool prev, bool multiple_encodings, bool dst,
-                            int *idx INOUT);
+                            int *idx DR_PARAM_OUT);
 
 void
 print_instr_prefixes(dcontext_t *dcontext, instr_t *instr, char *buf, size_t bufsz,
-                     size_t *sofar INOUT);
+                     size_t *sofar DR_PARAM_OUT);
 
 void
 print_opcode_name(instr_t *instr, const char *name, char *buf, size_t bufsz,
-                  size_t *sofar INOUT);
+                  size_t *sofar DR_PARAM_OUT);
+
+#ifdef X86
+bool
+optype_is_evex_mask_arch(byte optype);
+#else
+static bool
+optype_is_evex_mask_arch(byte optype)
+{
+    return false;
+}
+#endif
 
 /****************************************************************************
  * Printing of instructions
@@ -131,8 +145,11 @@ disassemble_options_init(void)
     if (DYNAMO_OPTION(syntax_arm)) {
         flags |= DR_DISASM_ARM;
     }
+    if (DYNAMO_OPTION(syntax_riscv)) {
+        flags |= DR_DISASM_RISCV;
+    }
     /* This option is separate as it's not strictly a disasm style */
-    dynamo_options.decode_strict = TEST(DR_DISASM_STRICT_INVALID, flags);
+    dynamo_options.decode_strict = TESTANY(DR_DISASM_STRICT_INVALID, flags);
     if (DYNAMO_OPTION(decode_strict))
         flags |= DR_DISASM_STRICT_INVALID; /* for completeness */
     dynamo_options.disasm_mask = flags;
@@ -142,57 +159,61 @@ DR_API
 void
 disassemble_set_syntax(dr_disasm_flags_t flags)
 {
-#    ifndef STANDALONE_DECODER
+#ifndef STANDALONE_DECODER
     options_make_writable();
-#    endif
+#endif
     dynamo_options.disasm_mask = flags;
     /* This option is separate as it's not strictly a disasm style */
-    dynamo_options.decode_strict = TEST(DR_DISASM_STRICT_INVALID, flags);
-#    ifndef STANDALONE_DECODER
+    dynamo_options.decode_strict = TESTANY(DR_DISASM_STRICT_INVALID, flags);
+#ifndef STANDALONE_DECODER
     options_restore_readonly();
-#    endif
+#endif
 }
 
 static inline bool
 dsts_first(void)
 {
-    return TESTANY(DR_DISASM_INTEL | DR_DISASM_ARM, DYNAMO_OPTION(disasm_mask));
+    return TESTANY(DR_DISASM_INTEL | DR_DISASM_ARM | DR_DISASM_RISCV,
+                   DYNAMO_OPTION(disasm_mask));
 }
 
+#ifdef DEBUG
 static inline bool
 opmask_with_dsts(void)
 {
     return TESTANY(DR_DISASM_INTEL | DR_DISASM_ATT, DYNAMO_OPTION(disasm_mask));
 }
+#endif
 
 static void
-internal_instr_disassemble(char *buf, size_t bufsz, size_t *sofar INOUT,
+internal_instr_disassemble(char *buf, size_t bufsz, size_t *sofar DR_PARAM_INOUT,
                            dcontext_t *dcontext, instr_t *instr);
 
 static inline const char *
 immed_prefix(void)
 {
-    return (TEST(DR_DISASM_INTEL, DYNAMO_OPTION(disasm_mask))
+    return (TESTANY(DR_DISASM_INTEL | DR_DISASM_RISCV, DYNAMO_OPTION(disasm_mask))
                 ? ""
-                : (TEST(DR_DISASM_ARM, DYNAMO_OPTION(disasm_mask)) ? "#" : "$"));
+                : (TESTANY(DR_DISASM_ARM, DYNAMO_OPTION(disasm_mask)) ? "#" : "$"));
 }
 
 void
-reg_disassemble(char *buf, size_t bufsz, size_t *sofar INOUT, reg_id_t reg,
+reg_disassemble(char *buf, size_t bufsz, size_t *sofar DR_PARAM_INOUT, reg_id_t reg,
                 dr_opnd_flags_t flags, const char *prefix, const char *suffix)
 {
     print_to_buffer(buf, bufsz, sofar,
-                    TESTANY(DR_DISASM_INTEL | DR_DISASM_ARM, DYNAMO_OPTION(disasm_mask))
+                    TESTANY(DR_DISASM_INTEL | DR_DISASM_ARM | DR_DISASM_RISCV,
+                            DYNAMO_OPTION(disasm_mask))
                         ? "%s%s%s%s"
                         : "%s%s%%%s%s",
-                    prefix, TEST(DR_OPND_NEGATED, flags) ? "-" : "", reg_names[reg],
-                    suffix);
+                    prefix, TESTANY(DR_OPND_NEGATED, flags) ? "-" : "",
+                    get_register_name(reg), suffix);
 }
 
 static const char *
-opnd_size_suffix_dr(opnd_t opnd)
+opnd_size_suffix_dr(opnd_size_t opnd_sz)
 {
-    int sz = opnd_size_in_bytes(opnd_get_size(opnd));
+    int sz = opnd_size_in_bytes(opnd_sz);
     switch (sz) {
     case 1: return "1byte";
     case 2: return "2byte";
@@ -253,31 +274,106 @@ opnd_size_suffix_intel(opnd_t opnd)
     case 12: return "";
     case 16: return "oword";
     case 32: return "yword";
+    case 64: return "zword";
     }
     return "";
 }
 
-static void
-opnd_mem_disassemble_prefix(char *buf, size_t bufsz, size_t *sofar INOUT, opnd_t opnd)
+#ifdef AARCHXX
+static const char *
+opnd_size_element_suffix(opnd_t opnd)
 {
-    if (TEST(DR_DISASM_INTEL, DYNAMO_OPTION(disasm_mask))) {
+    int sz = opnd_get_vector_element_size(opnd);
+    switch (sz) {
+    case OPSZ_1: return ".b";
+    case OPSZ_2: return ".h";
+    case OPSZ_4: return ".s";
+    case OPSZ_8: return ".d";
+    case OPSZ_16: return ".q";
+    }
+    return "";
+}
+
+static const char *
+aarch64_reg_opnd_suffix(opnd_t opnd)
+{
+    if (opnd_is_element_vector_reg(opnd))
+        return opnd_size_element_suffix(opnd);
+    if (opnd_is_predicate_merge(opnd))
+        return "/m";
+    if (opnd_is_predicate_zero(opnd))
+        return "/z";
+
+    return "";
+}
+#endif
+#ifdef AARCH64
+bool
+aarch64_predicate_constraint_is_mapped(ptr_int_t value)
+{
+    return value >= DR_PRED_CONSTR_FIRST_NUMBER && value <= DR_PRED_CONSTR_LAST_NUMBER;
+}
+
+static const char *
+aarch64_predicate_constraint_string(ptr_int_t value)
+{
+    switch (value) {
+    case DR_PRED_CONSTR_POW2: return "POW2";
+    case DR_PRED_CONSTR_VL1: return "VL1";
+    case DR_PRED_CONSTR_VL2: return "VL2";
+    case DR_PRED_CONSTR_VL3: return "VL3";
+    case DR_PRED_CONSTR_VL4: return "VL4";
+    case DR_PRED_CONSTR_VL5: return "VL5";
+    case DR_PRED_CONSTR_VL6: return "VL6";
+    case DR_PRED_CONSTR_VL7: return "VL7";
+    case DR_PRED_CONSTR_VL8: return "VL8";
+    case DR_PRED_CONSTR_VL16: return "VL16";
+    case DR_PRED_CONSTR_VL32: return "VL32";
+    case DR_PRED_CONSTR_VL64: return "VL64";
+    case DR_PRED_CONSTR_VL128: return "VL128";
+    case DR_PRED_CONSTR_VL256: return "VL256";
+    case DR_PRED_CONSTR_MUL4: return "MUL4";
+    case DR_PRED_CONSTR_MUL3: return "MUL3";
+    case DR_PRED_CONSTR_ALL: return "ALL";
+    default: return "UKNOWN_CONSTRAINT";
+    }
+}
+
+#endif
+
+static void
+opnd_mem_disassemble_prefix(char *buf, size_t bufsz, size_t *sofar DR_PARAM_INOUT,
+                            opnd_t opnd)
+{
+    if (TESTANY(DR_DISASM_INTEL, DYNAMO_OPTION(disasm_mask))) {
         const char *size_str = opnd_size_suffix_intel(opnd);
         if (size_str[0] != '\0')
             print_to_buffer(buf, bufsz, sofar, "%s ptr [", size_str);
         else /* assume size implied by opcode */
             print_to_buffer(buf, bufsz, sofar, "[");
-    } else if (TEST(DR_DISASM_ARM, DYNAMO_OPTION(disasm_mask))) {
+    } else if (TESTANY(DR_DISASM_ARM, DYNAMO_OPTION(disasm_mask))) {
         print_to_buffer(buf, bufsz, sofar, "[");
     }
 }
 
 static void
-opnd_base_disp_disassemble(char *buf, size_t bufsz, size_t *sofar INOUT, opnd_t opnd)
+opnd_base_disp_disassemble(char *buf, size_t bufsz, size_t *sofar DR_PARAM_INOUT,
+                           opnd_t opnd)
 {
     reg_id_t seg = opnd_get_segment(opnd);
     reg_id_t base = opnd_get_base(opnd);
     int disp = opnd_get_disp(opnd);
     reg_id_t index = opnd_get_index(opnd);
+
+    const char *base_suffix = "";
+    const char *index_suffix = "";
+
+#if defined(AARCH64)
+    if (reg_is_z(base))
+        base_suffix = opnd_size_element_suffix(opnd);
+    if (reg_is_z(index))
+        index_suffix = opnd_size_element_suffix(opnd);
+#endif
 
     opnd_mem_disassemble_prefix(buf, bufsz, sofar, opnd);
 
@@ -286,20 +382,21 @@ opnd_base_disp_disassemble(char *buf, size_t bufsz, size_t *sofar INOUT, opnd_t 
 
     if (TESTANY(DR_DISASM_INTEL | DR_DISASM_ARM, DYNAMO_OPTION(disasm_mask))) {
         if (base != REG_NULL)
-            reg_disassemble(buf, bufsz, sofar, base, 0, "", "");
+            reg_disassemble(buf, bufsz, sofar, base, 0, "", base_suffix);
         if (index != REG_NULL) {
             reg_disassemble(
                 buf, bufsz, sofar, index, opnd_get_flags(opnd),
-                (base != REG_NULL && !TEST(DR_OPND_NEGATED, opnd_get_flags(opnd))) ? "+"
-                                                                                   : "",
-                "");
+                (base != REG_NULL && !TESTANY(DR_OPND_NEGATED, opnd_get_flags(opnd)))
+                    ? "+"
+                    : "",
+                index_suffix);
             opnd_base_disp_scale_disassemble(buf, bufsz, sofar, opnd);
         }
     }
 
     if (disp != 0 || (base == REG_NULL && index == REG_NULL) ||
         opnd_is_disp_encode_zero(opnd)) {
-        if (TEST(DR_DISASM_INTEL, DYNAMO_OPTION(disasm_mask))
+        if (TESTANY(DR_DISASM_INTEL, DYNAMO_OPTION(disasm_mask))
             /* Always negating for ARM and AArch64.  I would do the same for x86 but
              * I don't want to break any existing scripts.
              */
@@ -307,18 +404,18 @@ opnd_base_disp_disassemble(char *buf, size_t bufsz, size_t *sofar INOUT, opnd_t 
             /* windbg negates if top byte is 0xff
              * for x64 udis86 negates if at all negative
              */
-            if (TEST(DR_DISASM_ARM, DYNAMO_OPTION(disasm_mask)))
+            if (TESTANY(DR_DISASM_ARM, DYNAMO_OPTION(disasm_mask)))
                 print_to_buffer(buf, bufsz, sofar, ", #");
             if (IF_X64_ELSE(disp < 0, (disp & 0xff000000) == 0xff000000)) {
                 disp = -disp;
                 print_to_buffer(buf, bufsz, sofar, "-");
             } else if (base != REG_NULL || index != REG_NULL) {
-                if (TEST(DR_OPND_NEGATED, opnd_get_flags(opnd)))
+                if (TESTANY(DR_OPND_NEGATED, opnd_get_flags(opnd)))
                     print_to_buffer(buf, bufsz, sofar, "-");
-                else if (!TEST(DR_DISASM_ARM, DYNAMO_OPTION(disasm_mask)))
+                else if (!TESTANY(DR_DISASM_ARM, DYNAMO_OPTION(disasm_mask)))
                     print_to_buffer(buf, bufsz, sofar, "+");
             }
-        } else if (TEST(DR_DISASM_ATT, DYNAMO_OPTION(disasm_mask))) {
+        } else if (TESTANY(DR_DISASM_ATT, DYNAMO_OPTION(disasm_mask))) {
             /* There seems to be a discrepency between windbg and binutils. The latter
              * prints a '-' displacement for negative displacements both for att and
              * intel. We are doing the same for att syntax, while we're following windbg
@@ -329,7 +426,10 @@ opnd_base_disp_disassemble(char *buf, size_t bufsz, size_t *sofar INOUT, opnd_t 
                 print_to_buffer(buf, bufsz, sofar, "-");
             }
         }
-        if (TEST(DR_DISASM_ARM, DYNAMO_OPTION(disasm_mask)))
+        if (TESTANY(DR_DISASM_ARM, DYNAMO_OPTION(disasm_mask)))
+            print_to_buffer(buf, bufsz, sofar, "%d", disp);
+        else if (TESTANY(DR_DISASM_RISCV, DYNAMO_OPTION(disasm_mask)) &&
+                 TESTANY(opnd_get_flags(opnd), DR_OPND_IMM_PRINT_DECIMAL))
             print_to_buffer(buf, bufsz, sofar, "%d", disp);
         else if ((unsigned)disp <= 0xff && !opnd_is_disp_force_full(opnd))
             print_to_buffer(buf, bufsz, sofar, "0x%02x", disp);
@@ -343,9 +443,10 @@ opnd_base_disp_disassemble(char *buf, size_t bufsz, size_t *sofar INOUT, opnd_t 
         if (base != REG_NULL || index != REG_NULL) {
             print_to_buffer(buf, bufsz, sofar, "(");
             if (base != REG_NULL)
-                reg_disassemble(buf, bufsz, sofar, base, 0, "", "");
+                reg_disassemble(buf, bufsz, sofar, base, 0, "", base_suffix);
             if (index != REG_NULL) {
-                reg_disassemble(buf, bufsz, sofar, index, opnd_get_flags(opnd), ",", "");
+                reg_disassemble(buf, bufsz, sofar, index, opnd_get_flags(opnd), ",",
+                                index_suffix);
                 opnd_base_disp_scale_disassemble(buf, bufsz, sofar, opnd);
             }
             print_to_buffer(buf, bufsz, sofar, ")");
@@ -357,11 +458,11 @@ opnd_base_disp_disassemble(char *buf, size_t bufsz, size_t *sofar INOUT, opnd_t 
 }
 
 static bool
-print_known_pc_target(char *buf, size_t bufsz, size_t *sofar INOUT, dcontext_t *dcontext,
-                      byte *target)
+print_known_pc_target(char *buf, size_t bufsz, size_t *sofar DR_PARAM_INOUT,
+                      dcontext_t *dcontext, byte *target)
 {
     bool printed = false;
-#    ifndef STANDALONE_DECODER
+#ifndef STANDALONE_DECODER
     /* symbolic addresses */
     if (ENTER_DR_HOOK != NULL && target == (app_pc)ENTER_DR_HOOK) {
         print_to_buffer(buf, bufsz, sofar, "$" PFX " <enter_dynamorio_hook> ", target);
@@ -373,19 +474,19 @@ print_known_pc_target(char *buf, size_t bufsz, size_t *sofar INOUT, dcontext_t *
         const char *gencode_routine = NULL;
         const char *ibl_brtype;
         const char *ibl_name = get_ibl_routine_name(dcontext, target, &ibl_brtype);
-#        ifdef X86
+#    ifdef X86
         if (ibl_name == NULL && in_coarse_stub_prefixes(target) &&
             *target == JMP_OPCODE) {
             ibl_name = get_ibl_routine_name(dcontext, PC_RELATIVE_TARGET(target + 1),
                                             &ibl_brtype);
         }
-#        elif defined(ARM)
+#    elif defined(ARM)
         if (ibl_name == NULL && in_coarse_stub_prefixes(target)) {
-            /* FIXME i#1575: NYI on ARM */
+            /* TODO i#1575: NYI on ARM */
             ASSERT_NOT_IMPLEMENTED(false);
         }
-#        endif
-#        ifdef WINDOWS
+#    endif
+#    ifdef WINDOWS
         /* must test first, as get_ibl_routine_name will think "bb_ibl_indjmp" */
         if (dcontext != GLOBAL_DCONTEXT) {
             if (target == shared_syscall_routine(dcontext))
@@ -398,15 +499,15 @@ print_known_pc_target(char *buf, size_t bufsz, size_t *sofar INOUT, dcontext_t *
             else if (target ==
                      unlinked_shared_syscall_routine_ex(dcontext _IF_X64(GENCODE_X64)))
                 gencode_routine = "unlinked_shared_syscall";
-#            ifdef X64
+#        ifdef X64
             else if (target == shared_syscall_routine_ex(dcontext _IF_X64(GENCODE_X86)))
                 gencode_routine = "x86_shared_syscall";
             else if (target ==
                      unlinked_shared_syscall_routine_ex(dcontext _IF_X64(GENCODE_X86)))
                 gencode_routine = "x86_unlinked_shared_syscall";
-#            endif
-        }
 #        endif
+        }
+#    endif
         if (ibl_name) {
             /* can't use gencode_routine since need two strings here */
             print_to_buffer(buf, bufsz, sofar, "$" PFX " <%s_%s>", target, ibl_name,
@@ -415,11 +516,11 @@ print_known_pc_target(char *buf, size_t bufsz, size_t *sofar INOUT, dcontext_t *
         } else if (SHARED_FRAGMENTS_ENABLED() &&
                    target == fcache_return_shared_routine(IF_X86_64(GENCODE_X64)))
             gencode_routine = "fcache_return";
-#        ifdef X64
+#    ifdef X64
         else if (SHARED_FRAGMENTS_ENABLED() &&
                  target == fcache_return_shared_routine(IF_X86_64(GENCODE_X86)))
             gencode_routine = "x86_fcache_return";
-#        endif
+#    endif
         else if (dcontext != GLOBAL_DCONTEXT && target == fcache_return_routine(dcontext))
             gencode_routine = "fcache_return";
         else if (DYNAMO_OPTION(coarse_units)) {
@@ -429,23 +530,23 @@ print_known_pc_target(char *buf, size_t bufsz, size_t *sofar INOUT, dcontext_t *
             else if (target == trace_head_return_coarse_prefix(target, NULL) ||
                      target == trace_head_return_coarse_routine(IF_X86_64(GENCODE_X64)))
                 gencode_routine = "trace_head_return_coarse";
-#        ifdef X64
+#    ifdef X64
             else if (target == fcache_return_coarse_prefix(target, NULL) ||
                      target == fcache_return_coarse_routine(IF_X86_64(GENCODE_X86)))
                 gencode_routine = "x86_fcache_return_coarse";
             else if (target == trace_head_return_coarse_prefix(target, NULL) ||
                      target == trace_head_return_coarse_routine(IF_X86_64(GENCODE_X86)))
                 gencode_routine = "x86_trace_head_return_coarse";
-#        endif
+#    endif
         }
-#        ifdef PROFILE_RDTSC
+#    ifdef PROFILE_RDTSC
         else if ((void *)target == profile_fragment_enter)
             gencode_routine = "profile_fragment_enter";
-#        endif
-#        ifdef TRACE_HEAD_CACHE_INCR
+#    endif
+#    ifdef TRACE_HEAD_CACHE_INCR
         else if ((void *)target == trace_head_incr_routine(dcontext))
             gencode_routine = "trace_head_incr";
-#        endif
+#    endif
 
         if (gencode_routine != NULL) {
             print_to_buffer(buf, bufsz, sofar, "$" PFX " <%s> ", target, gencode_routine);
@@ -454,12 +555,12 @@ print_known_pc_target(char *buf, size_t bufsz, size_t *sofar INOUT, dcontext_t *
             /* see if target is in a fragment */
             bool alloc = false;
             fragment_t *fragment;
-#        ifdef DEBUG
+#    ifdef DEBUG
             fragment_t wrapper;
             /* Unfortunately our fast lookup by fcache unit has lock
              * ordering issues which we get around by using the htable
              * method, though that won't find invisible fragments
-             * (FIXME: for those could perhaps pass in a pointer).
+             * (XXX: for those could perhaps pass in a pointer).
              * For !DEADLOCK_AVOIDANCE, OWN_MUTEX's conservative imprecision
              * is fine.
              */
@@ -479,31 +580,31 @@ print_known_pc_target(char *buf, size_t bufsz, size_t *sofar INOUT, dcontext_t *
                     prev_flag = dcontext->in_opnd_disassemble;
                     dcontext->in_opnd_disassemble = true;
                 }
-#        endif /* shouldn't be any logging so no disasm in the middle of sensitive ops \
-                */
+#    endif /* shouldn't be any logging so no disasm in the middle of sensitive ops \
+            */
                 fragment = fragment_pclookup_with_linkstubs(dcontext, target, &alloc);
-#        ifdef DEBUG
+#    ifdef DEBUG
                 if (dcontext != GLOBAL_DCONTEXT)
                     dcontext->in_opnd_disassemble = prev_flag;
             }
-#        endif
+#    endif
             if (fragment != NULL) {
                 if (FCACHE_ENTRY_PC(fragment) == (cache_pc)target ||
                     FCACHE_PREFIX_ENTRY_PC(fragment) == (cache_pc)target ||
                     FCACHE_IBT_ENTRY_PC(fragment) == (cache_pc)target) {
-#        ifdef DEBUG
+#    ifdef DEBUG
                     print_to_buffer(buf, bufsz, sofar, "$" PFX " <fragment %d> ", target,
                                     fragment->id);
-#        else
+#    else
                     print_to_buffer(buf, bufsz, sofar, "$" PFX " <fragment " PFX "> ",
                                     target, fragment->tag);
-#        endif
+#    endif
                     printed = true;
-                } else if (!TEST(FRAG_FAKE, fragment->flags)) {
+                } else if (!TESTANY(FRAG_FAKE, fragment->flags)) {
                     /* check exit stubs */
                     linkstub_t *ls;
                     int ls_num = 0;
-                    CLIENT_ASSERT(!TEST(FRAG_FAKE, fragment->flags),
+                    CLIENT_ASSERT(!TESTANY(FRAG_FAKE, fragment->flags),
                                   "opnd_disassemble: invalid target");
                     for (ls = FRAGMENT_EXIT_STUBS(fragment); ls;
                          ls = LINKSTUB_NEXT_EXIT(ls)) {
@@ -528,12 +629,12 @@ print_known_pc_target(char *buf, size_t bufsz, size_t *sofar INOUT, dcontext_t *
     } else if (dynamo_initialized && !SHARED_FRAGMENTS_ENABLED() && !standalone_library) {
         print_to_buffer(buf, bufsz, sofar, "NULL DCONTEXT! ");
     }
-#    endif /* !STANDALONE_DECODER */
+#endif /* !STANDALONE_DECODER */
     return printed;
 }
 
 void
-internal_opnd_disassemble(char *buf, size_t bufsz, size_t *sofar INOUT,
+internal_opnd_disassemble(char *buf, size_t bufsz, size_t *sofar DR_PARAM_INOUT,
                           dcontext_t *dcontext, opnd_t opnd, bool use_size_sfx)
 {
     if (opnd_disassemble_arch(buf, bufsz, sofar, opnd))
@@ -545,19 +646,24 @@ internal_opnd_disassemble(char *buf, size_t bufsz, size_t *sofar INOUT,
         int sz = opnd_size_in_bytes(opnd_get_size(opnd));
         ptr_int_t val = opnd_get_immed_int(opnd);
         const char *sign = "";
-#    ifdef ARM
+#ifdef ARM
         /* On ARM we have few pointer-sized immeds so let's always negate */
         if (val < 0 && opnd_size_in_bytes(opnd_get_size(opnd)) < sizeof(void *)) {
             sign = "-";
             val = -val;
         }
-#    endif
+#endif
         /* PR 327775: when we don't know other operands we truncate.
          * We rely on instr_disassemble to temporarily change operand
          * size to sign-extend to match the size of adjacent operands.
          */
-        if (TEST(DR_DISASM_ARM, DYNAMO_OPTION(disasm_mask))) {
+        if (TESTANY(DR_DISASM_ARM, DYNAMO_OPTION(disasm_mask))) {
             print_to_buffer(buf, bufsz, sofar, "%s%s%d", immed_prefix(), sign, (uint)val);
+#ifdef AARCH64
+        } else if (TESTANY(opnd_get_flags(opnd), DR_OPND_IS_PREDICATE_CONSTRAINT) &&
+                   !aarch64_predicate_constraint_is_mapped(val)) {
+            print_to_buffer(buf, bufsz, sofar, aarch64_predicate_constraint_string(val));
+#endif
         } else if (sz <= 1) {
             print_to_buffer(buf, bufsz, sofar, "%s%s0x%02x", immed_prefix(), sign,
                             (uint)((byte)val));
@@ -578,6 +684,7 @@ internal_opnd_disassemble(char *buf, size_t bufsz, size_t *sofar INOUT,
         }
     } break;
     case IMMED_FLOAT_kind: {
+#ifndef LINUX_KERNEL
         /* Save floating state for float printing. */
         PRESERVE_FLOATING_POINT_STATE({
             uint top;
@@ -587,14 +694,19 @@ internal_opnd_disassemble(char *buf, size_t bufsz, size_t *sofar INOUT,
             print_to_buffer(buf, bufsz, sofar, "%s%s%u.%.6u", immed_prefix(), sign, top,
                             bottom);
         });
+#else
+        print_to_buffer(buf, bufsz, sofar, "%s0x%08x", immed_prefix(),
+                        *(const uint *)&opnd.value.immed_float);
+#endif
         break;
     }
-#    ifndef WINDOWS
+#ifndef WINDOWS
         /* XXX i#4488: x87 floating point immediates should be double precision.
          * Type double currently not included for Windows because sizeof(opnd_t) does
          * not equal EXPECTED_SIZEOF_OPND, triggering the ASSERT in d_r_arch_init().
          */
     case IMMED_DOUBLE_kind: {
+#    ifndef LINUX_KERNEL
         PRESERVE_FLOATING_POINT_STATE({
             uint top;
             uint bottom;
@@ -603,9 +715,13 @@ internal_opnd_disassemble(char *buf, size_t bufsz, size_t *sofar INOUT,
             print_to_buffer(buf, bufsz, sofar, "%s%s%u.%.6u", immed_prefix(), sign, top,
                             bottom);
         });
+#    else
+        print_to_buffer(buf, bufsz, sofar, "%s0x" ZHEX64_FORMAT_STRING, immed_prefix(),
+                        *(const uint64 *)&opnd.value.immed_double);
+#    endif
         break;
     }
-#    endif
+#endif
     case PC_kind: {
         app_pc target = opnd_get_pc(opnd);
         if (!print_known_pc_target(buf, bufsz, sofar, dcontext, target)) {
@@ -632,21 +748,22 @@ internal_opnd_disassemble(char *buf, size_t bufsz, size_t *sofar INOUT,
         break;
     case REG_kind:
         reg_disassemble(buf, bufsz, sofar, opnd_get_reg(opnd), opnd_get_flags(opnd), "",
-                        "");
+                        IF_AARCHXX_ELSE(aarch64_reg_opnd_suffix(opnd), ""));
         break;
     case BASE_DISP_kind: opnd_base_disp_disassemble(buf, bufsz, sofar, opnd); break;
+#if defined(X64) || defined(ARM)
+    case REL_ADDR_kind: print_to_buffer(buf, bufsz, sofar, "<rel> ");
 #    ifdef X64
-    case REL_ADDR_kind:
-        print_to_buffer(buf, bufsz, sofar, "<rel> ");
-        /* fall-through */
+        DR_FALLTHROUGH;
     case ABS_ADDR_kind:
+#    endif
         opnd_mem_disassemble_prefix(buf, bufsz, sofar, opnd);
         if (opnd_get_segment(opnd) != REG_NULL)
             reg_disassemble(buf, bufsz, sofar, opnd_get_segment(opnd), 0, "", ":");
         print_to_buffer(buf, bufsz, sofar, PFX "%s", opnd_get_addr(opnd),
-                        TEST(DR_DISASM_INTEL, DYNAMO_OPTION(disasm_mask)) ? "]" : "");
+                        TESTANY(DR_DISASM_INTEL, DYNAMO_OPTION(disasm_mask)) ? "]" : "");
         break;
-#    endif
+#endif
     default:
         print_to_buffer(buf, bufsz, sofar, "UNKNOWN OPERAND TYPE %d", opnd.kind);
         CLIENT_ASSERT(false, "opnd_disassemble: invalid opnd type");
@@ -663,9 +780,10 @@ internal_opnd_disassemble(char *buf, size_t bufsz, size_t *sofar INOUT,
         case REG_kind:
             if (!opnd_is_reg_partial(opnd))
                 break;
-            /* fall-through */
+            DR_FALLTHROUGH;
         default: {
-            const char *size_str = opnd_size_suffix_dr(opnd);
+            opnd_size_t opnd_sz = opnd_get_size(opnd);
+            const char *size_str = opnd_size_suffix_dr(opnd_sz);
             if (size_str[0] != '\0')
                 print_to_buffer(buf, bufsz, sofar, "[%s]", size_str);
         }
@@ -674,8 +792,9 @@ internal_opnd_disassemble(char *buf, size_t bufsz, size_t *sofar INOUT,
 }
 
 void
-opnd_disassemble(dcontext_t *dcontext, opnd_t opnd, file_t outfile)
+opnd_disassemble(void *drcontext, opnd_t opnd, file_t outfile)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     char buf[MAX_OPND_DIS_SZ];
     size_t sofar = 0;
     internal_opnd_disassemble(buf, BUFFER_SIZE_ELEMENTS(buf), &sofar, dcontext, opnd,
@@ -686,9 +805,10 @@ opnd_disassemble(dcontext_t *dcontext, opnd_t opnd, file_t outfile)
 }
 
 size_t
-opnd_disassemble_to_buffer(dcontext_t *dcontext, opnd_t opnd, char *buf, size_t bufsz)
+opnd_disassemble_to_buffer(void *drcontext, opnd_t opnd, char *buf, size_t bufsz)
 
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     size_t sofar = 0;
     internal_opnd_disassemble(buf, bufsz, &sofar, dcontext, opnd, false /*don't know*/);
     return sofar;
@@ -699,8 +819,8 @@ print_bytes_to_file(file_t outfile, byte *pc, byte *next_pc, instr_t *inst)
 {
     char buf[MAX_PC_DIS_SZ];
     size_t sofar = 0;
-    int extra_sz =
-        print_bytes_to_buffer(buf, BUFFER_SIZE_ELEMENTS(buf), &sofar, pc, next_pc, inst);
+    int extra_sz = d_r_print_encoding_first_line_to_buffer(buf, BUFFER_SIZE_ELEMENTS(buf),
+                                                           &sofar, pc, next_pc, inst);
     CLIENT_ASSERT(sofar < BUFFER_SIZE_ELEMENTS(buf) - 1, "internal buffer too small");
     os_write(outfile, buf, sofar);
     return extra_sz;
@@ -712,8 +832,8 @@ print_extra_bytes_to_file(file_t outfile, byte *pc, byte *next_pc, int extra_sz,
 {
     char buf[MAX_PC_DIS_SZ];
     size_t sofar = 0;
-    print_extra_bytes_to_buffer(buf, BUFFER_SIZE_ELEMENTS(buf), &sofar, pc, next_pc,
-                                extra_sz, extra_bytes_prefix);
+    d_r_print_encoding_second_line_to_buffer(buf, BUFFER_SIZE_ELEMENTS(buf), &sofar, pc,
+                                             next_pc, extra_sz, extra_bytes_prefix);
     CLIENT_ASSERT(sofar < BUFFER_SIZE_ELEMENTS(buf) - 1, "internal buffer too small");
     os_write(outfile, buf, sofar);
 }
@@ -723,9 +843,9 @@ print_extra_bytes_to_file(file_t outfile, byte *pc, byte *next_pc, int extra_sz,
  * Returns NULL if the instruction at pc is invalid.
  */
 static byte *
-internal_disassemble(char *buf, size_t bufsz, size_t *sofar INOUT, dcontext_t *dcontext,
-                     byte *pc, byte *orig_pc, bool with_pc, bool with_bytes,
-                     const char *extra_bytes_prefix)
+internal_disassemble(char *buf, size_t bufsz, size_t *sofar DR_PARAM_INOUT,
+                     dcontext_t *dcontext, byte *pc, byte *orig_pc, bool with_pc,
+                     bool with_bytes, const char *extra_bytes_prefix)
 {
     int extra_sz = 0;
     byte *next_pc;
@@ -753,8 +873,14 @@ internal_disassemble(char *buf, size_t bufsz, size_t *sofar INOUT, dcontext_t *d
                         PC_AS_LOAD_TGT(instr_get_isa_mode(&instr), orig_pc));
     }
 
+    dr_isa_mode_t instr_isa_mode = instr_get_isa_mode(&instr);
     if (with_bytes) {
-        extra_sz = print_bytes_to_buffer(buf, bufsz, sofar, pc, next_pc, &instr);
+        if (instr_isa_mode == DR_ISA_REGDEPS) {
+            extra_sz =
+                d_r_regdeps_print_encoding_first_line(buf, bufsz, sofar, pc, next_pc);
+        } else
+            extra_sz = d_r_print_encoding_first_line_to_buffer(buf, bufsz, sofar, pc,
+                                                               next_pc, &instr);
     }
 
     internal_instr_disassemble(buf, bufsz, sofar, dcontext, &instr);
@@ -765,8 +891,13 @@ internal_disassemble(char *buf, size_t bufsz, size_t *sofar INOUT, dcontext_t *d
     if (with_bytes && extra_sz > 0) {
         if (with_pc)
             print_to_buffer(buf, bufsz, sofar, IF_X64_ELSE("%21s", "%13s"), " ");
-        print_extra_bytes_to_buffer(buf, bufsz, sofar, pc, next_pc, extra_sz,
-                                    extra_bytes_prefix);
+        if (instr_isa_mode == DR_ISA_REGDEPS) {
+            d_r_regdeps_print_encoding_second_line(buf, bufsz, sofar, pc, next_pc,
+                                                   extra_sz, extra_bytes_prefix);
+        } else {
+            d_r_print_encoding_second_line_to_buffer(buf, bufsz, sofar, pc, next_pc,
+                                                     extra_sz, extra_bytes_prefix);
+        }
     }
 
     instr_free(dcontext, &instr);
@@ -803,8 +934,9 @@ internal_disassemble_to_file(dcontext_t *dcontext, byte *pc, byte *orig_pc,
  * Returns NULL if the instruction at pc is invalid.
  */
 byte *
-disassemble(dcontext_t *dcontext, byte *pc, file_t outfile)
+disassemble(void *drcontext, byte *pc, file_t outfile)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     return internal_disassemble_to_file(dcontext, pc, pc, outfile, true, false, "");
 }
 
@@ -832,14 +964,15 @@ disassemble_with_bytes(dcontext_t *dcontext, byte *pc, file_t outfile)
 /* Disassembles a single instruction, optionally printing its pc (if show_pc)
  * and its raw bytes (show_bytes) beforehand.
  * Returns the pc of the next instruction.
- * FIXME: vs disassemble_with_bytes -- didn't want to update all callers
+ * XXX: vs disassemble_with_bytes -- didn't want to update all callers
  * so leaving, though should probably remove.
  * Returns NULL if the instruction at pc is invalid.
  */
 byte *
-disassemble_with_info(dcontext_t *dcontext, byte *pc, file_t outfile, bool show_pc,
+disassemble_with_info(void *drcontext, byte *pc, file_t outfile, bool show_pc,
                       bool show_bytes)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     return internal_disassemble_to_file(dcontext, pc, pc, outfile, show_pc, show_bytes,
                                         "");
 }
@@ -854,17 +987,19 @@ disassemble_with_info(dcontext_t *dcontext, byte *pc, file_t outfile, bool show_
  * \p copy_pc, or NULL if the instruction at \p copy_pc is invalid.
  */
 byte *
-disassemble_from_copy(dcontext_t *dcontext, byte *copy_pc, byte *orig_pc, file_t outfile,
+disassemble_from_copy(void *drcontext, byte *copy_pc, byte *orig_pc, file_t outfile,
                       bool show_pc, bool show_bytes)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     return internal_disassemble_to_file(dcontext, copy_pc, orig_pc, outfile, show_pc,
                                         show_bytes, "");
 }
 
 byte *
-disassemble_to_buffer(dcontext_t *dcontext, byte *pc, byte *orig_pc, bool show_pc,
-                      bool show_bytes, char *buf, size_t bufsz, int *printed OUT)
+disassemble_to_buffer(void *drcontext, byte *pc, byte *orig_pc, bool show_pc,
+                      bool show_bytes, char *buf, size_t bufsz, int *printed DR_PARAM_OUT)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     size_t sofar = 0;
     byte *next = internal_disassemble(buf, bufsz, &sofar, dcontext, pc, orig_pc, show_pc,
                                       show_bytes, "");
@@ -874,7 +1009,7 @@ disassemble_to_buffer(dcontext_t *dcontext, byte *pc, byte *orig_pc, bool show_p
 }
 
 static void
-instr_disassemble_opnds_noimplicit(char *buf, size_t bufsz, size_t *sofar INOUT,
+instr_disassemble_opnds_noimplicit(char *buf, size_t bufsz, size_t *sofar DR_PARAM_INOUT,
                                    dcontext_t *dcontext, instr_t *instr)
 {
     /* We need to find the non-implicit operands */
@@ -904,16 +1039,18 @@ instr_disassemble_opnds_noimplicit(char *buf, size_t bufsz, size_t *sofar INOUT,
     for (i = 0; i < num; i++) {
         bool printing = false;
         opnd = dsts_first() ? instr_get_dst(instr, i) : instr_get_src(instr, i);
-        IF_X86_ELSE({ optype = instr_info_opnd_type(info, !dsts_first(), i); },
-                    {
-                        /* XXX i#1683: -syntax_arm currently fails here on register lists
-                         * and will trigger the assert in instr_info_opnd_type().  We
-                         * don't use the optype on ARM yet though.
-                         */
-                        optype = 0;
-                    });
-        bool is_evex_mask = !instr_is_opmask(instr) && opnd_is_reg(opnd) &&
-            reg_is_opmask(opnd_get_reg(opnd)) && opmask_with_dsts();
+        IF_X86_ELSE(
+            { optype = instr_info_opnd_type(info, !dsts_first(), i); },
+            {
+                /* XXX i#1683: -syntax_arm currently fails here on register lists
+                 * and will trigger the assert in instr_info_opnd_type().  We
+                 * don't use the optype on ARM yet though.
+                 */
+                optype = 0;
+            });
+        bool is_evex_mask = optype_is_evex_mask_arch(optype);
+        CLIENT_ASSERT(!is_evex_mask || opmask_with_dsts(),
+                      "Anything here with evex mask should be opmask_with_dsts()");
         if (!is_evex_mask) {
             print_to_buffer(buf, bufsz, sofar, "");
             printing = opnd_disassemble_noimplicit(buf, bufsz, sofar, dcontext, instr,
@@ -934,11 +1071,12 @@ instr_disassemble_opnds_noimplicit(char *buf, size_t bufsz, size_t *sofar INOUT,
     for (i = 0; i < num; i++) {
         bool print = true;
         opnd = dsts_first() ? instr_get_src(instr, i) : instr_get_dst(instr, i);
-        IF_X86_ELSE({ optype = instr_info_opnd_type(info, dsts_first(), i); },
-                    {
-                        /* XXX i#1683: see comment above */
-                        optype = 0;
-                    });
+        IF_X86_ELSE(
+            { optype = instr_info_opnd_type(info, dsts_first(), i); },
+            {
+                /* XXX i#1683: see comment above */
+                optype = 0;
+            });
         IF_X86({
             /* PR 312458: still not matching Intel-style tools like windbg or udis86:
              * we need to suppress certain implicit operands, such as:
@@ -955,8 +1093,9 @@ instr_disassemble_opnds_noimplicit(char *buf, size_t bufsz, size_t *sofar INOUT,
                      (i == 0 && opnd_is_reg(opnd) && reg_is_fp(opnd_get_reg(opnd))));
         });
         if (print) {
-            bool is_evex_mask = !instr_is_opmask(instr) && opnd_is_reg(opnd) &&
-                reg_is_opmask(opnd_get_reg(opnd)) && opmask_with_dsts();
+            bool is_evex_mask = optype_is_evex_mask_arch(optype);
+            CLIENT_ASSERT(!is_evex_mask || opmask_with_dsts(),
+                          "Anything here with evex mask should be opmask_with_dsts()");
             print_to_buffer(buf, bufsz, sofar, is_evex_mask ? " {" : "");
             prev = opnd_disassemble_noimplicit(buf, bufsz, sofar, dcontext, instr, optype,
                                                opnd, prev && !is_evex_mask,
@@ -967,12 +1106,14 @@ instr_disassemble_opnds_noimplicit(char *buf, size_t bufsz, size_t *sofar INOUT,
     }
     if (is_evex_mask_pending) {
         int mask_index = 0;
-        opnd = instr_get_src(instr, mask_index);
         CLIENT_ASSERT(IF_X86_ELSE(true, false), "evex mask can only exist for x86.");
-        optype = instr_info_opnd_type(info, !dsts_first(), mask_index);
+        CLIENT_ASSERT(opmask_with_dsts(),
+                      "Anything here with evex mask should be opmask_with_dsts()");
+        opnd = instr_get_src(instr, mask_index);
         CLIENT_ASSERT(!instr_is_opmask(instr) && opnd_is_reg(opnd) &&
-                          reg_is_opmask(opnd_get_reg(opnd)) && opmask_with_dsts(),
+                          reg_is_opmask(opnd_get_reg(opnd)),
                       "evex mask must always be the first source.");
+        optype = instr_info_opnd_type(info, !dsts_first(), mask_index);
         print_to_buffer(buf, bufsz, sofar, " {");
         opnd_disassemble_noimplicit(buf, bufsz, sofar, dcontext, instr, optype, opnd,
                                     false, multiple_encodings, dsts_first(), &mask_index);
@@ -983,9 +1124,15 @@ instr_disassemble_opnds_noimplicit(char *buf, size_t bufsz, size_t *sofar INOUT,
 static bool
 instr_needs_opnd_size_sfx(instr_t *instr)
 {
-#    ifdef DISASM_SUFFIX_ONLY_ON_MISMATCH /* disabled: see below */
+    /* DR_ISA_REGDEPS instructions don't have sizes for operands.
+     * They only have a single operation size.
+     */
+    if (instr_get_isa_mode(instr) == DR_ISA_REGDEPS)
+        return false;
+
+#ifdef DISASM_SUFFIX_ONLY_ON_MISMATCH /* disabled: see below */
     opnd_t src, dst;
-    if (TEST(DR_DISASM_NO_OPND_SIZE, DYNAMO_OPTION(disasm_mask)))
+    if (TESTANY(DR_DISASM_NO_OPND_SIZE, DYNAMO_OPTION(disasm_mask)))
         return false;
     /* We really only care about the primary src and primary dst */
     if (instr_num_srcs(instr) == 0 || instr_num_dsts(instr) == 0)
@@ -1003,17 +1150,17 @@ instr_needs_opnd_size_sfx(instr_t *instr)
              */
             opnd_is_immed_int(src) || opnd_is_reg_partial(src) ||
             opnd_is_reg_partial(dst));
-#    else
+#else
     /* Originally I tried only showing the sizes when they mismatch or
      * can't be inferred (code above), but that gets a little tricky,
      * and IMHO it's nice to see the size of all memory operands.  We
      * never print for immeds or non-partial regs, so we can just set
      * to true for all instructions.
      */
-    if (TEST(DR_DISASM_NO_OPND_SIZE, DYNAMO_OPTION(disasm_mask)))
+    if (TESTANY(DR_DISASM_NO_OPND_SIZE, DYNAMO_OPTION(disasm_mask)))
         return false;
     return true;
-#    endif
+#endif
 }
 
 static void
@@ -1022,12 +1169,12 @@ sign_extend_immed(instr_t *instr, int srcnum, opnd_t *src)
     opnd_size_t opsz = OPSZ_NA;
     bool resize = true;
 
-#    if !defined(X86) && !defined(ARM)
+#if !defined(X86) && !defined(ARM)
     /* Automatic sign extension is probably only useful on Intel but
      * is left enabled on ARM (AArch32) as it is what some tests expect.
      */
     return;
-#    endif
+#endif
 
     if (opnd_is_immed_int(*src)) {
         /* PR 327775: force operand to sign-extend if all other operands
@@ -1069,6 +1216,34 @@ sign_extend_immed(instr_t *instr, int srcnum, opnd_t *src)
     }
 }
 
+/* Prints to buf a space-separated string representation of the list of categories an
+ * instruction belongs to.
+ */
+static void
+print_category_names_to_buffer(char *buf, size_t bufsz, size_t *sofar, uint category)
+{
+    if (category == DR_INSTR_CATEGORY_UNCATEGORIZED) {
+        const char *category_name = instr_get_category_name(category);
+        print_to_buffer(buf, bufsz, sofar, "%s ", category_name);
+        return;
+    }
+
+    /* We consider 0x80000000 enough to be future proof when adding new categories.
+     */
+    const uint max_mask = 0x80000000;
+    for (uint mask = 0x1; mask <= max_mask; mask <<= 1) {
+        if (TESTANY(mask, category)) {
+            const char *category_name = instr_get_category_name(mask);
+            print_to_buffer(buf, bufsz, sofar, "%s ", category_name);
+        }
+
+        /* Guard against 32 bit overflow.
+         */
+        if (mask == max_mask)
+            break;
+    }
+}
+
 /*
  * Prints the instruction instr to file outfile.
  * Does not print addr16 or data16 prefixes for other than just-decoded instrs,
@@ -1076,38 +1251,53 @@ sign_extend_immed(instr_t *instr, int srcnum, opnd_t *src)
  * Prints each operand with leading zeros indicating the size.
  */
 static void
-internal_instr_disassemble(char *buf, size_t bufsz, size_t *sofar INOUT,
+internal_instr_disassemble(char *buf, size_t bufsz, size_t *sofar DR_PARAM_INOUT,
                            dcontext_t *dcontext, instr_t *instr)
 {
     int i;
-    const instr_info_t *info;
     const char *name;
     int name_width = 6;
     bool use_size_sfx = false;
     size_t offs_pre_name, offs_post_name, offs_pre_opnds;
 
-    if (!instr_valid(instr)) {
+    /* Print the instruction categories instead of opcode for DR_ISA_REGDEPS
+     * instructions. Print the operation size right after.
+     */
+    if (instr_get_isa_mode(instr) == DR_ISA_REGDEPS) {
+        uint category = instr_get_category(instr);
+        print_category_names_to_buffer(buf, bufsz, sofar, category);
+        opnd_size_t operation_size = instr->operation_size;
+        const char *operation_size_str = opnd_size_suffix_dr(operation_size);
+        if (operation_size_str[0] != '\0')
+            print_to_buffer(buf, bufsz, sofar, "[%s]", operation_size_str);
+        name = "";
+    } else if (!instr_valid(instr)) {
         print_to_buffer(buf, bufsz, sofar, "<INVALID>");
         return;
     } else if (instr_is_label(instr)) {
-        print_to_buffer(buf, bufsz, sofar, "<label>");
+        /* Since labels with different note values are used during instrumentation
+         * to mark different regions, it is useful to display the note.
+         */
+        print_to_buffer(buf, bufsz, sofar, "<label note=%p>", instr_get_note(instr));
         return;
     } else if (instr_opcode_valid(instr)) {
-#    ifdef AARCH64
-        /* We do not use instr_info_t encoding info on AArch64. */
-        info = NULL;
+#ifdef AARCH64
+        /* We do not use instr_info_t encoding info on AArch64. XXX i#1569 */
         name = get_opcode_name(instr_get_opcode(instr));
-#    else
-        info = instr_get_instr_info(instr);
+#else
+        const instr_info_t *info = instr_get_instr_info(instr);
         name = info->name;
-#    endif
+#endif
     } else
         name = "<RAW>";
 
     print_instr_prefixes(dcontext, instr, buf, bufsz, sofar);
 
     offs_pre_name = *sofar;
-    print_opcode_name(instr, name, buf, bufsz, sofar);
+    if (instr_opcode_valid(instr)) /* Avoid assert on level-0 bundle. */
+        print_opcode_name(instr, name, buf, bufsz, sofar);
+    else
+        print_to_buffer(buf, bufsz, sofar, "%s", name);
     offs_post_name = *sofar;
     name_width -= (int)(offs_post_name - offs_pre_name);
     print_to_buffer(buf, bufsz, sofar, " ");
@@ -1132,11 +1322,17 @@ internal_instr_disassemble(char *buf, size_t bufsz, size_t *sofar INOUT,
 
     if (TESTANY(DR_DISASM_INTEL | DR_DISASM_ATT | DR_DISASM_ARM,
                 DYNAMO_OPTION(disasm_mask))) {
-#    ifdef AARCH64
+#ifdef AARCH64
         /* TODO i#4382: Implement DR_DISASM_AARCH64. */
         SYSLOG_INTERNAL_WARNING_ONCE("Selected disassembly style is not implemented for "
                                      "AArch64: no operands will be printed.");
-#    endif
+#endif
+        if (instr_get_isa_mode(instr) == DR_ISA_REGDEPS) {
+            SYSLOG_INTERNAL_WARNING_ONCE(
+                "Selected disassembly style is not implemented "
+                "for DR_ISA_REGDEPS: no operands will be printed.");
+            return;
+        }
         instr_disassemble_opnds_noimplicit(buf, bufsz, sofar, dcontext, instr);
         /* we avoid trailing spaces if no operands */
         if (*sofar == offs_pre_opnds) {
@@ -1185,8 +1381,9 @@ internal_instr_disassemble(char *buf, size_t bufsz, size_t *sofar INOUT,
  * Prints each operand with leading zeros indicating the size.
  */
 void
-instr_disassemble(dcontext_t *dcontext, instr_t *instr, file_t outfile)
+instr_disassemble(void *drcontext, instr_t *instr, file_t outfile)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     char buf[MAX_INSTR_DIS_SZ];
     size_t sofar = 0;
     internal_instr_disassemble(buf, BUFFER_SIZE_ELEMENTS(buf), &sofar, dcontext, instr);
@@ -1208,14 +1405,15 @@ instr_disassemble(dcontext_t *dcontext, instr_t *instr, file_t outfile)
  * Uses DR syntax unless otherwise specified (see disassemble_set_syntax()).
  */
 size_t
-instr_disassemble_to_buffer(dcontext_t *dcontext, instr_t *instr, char *buf, size_t bufsz)
+instr_disassemble_to_buffer(void *drcontext, instr_t *instr, char *buf, size_t bufsz)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     size_t sofar = 0;
     internal_instr_disassemble(buf, bufsz, &sofar, dcontext, instr);
     return sofar;
 }
 
-#    ifndef STANDALONE_DECODER
+#ifndef STANDALONE_DECODER
 static inline const char *
 exit_stub_type_desc(dcontext_t *dcontext, fragment_t *f, linkstub_t *l)
 {
@@ -1225,19 +1423,19 @@ exit_stub_type_desc(dcontext_t *dcontext, fragment_t *f, linkstub_t *l)
         if (EXIT_IS_JMP(l->flags))
             return "jmp/jcc";
         return "fall-through/speculated/IAT";
-        /* FIXME: mark these appropriately */
+        /* XXX: mark these appropriately */
     } else {
         CLIENT_ASSERT(LINKSTUB_INDIRECT(l->flags), "invalid exit stub");
-        if (TEST(LINK_RETURN, l->flags))
+        if (TESTANY(LINK_RETURN, l->flags))
             return "ret";
         if (EXIT_IS_CALL(l->flags))
             return "indcall";
-        if (TEST(LINK_JMP, l->flags)) /* JMP or IND_JMP_PLT */
+        if (TESTANY(LINK_JMP, l->flags)) /* JMP or IND_JMP_PLT */
             return "indjmp";
-#        ifdef WINDOWS
+#    ifdef WINDOWS
         if (is_shared_syscall_routine(dcontext, EXIT_TARGET_TAG(dcontext, f, l)))
             return "shared_syscall";
-#        endif
+#    endif
     }
     CLIENT_ASSERT(false, "unknown exit stub type");
     return "<unknown>";
@@ -1256,37 +1454,37 @@ common_disassemble_fragment(dcontext_t *dcontext, fragment_t *f_in, file_t outfi
     cache_pc end_pc;
     linkstub_t *l;
     int exit_num = 0;
-#        ifdef PROFILE_RDTSC
+#    ifdef PROFILE_RDTSC
     cache_pc profile_end = 0;
-#        endif
+#    endif
     bool alloc;
     fragment_t *f = f_in;
 
     if (header) {
-#        ifdef DEBUG
+#    ifdef DEBUG
         print_file(
             outfile, "Fragment %d, tag " PFX ", flags 0x%x, %s%s%s%ssize %d%s%s:\n",
             f->id,
-#        else
+#    else
         print_file(
             outfile, "Fragment tag " PFX ", flags 0x%x, %s%s%s%ssize %d%s%s:\n",
-#        endif
+#    endif
             f->tag, f->flags, IF_X64_ELSE(FRAG_IS_32(f->flags) ? "32-bit, " : "", ""),
-            TEST(FRAG_COARSE_GRAIN, f->flags) ? "coarse, " : "",
-            (TEST(FRAG_SHARED, f->flags)
+            TESTANY(FRAG_COARSE_GRAIN, f->flags) ? "coarse, " : "",
+            (TESTANY(FRAG_SHARED, f->flags)
                  ? "shared, "
                  : (SHARED_FRAGMENTS_ENABLED()
-                        ? (TEST(FRAG_TEMP_PRIVATE, f->flags) ? "private temp, "
-                                                             : "private, ")
+                        ? (TESTANY(FRAG_TEMP_PRIVATE, f->flags) ? "private temp, "
+                                                                : "private, ")
                         : "")),
-            (TEST(FRAG_IS_TRACE, f->flags))
-                ? "trace, "
-                : (TEST(FRAG_IS_TRACE_HEAD, f->flags)) ? "tracehead, " : "",
-            f->size, (TEST(FRAG_CANNOT_BE_TRACE, f->flags)) ? ", cannot be trace" : "",
-            (TEST(FRAG_MUST_END_TRACE, f->flags)) ? ", must end trace" : "",
-            (TEST(FRAG_CANNOT_DELETE, f->flags)) ? ", cannot delete" : "");
+            (TESTANY(FRAG_IS_TRACE, f->flags))            ? "trace, "
+                : (TESTANY(FRAG_IS_TRACE_HEAD, f->flags)) ? "tracehead, "
+                                                          : "",
+            f->size, (TESTANY(FRAG_CANNOT_BE_TRACE, f->flags)) ? ", cannot be trace" : "",
+            (TESTANY(FRAG_MUST_END_TRACE, f->flags)) ? ", must end trace" : "",
+            (TESTANY(FRAG_CANNOT_DELETE, f->flags)) ? ", cannot delete" : "");
 
-        DOLOG(2, LOG_SYMBOLS, { /* FIXME: affects non-logging uses... dump_traces, etc. */
+        DOLOG(2, LOG_SYMBOLS, { /* XXX: affects non-logging uses... dump_traces, etc. */
                                 char symbolbuf[MAXIMUM_SYMBOL_LENGTH];
                                 print_symbolic_address(f->tag, symbolbuf,
                                                        sizeof(symbolbuf), false);
@@ -1297,7 +1495,7 @@ common_disassemble_fragment(dcontext_t *dcontext, fragment_t *f_in, file_t outfi
     if (!body)
         return;
 
-    if (body && TEST(FRAG_FAKE, f->flags)) {
+    if (body && TESTANY(FRAG_FAKE, f->flags)) {
         alloc = true;
         f = fragment_recreate_with_linkstubs(dcontext, f_in);
     } else {
@@ -1324,7 +1522,7 @@ common_disassemble_fragment(dcontext_t *dcontext, fragment_t *f_in, file_t outfi
 
     CLIENT_ASSERT(pc == entry_pc, "disassemble_fragment: invalid prefix");
 
-#        ifdef PROFILE_RDTSC
+#    ifdef PROFILE_RDTSC
     if (dynamo_options.profile_times && (f->flags & FRAG_IS_TRACE) != 0) {
         int sz = profile_call_size();
         profile_end = pc + sz;
@@ -1338,16 +1536,16 @@ common_disassemble_fragment(dcontext_t *dcontext, fragment_t *f_in, file_t outfi
             print_file(outfile, "  -------- profile call: --------\n");
         }
     }
-#        endif
+#    endif
 
     while (pc < body_end_pc) {
         pc = (cache_pc)disassemble_with_bytes(dcontext, (byte *)pc, outfile);
-#        ifdef PROFILE_RDTSC
+#    ifdef PROFILE_RDTSC
         if (dynamo_options.profile_times && (f->flags & FRAG_IS_TRACE) != 0 &&
             pc == profile_end) {
             print_file(outfile, "  -------- end profile call -----\n");
         }
-#        endif
+#    endif
     }
 
     for (l = FRAGMENT_EXIT_STUBS(f); l; l = LINKSTUB_NEXT_EXIT(l)) {
@@ -1363,7 +1561,7 @@ common_disassemble_fragment(dcontext_t *dcontext, fragment_t *f_in, file_t outfi
             if (EXIT_STUB_PC(dcontext, f, l) != NULL) {
                 pc = EXIT_STUB_PC(dcontext, f, l);
                 next_stop_pc = pc + linkstub_size(dcontext, f, l);
-            } else if (TEST(FRAG_COARSE_GRAIN, f->flags)) {
+            } else if (TESTANY(FRAG_COARSE_GRAIN, f->flags)) {
                 cache_pc cti_pc = EXIT_CTI_PC(f, l);
                 if (cti_pc == end_pc) {
                     /* must be elided final jmp */
@@ -1383,7 +1581,7 @@ common_disassemble_fragment(dcontext_t *dcontext, fragment_t *f_in, file_t outfi
                     }
                 }
             } else {
-                if (TEST(LINK_SEPARATE_STUB, l->flags))
+                if (TESTANY(LINK_SEPARATE_STUB, l->flags))
                     print_file(outfile, "  <no stub created since linked>\n");
                 else if (!EXIT_HAS_STUB(l->flags, f->flags))
                     print_file(outfile, "  <no stub needed: -no_indirect_stubs>\n");
@@ -1410,8 +1608,9 @@ common_disassemble_fragment(dcontext_t *dcontext, fragment_t *f_in, file_t outfi
         }
         if (LINKSTUB_DIRECT(l->flags) && DIRECT_EXIT_STUB_DATA_SZ > 0) {
             ASSERT(DIRECT_EXIT_STUB_DATA_SZ ==
-                   sizeof(cache_pc)
-                       IF_AARCH64(+DIRECT_EXIT_STUB_DATA_SLOT_ALIGNMENT_PADDING));
+                   sizeof(cache_pc) IF_AARCH64_ELSE(
+                       +DIRECT_EXIT_STUB_DATA_SLOT_ALIGNMENT_PADDING,
+                       IF_RISCV64(+DIRECT_EXIT_STUB_DATA_SLOT_ALIGNMENT_PADDING)));
             if (stub_is_patched(dcontext, f, EXIT_STUB_PC(dcontext, f, l))) {
                 print_file(outfile, "  <stored target: " PFX ">\n",
                            *(cache_pc *)IF_AARCH64_ELSE(ALIGN_FORWARD(next_stop_pc, 8),
@@ -1420,12 +1619,12 @@ common_disassemble_fragment(dcontext_t *dcontext, fragment_t *f_in, file_t outfi
             pc += DIRECT_EXIT_STUB_DATA_SZ;
         }
         /* point pc back at tail of fragment code if it was off in separate stub land */
-        if (TEST(LINK_SEPARATE_STUB, l->flags))
+        if (TESTANY(LINK_SEPARATE_STUB, l->flags))
             pc = frag_pc;
         exit_num++;
     }
 
-    if (TEST(FRAG_SELFMOD_SANDBOXED, f->flags)) {
+    if (TESTANY(FRAG_SELFMOD_SANDBOXED, f->flags)) {
         DOSTATS({ /* skip stored sz */ end_pc -= sizeof(uint); });
         print_file(outfile, "  -------- original code (from " PFX "-" PFX ") -------- \n",
                    f->tag, (f->tag + (end_pc - pc)));
@@ -1438,7 +1637,7 @@ common_disassemble_fragment(dcontext_t *dcontext, fragment_t *f_in, file_t outfi
         fragment_free(dcontext, f);
 }
 
-#        ifdef DEBUG
+#    ifdef DEBUG
 void
 disassemble_fragment(dcontext_t *dcontext, fragment_t *f, bool just_header)
 {
@@ -1448,7 +1647,7 @@ disassemble_fragment(dcontext_t *dcontext, fragment_t *f, bool just_header)
             LOG(THREAD, LOG_EMIT, 1, "\n");
     }
 }
-#        endif /* DEBUG */
+#    endif /* DEBUG */
 
 void
 disassemble_fragment_header(dcontext_t *dcontext, fragment_t *f, file_t outfile)
@@ -1469,15 +1668,15 @@ disassemble_app_bb(dcontext_t *dcontext, app_pc tag, file_t outfile)
     instrlist_clear_and_destroy(dcontext, ilist);
 }
 
-#    endif /* !STANDALONE_DECODER */
+#endif /* !STANDALONE_DECODER */
 /***************************************************************************/
 
 /* Two entry points to the disassembly routines: */
 
 void
-instrlist_disassemble(dcontext_t *dcontext, app_pc tag, instrlist_t *ilist,
-                      file_t outfile)
+instrlist_disassemble(void *drcontext, app_pc tag, instrlist_t *ilist, file_t outfile)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     int len, sz;
     instr_t *instr;
     byte *addr;
@@ -1508,10 +1707,10 @@ instrlist_disassemble(dcontext_t *dcontext, app_pc tag, instrlist_t *ilist,
             level = 4;
             /* encode instr and then output as BINARY */
             nxt_pc = instr_encode_ignore_reachability(dcontext, instr, bytes);
-            ASSERT(nxt_pc != NULL);
+            CLIENT_ASSERT(nxt_pc != NULL, "failed to encode instr");
             len = (int)(nxt_pc - bytes);
             addr = bytes;
-            CLIENT_ASSERT(len < 64, "instrlist_disassemble: too-long instr");
+            CLIENT_ASSERT(len < sizeof(bytes), "instrlist_disassemble: too-long instr");
         } else {
             addr = instr_get_raw_bits(instr);
             len = instr_length(dcontext, instr);
@@ -1551,12 +1750,18 @@ instrlist_disassemble(dcontext_t *dcontext, app_pc tag, instrlist_t *ilist,
         while (len) {
             print_file(outfile, " +%-4d %c%d " IF_X64_ELSE("%20s", "%12s"), offs,
                        instr_is_app(instr) ? 'L' : 'm', level, " ");
-            next_addr = internal_disassemble_to_file(
-                dcontext, addr, addr, outfile, false, true,
-                IF_X64_ELSE("                               ",
-                            "                       "));
-            if (next_addr == NULL)
-                break;
+            /* Leave level 0 alone as it may not be code. */
+            if (level == 0) {
+                print_file(outfile, " <...%d bytes...>\n", instr->length);
+                next_addr = addr + instr->length;
+            } else {
+                next_addr = internal_disassemble_to_file(
+                    dcontext, addr, addr, outfile, false, true,
+                    IF_X64_ELSE("                               ",
+                                "                       "));
+                if (next_addr == NULL)
+                    break;
+            }
             sz = (int)(next_addr - addr);
             CLIENT_ASSERT(sz <= len, "instrlist_disassemble: invalid length");
             len -= sz;
@@ -1569,25 +1774,23 @@ instrlist_disassemble(dcontext_t *dcontext, app_pc tag, instrlist_t *ilist,
     print_file(outfile, "END " PFX "\n\n", tag);
 }
 
-#endif /* INTERNAL || CLIENT_INTERFACE */
-
 /***************************************************************************/
 #ifndef STANDALONE_DECODER
 
 static void
 callstack_dump_module_info(char *buf, size_t bufsz, size_t *sofar, app_pc pc, uint flags)
 {
-    if (TEST(CALLSTACK_MODULE_INFO, flags)) {
+    if (TESTANY(CALLSTACK_MODULE_INFO, flags)) {
         module_area_t *ma;
         os_get_module_info_lock();
         ma = module_pc_lookup(pc);
         if (ma != NULL) {
             print_to_buffer(
                 buf, bufsz, sofar,
-                TEST(CALLSTACK_USE_XML, flags) ? "mod=\"" PFX "\" offs=\"" PFX "\" "
-                                               : " <%s+" PIFX ">",
-                TEST(CALLSTACK_MODULE_PATH, flags) ? ma->full_path
-                                                   : GET_MODULE_NAME(&ma->names),
+                TESTANY(CALLSTACK_USE_XML, flags) ? "mod=\"" PFX "\" offs=\"" PFX "\" "
+                                                  : " <%s+" PIFX ">",
+                TESTANY(CALLSTACK_MODULE_PATH, flags) ? ma->full_path
+                                                      : GET_MODULE_NAME(&ma->names),
                 pc - ma->start);
         }
         os_get_module_info_unlock();
@@ -1603,11 +1806,11 @@ internal_dump_callstack_to_buffer(char *buf, size_t bufsz, size_t *sofar, app_pc
     LOG_DECLARE(char symbolbuf[MAXIMUM_SYMBOL_LENGTH];)
     const char *symbol_name = "";
 
-    if (TEST(CALLSTACK_ADD_HEADER, flags)) {
+    if (TESTANY(CALLSTACK_ADD_HEADER, flags)) {
         print_to_buffer(buf, bufsz, sofar,
-                        TEST(CALLSTACK_USE_XML, flags) ? "\t<call-stack tid=" TIDFMT ">\n"
-                                                       : "Thread " TIDFMT
-                                                         " call stack:\n",
+                        TESTANY(CALLSTACK_USE_XML, flags)
+                            ? "\t<call-stack tid=" TIDFMT ">\n"
+                            : "Thread " TIDFMT " call stack:\n",
                         /* We avoid TLS tid to work on crashes */
                         IF_WINDOWS_ELSE(d_r_get_thread_id(), get_sys_thread_id()));
     }
@@ -1618,13 +1821,13 @@ internal_dump_callstack_to_buffer(char *buf, size_t bufsz, size_t *sofar, app_pc
             symbol_name = symbolbuf;
         });
         print_to_buffer(buf, bufsz, sofar,
-                        TEST(CALLSTACK_USE_XML, flags) ? "\t<current_pc=\"" PFX
-                                                         "\" name=\"%s\" "
-                                                       : "\t" PFX " %s ",
+                        TESTANY(CALLSTACK_USE_XML, flags) ? "\t<current_pc=\"" PFX
+                                                            "\" name=\"%s\" "
+                                                          : "\t" PFX " %s ",
                         cur_pc, symbol_name);
         callstack_dump_module_info(buf, bufsz, sofar, cur_pc, flags);
         print_to_buffer(buf, bufsz, sofar,
-                        TEST(CALLSTACK_USE_XML, flags) ? "/>\n" : "\n");
+                        TESTANY(CALLSTACK_USE_XML, flags) ? "/>\n" : "\n");
     }
 
     while (pc != NULL && is_readable_without_exception_query_os((byte *)pc, 8)) {
@@ -1635,21 +1838,21 @@ internal_dump_callstack_to_buffer(char *buf, size_t bufsz, size_t *sofar, app_pc
         });
 
         print_to_buffer(buf, bufsz, sofar,
-                        TEST(CALLSTACK_USE_XML, flags) ? "\t\t" : "\t");
-        if (TEST(CALLSTACK_FRAME_PTR, flags)) {
+                        TESTANY(CALLSTACK_USE_XML, flags) ? "\t\t" : "\t");
+        if (TESTANY(CALLSTACK_FRAME_PTR, flags)) {
             print_to_buffer(buf, bufsz, sofar,
-                            TEST(CALLSTACK_USE_XML, flags)
+                            TESTANY(CALLSTACK_USE_XML, flags)
                                 ? "<frame ptr=\"" PFX "\" parent=\"" PFX "\" "
                                 : "frame ptr " PFX " => parent " PFX ", ",
                             pc, *pc);
         }
         print_to_buffer(buf, bufsz, sofar,
-                        TEST(CALLSTACK_USE_XML, flags) ? "ret=\"" PFX "\" name=\"%s\" "
-                                                       : PFX " %s ",
+                        TESTANY(CALLSTACK_USE_XML, flags) ? "ret=\"" PFX "\" name=\"%s\" "
+                                                          : PFX " %s ",
                         *(pc + 1), symbol_name);
         callstack_dump_module_info(buf, bufsz, sofar, (app_pc) * (pc + 1), flags);
         print_to_buffer(buf, bufsz, sofar,
-                        TEST(CALLSTACK_USE_XML, flags) ? "/>\n" : "\n");
+                        TESTANY(CALLSTACK_USE_XML, flags) ? "/>\n" : "\n");
 
         num++;
         /* yes I've seen weird recursive cases before */

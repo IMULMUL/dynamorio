@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2010-2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2026 Google, Inc.  All rights reserved.
  * Copyright (c) 2000-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -40,7 +40,9 @@
  */
 
 #ifndef _UTILS_H_
-#define _UTILS_H_ 1
+#define _UTILS_H_
+
+#include "dr_project_wide_defines.h"
 
 #ifdef assert
 #    undef assert
@@ -63,7 +65,7 @@
 #    ifdef INTERNAL
 /* cast to void to avoid gcc warning "statement with no effect" when used as
  * a statement and x is a compile-time false
- * FIXME: cl debug build allocates a local for each ?:, so if this gets
+ * XXX: cl debug build allocates a local for each ?:, so if this gets
  * unrolled in some optionsx or other expansion we could have stack problems!
  */
 #        define ASSERT(x)                                                 \
@@ -141,14 +143,10 @@ ignore_assert(const char *assert_file_line, const char *expr);
 void
 external_error(const char *file, int line, const char *msg);
 
-#ifdef CLIENT_INTERFACE
-#    ifdef DEBUG
-#        define CLIENT_ASSERT(x, msg) apicheck(x, msg)
-#    else
-#        define CLIENT_ASSERT(x, msg) /* PR 215261: nothing in release builds */
-#    endif
+#ifdef DEBUG
+#    define CLIENT_ASSERT(x, msg) apicheck(x, msg)
 #else
-#    define CLIENT_ASSERT(x, msg) ASSERT_MESSAGE(CHKLVL_ASSERTS, msg, x)
+#    define CLIENT_ASSERT(x, msg) /* PR 215261: nothing in release builds */
 #endif
 
 #ifdef DR_APP_EXPORTS
@@ -200,7 +198,7 @@ external_error(const char *file, int line, const char *msg);
 #    define CHECK_TRUNCATE_TYPE_stats_int_t CHECK_TRUNCATE_TYPE_int
 #endif
 
-/* FIXME: too bad typeof is a GCC only extension - so need to pass both var and type */
+/* XXX: too bad typeof is a GCC only extension - so need to pass both var and type */
 
 /* var = (type) val; should always be preceded by a call to ASSERT_TRUNCATE  */
 /* note that it is also OK to use ASSERT_TRUNCATE(type, type, val) for return values */
@@ -219,7 +217,12 @@ external_error(const char *file, int line, const char *msg);
 #define CLIENT_ASSERT_BITFIELD_TRUNCATE(width, val, msg) \
     CLIENT_ASSERT((val) < (1 << ((width) + 1)), msg);
 
-/* thread synchronization */
+/****************************************************************************
+ * Synchronization
+ */
+
+#include "atomic_exports.h"
+
 #define LOCK_FREE_STATE -1                   /* allows a quick >=0 test for contention */
 #define LOCK_SET_STATE (LOCK_FREE_STATE + 1) /* set when requested by a single thread */
 /* any value greater than LOCK_SET_STATE means multiple threads requested the lock */
@@ -251,10 +254,7 @@ typedef struct _mac_synch_t {
     volatile int value;
 } mac_synch_t;
 #    define KSYNCH_TYPE mac_synch_t
-#    define KSYNCH_TYPE_STATIC_INIT \
-        {                           \
-            0, 0                    \
-        }
+#    define KSYNCH_TYPE_STATIC_INIT { 0, 0 }
 #else
 #    error Unknown operating system
 #endif
@@ -294,23 +294,22 @@ typedef struct _mutex_t {
     struct _mutex_t *next_process_lock;
     /* TODO: we should also add cycles spent while holding the lock, KSTATS-like */
 #    ifdef MUTEX_CALLSTACK
-    /* FIXME: case 5378: to avoid allocating memory in mutexes use a
+    /* XXX: case 5378: to avoid allocating memory in mutexes use a
      * static array that will get too fat if larger than 4
      */
 #        define MAX_MUTEX_CALLSTACK 4
     byte *callstack[MAX_MUTEX_CALLSTACK];
     /* keep as last item so not initialized in INIT_LOCK_NO_TYPE */
-#        ifdef CLIENT_INTERFACE
     /* i#779: support DR locks used as app locks */
     bool app_lock;
-#        endif
 #    else
 #        define MAX_MUTEX_CALLSTACK 0 /* cannot use */
 #    endif                            /* MUTEX_CALLSTACK */
     bool deleted;                     /* this lock has been deleted at least once */
 #endif                                /* DEADLOCK_AVOIDANCE */
     /* Any new field needs to be initialized with INIT_LOCK_NO_TYPE */
-} mutex_t;
+} /* XXX i#5383: 8-align is needed for MacM1 or for aarch64 in general? */
+IF_MACOS(IF_AARCH64(__attribute__((aligned(8))))) mutex_t;
 
 /* A spin_mutex_t is the same thing as a mutex_t (and all utils.c users use it as
  * such).  It exists only to enforce type separation outside of utils.c which
@@ -322,10 +321,10 @@ typedef struct _spin_mutex_t {
 /* perhaps for DEBUG all locks should record owner? */
 typedef struct _recursive_lock_t {
     mutex_t lock;
-    /* ASSUMPTION: reading owner field is atomic!
+    /* Requirement: reading owner field is atomic!
      * Thus must allocate this statically (compiler should 4-byte-align
      * this field, which is good enough) or align it manually!
-     * FIXME: provide creation routine that does that for non-static locks
+     * XXX: Provide creation routine that does that for non-static locks?
      */
     thread_id_t owner;
     uint count;
@@ -333,7 +332,7 @@ typedef struct _recursive_lock_t {
 
 typedef struct _read_write_lock_t {
     mutex_t lock;
-    /* FIXME: could be merged w/ lock->state if want to get more sophisticated...
+    /* XXX: could be merged w/ lock->state if want to get more sophisticated...
      * we could use the lock->state as a 32-bit counter, incremented
      * by readers, and with the MSB bit (sign) set by writers
      */
@@ -360,7 +359,7 @@ enum {
     LOCK_RANK(trace_building_lock), /* < bb_building_lock, < table_rwlock */
 
     /* decode exception -> check if should_intercept requires all_threads
-     * FIXME: any other locks that could be interrupted by exception that
+     * XXX: any other locks that could be interrupted by exception that
      * could be app's fault?
      */
     LOCK_RANK(thread_initexit_lock), /* < all_threads_lock, < snapshot_lock */
@@ -370,7 +369,7 @@ enum {
 #    ifdef WINDOWS
     LOCK_RANK(exception_stack_lock), /* < all_threads_lock */
 #    endif
-    /* FIXME: grabbed on an exception, which could happen anywhere!
+    /* XXX: grabbed on an exception, which could happen anywhere!
      * possible deadlock if already held */
     LOCK_RANK(all_threads_lock), /* < global_alloc_lock */
 
@@ -385,9 +384,7 @@ enum {
 
     LOCK_RANK(protect_info), /* < cache and heap traversal locks */
 
-#    if defined(CLIENT_SIDELINE) && defined(CLIENT_INTERFACE)
     LOCK_RANK(sideline_mutex),
-#    endif
 
     LOCK_RANK(shared_cache_flush_lock), /* < shared_cache_count_lock,
                                            < shared_delete_lock,
@@ -402,12 +399,13 @@ enum {
 
     LOCK_RANK(change_linking_lock), /* < shared_vm_areas, < all heap locks */
 
+#    ifdef LINUX
+    LOCK_RANK(app_brk_lock), /* < shared_vm_areas */
+#    endif
     LOCK_RANK(shared_vm_areas), /* > change_linking_lock, < executable_areas  */
     LOCK_RANK(shared_cache_count_lock),
 
-#    if defined(CLIENT_SIDELINE) && defined(CLIENT_INTERFACE)
     LOCK_RANK(fragment_delete_mutex), /* > shared_vm_areas */
-#    endif
 
     LOCK_RANK(tracedump_mutex), /* > fragment_delete_mutex, > shared_vm_areas */
 
@@ -465,15 +463,15 @@ enum {
      * anymore but having it gives us flexibility so I'm leaving it)
      */
     LOCK_RANK(coarse_table_rwlock), /* < global_alloc_lock, < coarse_th_table_rwlock */
-    /* We make the pc table separate (we write it while holding master table lock) */
+    /* We make the pc table separate (we write it while holding main table lock) */
     LOCK_RANK(coarse_pclookup_table_rwlock), /* < global_alloc_lock,
                                               * < coarse_th_table_rwlock */
-    /* We make the th table separate (we look in it while holding master table lock) */
+    /* We make the th table separate (we look in it while holding main table lock) */
     LOCK_RANK(coarse_th_table_rwlock), /* < global_alloc_lock */
 
     LOCK_RANK(process_module_vector_lock), /* < snapshot_lock > all_threads_synch_lock */
     /* For Loglevel 1 and higher, with LOG_MEMSTATS, the snapshot lock is
-     * grabbed on an exception, possible deadlock if already held FIXME */
+     * grabbed on an exception, possible deadlock if already held XXX */
     LOCK_RANK(snapshot_lock), /* < dynamo_areas */
 #    ifdef PROGRAM_SHEPHERDING
     LOCK_RANK(futureexec_areas), /* > executable_areas
@@ -486,7 +484,6 @@ enum {
     LOCK_RANK(patch_proof_areas),      /* < dynamo_areas < global_alloc_lock */
     LOCK_RANK(emulate_write_areas),    /* < dynamo_areas < global_alloc_lock */
     LOCK_RANK(IAT_areas),              /* < dynamo_areas < global_alloc_lock */
-#    ifdef CLIENT_INTERFACE
     /* PR 198871: this same label is used for all client locks */
     LOCK_RANK(dr_client_mutex),            /* > module_data_lock */
     LOCK_RANK(client_thread_count_lock),   /* > dr_client_mutex */
@@ -495,9 +492,8 @@ enum {
                                               global_alloc_lock */
     LOCK_RANK(callback_registration_lock), /* > dr_client_mutex */
     LOCK_RANK(client_tls_lock),            /* > dr_client_mutex */
-#    endif
-    LOCK_RANK(intercept_hook_lock), /* < table_rwlock */
-    LOCK_RANK(privload_lock),       /* < modlist_areas, < table_rwlock */
+    LOCK_RANK(intercept_hook_lock),        /* < table_rwlock */
+    LOCK_RANK(privload_lock),              /* < modlist_areas, < table_rwlock */
 #    ifdef LINUX
     LOCK_RANK(sigfdtable_lock), /* < table_rwlock */
 #    endif
@@ -528,17 +524,16 @@ enum {
     LOCK_RANK(pcache_dir_check_lock),
 #    ifdef UNIX
     LOCK_RANK(suspend_lock),
-    LOCK_RANK(shared_lock),
+    LOCK_RANK(sighand_lock), /* < sigmask_lock */
+    LOCK_RANK(sigmask_lock), /* > sighand_lock */
 #    endif
     LOCK_RANK(modlist_areas), /* < dynamo_areas < global_alloc_lock */
 #    ifdef WINDOWS
     LOCK_RANK(drwinapi_localheap_lock), /* < global_alloc_lock */
 #    endif
-#    ifdef CLIENT_INTERFACE
     LOCK_RANK(client_aux_libs),
-#        ifdef WINDOWS
+#    ifdef WINDOWS
     LOCK_RANK(client_aux_lib64_lock),
-#        endif
 #    endif
 #    ifdef WINDOWS
     LOCK_RANK(alt_tls_lock),
@@ -573,18 +568,18 @@ enum {
 #    endif
     LOCK_RANK(reset_pending_lock), /* > heap_unit_lock */
 
-    LOCK_RANK(initstack_mutex), /* FIXME: NOT TESTED */
+    LOCK_RANK(initstack_mutex), /* XXX: NOT TESTED */
 
-    LOCK_RANK(event_lock),          /* FIXME: NOT TESTED */
-    LOCK_RANK(do_threshold_mutex),  /* FIXME: NOT TESTED */
-    LOCK_RANK(threads_killed_lock), /* FIXME: NOT TESTED */
-    LOCK_RANK(child_lock),          /* FIXME: NOT TESTED */
+    LOCK_RANK(event_lock),          /* XXX: NOT TESTED */
+    LOCK_RANK(do_threshold_mutex),  /* XXX: NOT TESTED */
+    LOCK_RANK(threads_killed_lock), /* XXX: NOT TESTED */
+    LOCK_RANK(child_lock),          /* XXX: NOT TESTED */
 
 #    ifdef SIDELINE
-    LOCK_RANK(sideline_lock),       /* FIXME: NOT TESTED */
-    LOCK_RANK(do_not_delete_lock),  /* FIXME: NOT TESTED */
-    LOCK_RANK(remember_lock),       /* FIXME: NOT TESTED */
-    LOCK_RANK(sideline_table_lock), /* FIXME: NOT TESTED */
+    LOCK_RANK(sideline_lock),       /* XXX: NOT TESTED */
+    LOCK_RANK(do_not_delete_lock),  /* XXX: NOT TESTED */
+    LOCK_RANK(remember_lock),       /* XXX: NOT TESTED */
+    LOCK_RANK(sideline_table_lock), /* XXX: NOT TESTED */
 #    endif
 #    ifdef SIMULATE_ATTACK
     LOCK_RANK(simulate_lock),
@@ -597,7 +592,7 @@ enum {
                                                        * < report_buf_lock (for assert) */
 #    endif
     LOCK_RANK(report_buf_lock),
-/* FIXME: if we crash while holding the all_threads_lock, snapshot_lock
+/* XXX: if we crash while holding the all_threads_lock, snapshot_lock
  * (for loglevel 1+, logmask LOG_MEMSTATS), or any lock below this
  * line (except the profile_dump_lock, and possibly others depending on
  * options) we will deadlock
@@ -667,10 +662,7 @@ thread_owns_first_or_both_locks_only(dcontext_t *dcontext, mutex_t *lock1,
         }
 #else
 /* Ignore the arguments */
-#    define INIT_LOCK_NO_TYPE(name, rank)            \
-        {                                            \
-            LOCK_FREE_STATE, KSYNCH_TYPE_STATIC_INIT \
-        }
+#    define INIT_LOCK_NO_TYPE(name, rank) { LOCK_FREE_STATE, KSYNCH_TYPE_STATIC_INIT }
 #endif /* DEADLOCK_AVOIDANCE */
 
 /* Structure assignments and initialization don't work the same in gcc and cl
@@ -683,7 +675,7 @@ thread_owns_first_or_both_locks_only(dcontext_t *dcontext, mutex_t *lock1,
 #ifdef WINDOWS
 #    define STRUCTURE_TYPE(x)
 #else
-/* FIXME: gcc 4.1.1 complains "initializer element is not constant"
+/* XXX: gcc 4.1.1 complains "initializer element is not constant"
  * if we have our old (x) here; presumably some older gcc needed it;
  * once sure nobody does let's remove this define altogether.
  */
@@ -708,14 +700,12 @@ thread_owns_first_or_both_locks_only(dcontext_t *dcontext, mutex_t *lock1,
 #define ASSIGN_INIT_SPINMUTEX_FREE(var, spinmutex) \
     ASSIGN_INIT_LOCK_FREE((var).lock, spinmutex)
 
-#define INIT_RECURSIVE_LOCK(lock)                                     \
-    STRUCTURE_TYPE(recursive_lock_t)                                  \
-    {                                                                 \
-        INIT_LOCK_NO_TYPE(#lock "(recursive)"                         \
-                                "@" __FILE__ ":" STRINGIFY(__LINE__), \
-                          LOCK_RANK(lock)),                           \
-            INVALID_THREAD_ID, 0                                      \
-    }
+#define INIT_RECURSIVE_LOCK(lock)                                                       \
+    STRUCTURE_TYPE(recursive_lock_t) { INIT_LOCK_NO_TYPE(#lock "(recursive)"            \
+                                                               "@" __FILE__             \
+                                                               ":" STRINGIFY(__LINE__), \
+                                                         LOCK_RANK(lock)),              \
+                                       INVALID_THREAD_ID, 0 }
 
 #define INIT_READWRITE_LOCK(lock)                                                     \
     STRUCTURE_TYPE(read_write_lock_t)                                                 \
@@ -726,30 +716,30 @@ thread_owns_first_or_both_locks_only(dcontext_t *dcontext, mutex_t *lock1,
             0, INVALID_THREAD_ID, 0, KSYNCH_TYPE_STATIC_INIT, KSYNCH_TYPE_STATIC_INIT \
     }
 
-#define ASSIGN_INIT_READWRITE_LOCK_FREE(var, lock)                                \
-    do {                                                                          \
-        read_write_lock_t initializer_##lock = STRUCTURE_TYPE(read_write_lock_t){ \
-            INIT_LOCK_NO_TYPE(#lock "(readwrite)"                                 \
-                                    "@" __FILE__ ":" STRINGIFY(__LINE__),         \
-                              LOCK_RANK(lock)),                                   \
-            0,                                                                    \
-            INVALID_THREAD_ID,                                                    \
-            0,                                                                    \
-            KSYNCH_TYPE_STATIC_INIT,                                              \
-            KSYNCH_TYPE_STATIC_INIT                                               \
-        };                                                                        \
-        var = initializer_##lock;                                                 \
+#define ASSIGN_INIT_READWRITE_LOCK_FREE(var, lock)                                 \
+    do {                                                                           \
+        read_write_lock_t initializer_##lock = STRUCTURE_TYPE(read_write_lock_t) { \
+            INIT_LOCK_NO_TYPE(#lock "(readwrite)"                                  \
+                                    "@" __FILE__ ":" STRINGIFY(__LINE__),          \
+                              LOCK_RANK(lock)),                                    \
+            0,                                                                     \
+            INVALID_THREAD_ID,                                                     \
+            0,                                                                     \
+            KSYNCH_TYPE_STATIC_INIT,                                               \
+            KSYNCH_TYPE_STATIC_INIT                                                \
+        };                                                                         \
+        var = initializer_##lock;                                                  \
     } while (0)
 
-#define ASSIGN_INIT_RECURSIVE_LOCK_FREE(var, lock)                              \
-    do {                                                                        \
-        recursive_lock_t initializer_##lock = STRUCTURE_TYPE(recursive_lock_t){ \
-            INIT_LOCK_NO_TYPE(#lock "(recursive)"                               \
-                                    "@" __FILE__ ":" STRINGIFY(__LINE__),       \
-                              LOCK_RANK(lock)),                                 \
-            INVALID_THREAD_ID, 0                                                \
-        };                                                                      \
-        var = initializer_##lock;                                               \
+#define ASSIGN_INIT_RECURSIVE_LOCK_FREE(var, lock)                               \
+    do {                                                                         \
+        recursive_lock_t initializer_##lock = STRUCTURE_TYPE(recursive_lock_t) { \
+            INIT_LOCK_NO_TYPE(#lock "(recursive)"                                \
+                                    "@" __FILE__ ":" STRINGIFY(__LINE__),        \
+                              LOCK_RANK(lock)),                                  \
+            INVALID_THREAD_ID, 0                                                 \
+        };                                                                       \
+        var = initializer_##lock;                                                \
     } while (0)
 
 #define INIT_SPINLOCK_FREE(lock) \
@@ -778,7 +768,6 @@ d_r_mutex_unlock(mutex_t *mutex);
 void
 d_r_mutex_fork_reset(mutex_t *mutex);
 #endif
-#ifdef CLIENT_INTERFACE
 void
 d_r_mutex_mark_as_app(mutex_t *lock);
 /* Use this version of 'lock' when obtaining a lock in an app context. In the
@@ -788,7 +777,6 @@ d_r_mutex_mark_as_app(mutex_t *lock);
  */
 void
 d_r_mutex_lock_app(mutex_t *mutex, priv_mcontext_t *mc);
-#endif
 
 /* spinmutex synchronization */
 bool
@@ -815,7 +803,7 @@ spinmutex_delete(spin_mutex_t *spin_lock);
 static inline bool
 mutex_testlock(mutex_t *lock)
 {
-    return lock->lock_requests > LOCK_FREE_STATE;
+    return atomic_aligned_read_int(&lock->lock_requests) > LOCK_FREE_STATE;
 }
 
 static inline bool
@@ -833,7 +821,6 @@ void
 release_recursive_lock(recursive_lock_t *lock);
 bool
 self_owns_recursive_lock(recursive_lock_t *lock);
-#ifdef CLIENT_INTERFACE
 /* Use this version of 'lock' when obtaining a lock in an app context. In the
  * case that there is contention on this lock, this thread will be marked safe
  * to be relocated and even detached. The current thread's mcontext may be
@@ -841,7 +828,6 @@ self_owns_recursive_lock(recursive_lock_t *lock);
  */
 void
 acquire_recursive_app_lock(recursive_lock_t *mutex, priv_mcontext_t *mc);
-#endif
 
 /* A read write lock allows multiple readers or alternatively a single writer */
 void
@@ -857,9 +843,18 @@ d_r_write_unlock(read_write_lock_t *rw);
 bool
 self_owns_write_lock(read_write_lock_t *rw);
 
+#if defined(MACOS) || (defined(X64) && defined(WINDOWS))
+#    define ATOMIC_READ_THREAD_ID(id) \
+        ((thread_id_t)atomic_aligned_read_int64((volatile int64 *)(id)))
+#else
+#    define ATOMIC_READ_THREAD_ID(id) \
+        ((thread_id_t)atomic_aligned_read_int((volatile int *)(id)))
+#endif
+
 /* test whether locks are held at all */
-#define WRITE_LOCK_HELD(rw) (mutex_testlock(&(rw)->lock) && ((rw)->num_readers == 0))
-#define READ_LOCK_HELD(rw) ((rw)->num_readers > 0)
+#define WRITE_LOCK_HELD(rw) \
+    (mutex_testlock(&(rw)->lock) && atomic_aligned_read_int(&(rw)->num_readers) == 0)
+#define READ_LOCK_HELD(rw) (atomic_aligned_read_int(&(rw)->num_readers) > 0)
 
 /* test whether current thread owns locks
  * for non-DEADLOCK_AVOIDANCE, cannot tell who owns it, so we bundle
@@ -867,7 +862,7 @@ self_owns_write_lock(read_write_lock_t *rw);
  * knowing for sure.
  */
 #ifdef DEADLOCK_AVOIDANCE
-#    define OWN_MUTEX(m) ((m)->owner == d_r_get_thread_id())
+#    define OWN_MUTEX(m) (ATOMIC_READ_THREAD_ID(&(m)->owner) == d_r_get_thread_id())
 #    define ASSERT_OWN_MUTEX(pred, m) ASSERT(!(pred) || OWN_MUTEX(m))
 #    define ASSERT_DO_NOT_OWN_MUTEX(pred, m) ASSERT(!(pred) || !OWN_MUTEX(m))
 #    define OWN_NO_LOCKS(dc) thread_owns_no_locks(dc)
@@ -887,7 +882,7 @@ self_owns_write_lock(read_write_lock_t *rw);
 #define ASSERT_OWN_WRITE_LOCK(pred, rw) ASSERT(!(pred) || self_owns_write_lock(rw))
 #define ASSERT_DO_NOT_OWN_WRITE_LOCK(pred, rw) \
     ASSERT(!(pred) || !self_owns_write_lock(rw))
-/* FIXME: no way to tell if current thread is one of the readers */
+/* XXX: no way to tell if current thread is one of the readers */
 #define ASSERT_OWN_READ_LOCK(pred, rw) ASSERT(!(pred) || READ_LOCK_HELD(rw))
 #define READWRITE_LOCK_HELD(rw) (READ_LOCK_HELD(rw) || self_owns_write_lock(rw))
 #define ASSERT_OWN_READWRITE_LOCK(pred, rw) ASSERT(!(pred) || READWRITE_LOCK_HELD(rw))
@@ -938,8 +933,8 @@ dr_modload_hook_exists(void); /* hard to include instrument.h here */
             d_r_mutex_unlock(&(bb_building_lock));                                      \
     } while (0)
 /* we assume dynamo_resetting is only done w/ all threads suspended */
-#define NEED_SHARED_LOCK(flags)                                             \
-    (TEST(FRAG_SHARED, (flags)) && !INTERNAL_OPTION(single_thread_in_DR) && \
+#define NEED_SHARED_LOCK(flags)                                                \
+    (TESTANY(FRAG_SHARED, (flags)) && !INTERNAL_OPTION(single_thread_in_DR) && \
      !dynamo_exited && !dynamo_resetting)
 #define SHARED_FLAGS_MUTEX(flags, operation, lock) \
     do {                                           \
@@ -951,6 +946,8 @@ dr_modload_hook_exists(void); /* hard to include instrument.h here */
         if (NEED_SHARED_LOCK((flags)))                      \
             operation##_recursive_lock(&(lock));            \
     } while (0)
+
+/****************************************************************************/
 
 /* Our parameters (option string, logdir, etc.) are configured
  * through files and secondarily environment variables.
@@ -980,8 +977,8 @@ dr_modload_hook_exists(void); /* hard to include instrument.h here */
  *   extern uint HASHTABLE_SIZE(int num_bits);
  */
 
-/* FIXME - xref 8139 which is best 2654435769U 2654435761U or 0x9e379e37
- * FIXME PR 212574 (==8139): would we want the 32-bit one for smaller index values?
+/* XXX - xref 8139 which is best 2654435769U 2654435761U or 0x9e379e37
+ * XXX PR 212574 (==8139): would we want the 32-bit one for smaller index values?
  */
 #define PHI_2_32 2654435769U           /* (sqrt(5)-1)/2 * (2^32) */
 #define PHI_2_64 11400714819323198485U /* (sqrt(5)-1)/2 * (2^64) */
@@ -1010,14 +1007,14 @@ dr_modload_hook_exists(void); /* hard to include instrument.h here */
 #    define HASH_FUNC_BITS(val, num_bits) ((uint)((val) & (HASH_MASK(num_bits))))
 #else
 /* do not use the lsb (alignment!) */
-/* FIXME: this function in product builds is in fact not used on
+/* XXX: this function in product builds is in fact not used on
  * addresses so ignoring the LSB is not helping.
  * Better use the more generic HASH_FUNC that allows for hash_offset other than 1
  */
 #    define HASH_FUNC_BITS(val, num_bits) (((val) & (HASH_MASK(num_bits))) >> 1)
 #endif
 
-/* FIXME - xref 8139, what's the best shift for multiply phi? In theory for
+/* XXX - xref 8139, what's the best shift for multiply phi? In theory for
  * m bit table should take the middle m bits of the qword result. We currently
  * take the top m bits of the lower dword which is prob. almost as good, but
  * could experiment (however, I suspect probing strategy might make more of a
@@ -1028,7 +1025,7 @@ dr_modload_hook_exists(void); /* hard to include instrument.h here */
          (val)                                :                         \
          ((table)->hash_func == HASH_FUNCTION_MULTIPLY_PHI ?            \
              /* All ibl tables use NONE so don't need to worry about    \
-              * the later hash_mask_offset shift. FIXME - structure all \
+              * the later hash_mask_offset shift. XXX - structure all \
               * these macros a little clearly/efficiently. */           \
              /* case 8457: keep in sync w/ hash_value()'s calc */       \
              (((val) * HASH_PHI) >> (HASH_TAG_BITS - (table)->hash_bits)) : \
@@ -1084,25 +1081,7 @@ hashtable_num_bits(uint size);
 
 #define MAX_LOW_2GB ((byte *)(ptr_uint_t)INT_MAX)
 
-/* alignment helpers, alignment must be power of 2 */
-#define ALIGNED(x, alignment) ((((ptr_uint_t)x) & ((alignment)-1)) == 0)
-#define ALIGN_FORWARD(x, alignment) \
-    ((((ptr_uint_t)x) + ((alignment)-1)) & (~((ptr_uint_t)(alignment)-1)))
-#define ALIGN_FORWARD_UINT(x, alignment) \
-    ((((uint)x) + ((alignment)-1)) & (~((alignment)-1)))
-#define ALIGN_BACKWARD(x, alignment) (((ptr_uint_t)x) & (~((ptr_uint_t)(alignment)-1)))
-#define PAD(length, alignment) (ALIGN_FORWARD((length), (alignment)) - (length))
-#define ALIGN_MOD(addr, size, alignment) \
-    ((((ptr_uint_t)addr) + (size)-1) & ((alignment)-1))
-#define CROSSES_ALIGNMENT(addr, size, alignment) \
-    (ALIGN_MOD(addr, size, alignment) < (size)-1)
-/* number of bytes you need to shift addr forward so that it's !CROSSES_ALIGNMENT */
-#define ALIGN_SHIFT_SIZE(addr, size, alignment)          \
-    (CROSSES_ALIGNMENT(addr, size, alignment)            \
-         ? ((size)-1 - ALIGN_MOD(addr, size, alignment)) \
-         : 0)
-
-#define IS_POWER_OF_2(x) ((x) == 0 || ((x) & ((x)-1)) == 0)
+#define IS_POWER_OF_2(x) ((x) == 0 || ((x) & ((x) - 1)) == 0)
 
 /* C standard has pointer overflow as undefined so cast to unsigned
  * (i#14 and drmem i#302)
@@ -1127,7 +1106,7 @@ typedef bitmap_element_t bitmap_t[];
 #define BITMAP_DENSITY 32
 #define BITMAP_MASK(i) (1 << ((i) % BITMAP_DENSITY))
 #define BITMAP_INDEX(i) ((i) / BITMAP_DENSITY)
-#define BITMAP_NOT_FOUND ((uint)-1)
+#define BITMAP_NOT_FOUND ((uint) - 1)
 
 /* bitmap_t primitives */
 
@@ -1184,16 +1163,16 @@ bitmap_check_consistency(bitmap_t b, uint bitmap_size, uint expect_free);
 /* We define MAX_LOG_LENGTH_MINUS_ONE for splitting long buffers.
  * It must be a raw numeric constant as we STRINGIFY it.
  */
-#if defined(PARAMS_IN_REGISTRY) || !defined(CLIENT_INTERFACE)
+#ifdef PARAMS_IN_REGISTRY
 #    define MAX_LOG_LENGTH IF_X64_ELSE(1280, 768)
 #    define MAX_LOG_LENGTH_MINUS_ONE IF_X64_ELSE(1279, 767)
 #else
 /* need more space for printing out longer option strings */
-/* CLIENT_INTERFACE build has larger stack and 2048 option length so go bigger
- * so clients don't have dr_printf truncated as often
+/* For client we have a larger stack and 2560 option length so go bigger
+ * so clients don't have dr_printf truncated as often.
  */
-#    define MAX_LOG_LENGTH IF_CLIENT_INTERFACE_ELSE(2048, 1384)
-#    define MAX_LOG_LENGTH_MINUS_ONE IF_CLIENT_INTERFACE_ELSE(2047, 1383)
+#    define MAX_LOG_LENGTH 2560
+#    define MAX_LOG_LENGTH_MINUS_ONE 2559
 #endif
 
 #if defined(DEBUG) && !defined(STANDALONE_DECODER)
@@ -1248,7 +1227,8 @@ print_file(file_t f, const char *fmt, ...);
  * to 0 by the caller before the first call to print_to_buffer.
  */
 bool
-print_to_buffer(char *buf, size_t bufsz, size_t *sofar INOUT, const char *fmt, ...);
+print_to_buffer(char *buf, size_t bufsz, size_t *sofar DR_PARAM_INOUT, const char *fmt,
+                ...);
 
 const char *
 memprot_string(uint prot);
@@ -1310,7 +1290,8 @@ file_t
 get_thread_private_logfile(void);
 bool
 get_unique_logfile(const char *file_type, char *filename_buffer, uint maxlen,
-                   bool open_directory, file_t *file);
+                   bool open_directory, const char *output_directory,
+                   bool embed_timestamp, file_t *file);
 const char *
 get_app_name_for_path(void);
 const char *
@@ -1320,7 +1301,7 @@ get_short_name(const char *exename);
  * place the do_once var elsewhere than .data.  Since it's only written once we
  * go ahead and unprotect here.  Even if we have dozens of these (there aren't
  * that many in release builds currently) it shouldn't hurt us.
- * FIXME: this means that if the protection routines call a routine that has
+ * XXX: this means that if the protection routines call a routine that has
  * a do-once, we have a deadlock!  Could switch to a recursive lock.
  */
 extern int do_once_generation; /* for possible re-attach */
@@ -1386,10 +1367,10 @@ extern mutex_t do_threshold_mutex;
  *
  * Note we do not support filters in EXCEPT statements so the
  * innermost handler will be called.  Also finally blocks are not
- * implemented (FIXME: we would have to unwind all nested finally blocks
+ * implemented (XXX: we would have to unwind all nested finally blocks
  * before the EXCEPT block).
  *
- * Note no locks should be grabbed within a TRY/EXCEPT block (FIXME:
+ * Note no locks should be grabbed within a TRY/EXCEPT block (XXX:
  * until we have FINALLY support to release them).
  *
  * (tip: compile your TRY blocks first outside of this macro for
@@ -1445,7 +1426,15 @@ extern mutex_t do_threshold_mutex;
          */                                                                            \
         ASSERT(                                                                        \
             (try_pointer) == &global_try_except || (try_pointer) == NULL ||            \
-            (try_pointer) == &get_thread_private_dcontext()->try_except ||             \
+            (get_thread_private_dcontext() !=                                          \
+                 NULL && /* Note that the following statement does not dereference the \
+                          * result of get_thread_private_dcontext() (because we need   \
+                          * just the offset of a data member). Still, when the null    \
+                          * sanitizer is enabled, it performs the is-null check, which \
+                          * can fail if the returned value is NULL. So, we need this   \
+                          * is-null check of our own.                                  \
+                          */                                                           \
+             (try_pointer) == &get_thread_private_dcontext()->try_except) ||           \
             (try_pointer) == /* A currently-native thread: */                          \
                 &thread_lookup(IF_UNIX_ELSE(get_sys_thread_id(), d_r_get_thread_id())) \
                      ->dcontext->try_except);                                          \
@@ -1466,7 +1455,7 @@ extern mutex_t do_threshold_mutex;
     } while (0)
 
 /* implementation notes: */
-/* FIXME: it is more secure yet not as flexible to use a scheme
+/* XXX: it is more secure yet not as flexible to use a scheme
  * like the Exception Tables in the Linux kernel where a static
  * mapping from a faulting PC to a fixup code (in
  * exception_table_entry) can be kept in read-only memory.  That
@@ -1479,7 +1468,7 @@ extern mutex_t do_threshold_mutex;
  */
 
 /* no filters
- * FIXME: we may want filters in debug builds to make sure we can
+ * XXX: we may want filters in debug builds to make sure we can
  * detect the proper EXCEPT condition (need to register in the TRY).
  * Alternatively, should match against a list of instructions that are
  * the only ones known to possibly fail.
@@ -1497,10 +1486,10 @@ extern mutex_t do_threshold_mutex;
         /* rollback first */                                     \
         POP_TRY_BLOCK(try_pointer, try__state);                  \
         statement;                                               \
-        /* FIXME: stop unwinding */                              \
+        /* XXX: stop unwinding */                                \
     }
 
-/* FIXME: should be called only nested within another TRY/EXCEPT
+/* XXX: should be called only nested within another TRY/EXCEPT
  * block.  (We don't support __leave so there is no other use).  If it
  * was called not nested in an EXCEPT handler, we can't just hide
  * there was an exception at all, otherwise this will change behavior
@@ -1527,7 +1516,7 @@ extern mutex_t do_threshold_mutex;
         /* executed for both normal execution, or exception */        \
         statement;                                                    \
         if ((try_pointer)->unwinding_exception) {                     \
-            /* FIXME: on nested exception must keep UNWINDing */      \
+            /* XXX: on nested exception must keep UNWINDing */        \
             /* and give control to the previous nested handler */     \
             /* until an EXCEPT handler resumes to normal execution */ \
             /* we don't keep any exception context */                 \
@@ -1547,7 +1536,7 @@ enum { LONGJMP_EXCEPTION = 1 };
 /* volatile to ensure the compiler doesn't completely skip a READ */
 #define PROBE_READ_PC(pc) ((*(volatile char *)(pc)))
 #define PROBE_WRITE_PC(pc) ATOMIC_ADD_PTR(volatile char *, (*(volatile char *)(pc)), 0)
-/* FIXME: while handling a read exception thread stack expansion in
+/* XXX: while handling a read exception thread stack expansion in
  * other threads may lose its guard page.  Since current thread won't
  * know if it is ok to expand, therefore the stacks won't grow any
  * further.  See MSDN: IsBadReadPtr(), We may want to mark back any
@@ -1559,15 +1548,21 @@ enum { LONGJMP_EXCEPTION = 1 };
 
 #include "stats.h"
 
+#ifdef UNIX
+#    define UNUSED __attribute__((unused))
+#else
+#    define UNUSED
+#endif
+
 /* Use to shut up the compiler about an unused variable when the
  * alternative is a painful modification of more src code. Our
  * standard is to use this macro just after the variable is declared
  * and to use it judiciously.
  */
-#define UNUSED_VARIABLE(pv)           \
-    {                                 \
-        void *unused_pv = (void *)pv; \
-        unused_pv = NULL;             \
+#define UNUSED_VARIABLE(pv)                  \
+    {                                        \
+        void *unused_pv UNUSED = (void *)pv; \
+        unused_pv = NULL;                    \
     }
 
 /* Both release and debug builds share these common stats macros */
@@ -1713,10 +1708,10 @@ enum { LONGJMP_EXCEPTION = 1 };
 #    define DOCHECKINT(level, statement) /* nothing */
 #endif
 
-/* for use in CLIENT_ASSERT or elsewhere that exists even if
- * STANDALONE_DECODER is defined, unless CLIENT_INTERFACE is off
+/* For use in CLIENT_ASSERT or elsewhere that exists even if
+ * STANDALONE_DECODER is defined.
  */
-#if defined(DEBUG) && (defined(CLIENT_INTERFACE) || !defined(STANDALONE_DECODER))
+#ifdef DEBUG
 #    define DEBUG_EXT_DECLARE(declaration) declaration
 #else
 #    define DEBUG_EXT_DECLARE(declaration)
@@ -1732,7 +1727,7 @@ enum { LONGJMP_EXCEPTION = 1 };
         do {                   \
             statement          \
         } while (0)
-/* FIXME: move to stats.h */
+/* XXX: move to stats.h */
 /* Note : stats macros are called in places where it is not safe to hold any lock
  * (such as special_heap_create_unit, others?), if ever go back to using a mutex
  * to protect the stats need to update such places
@@ -1744,7 +1739,7 @@ enum { LONGJMP_EXCEPTION = 1 };
 /* In general should prob. be using stats_add_[peak, max] instead of
  * stats_[peak/max] since they tie the adjustment of the stat to the
  * setting of the max, otherwise you're open to race conditions involving
- * multiple threads adjusting the same stats and setting peak/max FIXME
+ * multiple threads adjusting the same stats and setting peak/max XXX
  */
 #    define GLOBAL_STATS_ON() (d_r_stats != NULL && INTERNAL_OPTION(global_stats))
 #    define THREAD_STAT(dcontext, stat) (dcontext->thread_stats)->stat##_thread
@@ -1927,11 +1922,11 @@ enum { LONGJMP_EXCEPTION = 1 };
  * exception flags and messing up our code (i#1213).
  */
 
-#define PRESERVE_FLOATING_POINT_STATE_START()                   \
-    {                                                           \
-        byte fpstate_buf[MAX_FP_STATE_SIZE];                    \
-        byte *fpstate = (byte *)ALIGN_FORWARD(fpstate_buf, 16); \
-        size_t fpstate_junk = proc_save_fpstate(fpstate);       \
+#define PRESERVE_FLOATING_POINT_STATE_START()                    \
+    {                                                            \
+        byte fpstate_buf[MAX_FP_STATE_SIZE];                     \
+        byte *fpstate = (byte *)ALIGN_FORWARD(fpstate_buf, 16);  \
+        size_t fpstate_junk UNUSED = proc_save_fpstate(fpstate); \
         dr_fpu_exception_init()
 
 #define PRESERVE_FLOATING_POINT_STATE_END() \
@@ -1965,9 +1960,7 @@ enum { LONGJMP_EXCEPTION = 1 };
 #endif
 
 extern const char *exception_label_core;
-#ifdef CLIENT_INTERFACE
 extern const char *exception_label_client;
-#endif
 /* These should be the same size for our report_exception_skip_prefix() */
 #define CRASH_NAME "internal crash"
 #define STACK_OVERFLOW_NAME "stack overflow"
@@ -2003,7 +1996,7 @@ d_r_notify(syslog_event_type_t priority, bool internal, bool synch,
  * string for LOG/stderr/msgbox to avoid breaking our regression suite,
  * NOTE assumes actual id passed, not name of id less MSG_ (so can use array
  * of id's in vmareas.c, another reason need separate fmt string)
- * FIXME : use events.mc string instead (SYSLOG_COMMON), breaks regression
+ * XXX : use events.mc string instead (SYSLOG_COMMON), breaks regression
  * This is now used for out-of-memory as well, for the same reason --
  * we should have a mechanism to strip the application name & pid prefix,
  * then we could use the eventlog string.
@@ -2052,24 +2045,25 @@ d_r_notify(syslog_event_type_t priority, bool internal, bool synch,
         ASSERT_NOT_REACHED();                                                   \
     } while (0)
 
-/* FIXME, eventually want usage_error to also be external (may also eventually
+/* XXX, eventually want usage_error to also be external (may also eventually
  * need non dynamic option synch form as well for usage errors while updating
  * dynamic options), but lot of work to get all in eventlog and currently only
  * really triggered by internal options */
-/* FIXME : could leave out the asserts, this is a recoverable error */
+/* XXX : could leave out the asserts, this is a recoverable error */
 #define USAGE_ERROR(...)                    \
     do {                                    \
         SYSLOG_INTERNAL_ERROR(__VA_ARGS__); \
         ASSERT_NOT_REACHED();               \
     } while (0)
-#define FATAL_USAGE_ERROR(id, sub, ...)                                                \
-    do {                                                                               \
-        /* synchronize dynamic options for dumpcore_mask */                            \
-        synchronize_dynamic_options();                                                 \
-        if (TEST(DUMPCORE_FATAL_USAGE_ERROR, DYNAMO_OPTION_NOT_STRING(dumpcore_mask))) \
-            os_dump_core("fatal usage error");                                         \
-        SYSLOG(SYSLOG_CRITICAL, id, sub, __VA_ARGS__);                                 \
-        os_terminate(NULL, TERMINATE_PROCESS);                                         \
+#define FATAL_USAGE_ERROR(id, sub, ...)                       \
+    do {                                                      \
+        /* synchronize dynamic options for dumpcore_mask */   \
+        synchronize_dynamic_options();                        \
+        if (TESTANY(DUMPCORE_FATAL_USAGE_ERROR,               \
+                    DYNAMO_OPTION_NOT_STRING(dumpcore_mask))) \
+            os_dump_core("fatal usage error");                \
+        SYSLOG(SYSLOG_CRITICAL, id, sub, __VA_ARGS__);        \
+        os_terminate(NULL, TERMINATE_PROCESS);                \
     } while (0)
 #define OPTION_PARSE_ERROR(id, sub, ...)                            \
     do {                                                            \
@@ -2189,7 +2183,7 @@ is_readable_without_exception_try(byte *pc, size_t size);
 
 /* NOTE - uses try/except when possible, is_readable_without_exception otherwise. NOTE -
  * like our other is_readable_without_exception routines this routine offers no guarantee
- * that the string will remain valid after the call returns.  FIXME - may be worthwhile
+ * that the string will remain valid after the call returns.  XXX - may be worthwhile
  * to extend this routine to copy the string into a buffer while in the try/using
  * safe_read instead of making the caller do it. */
 bool
@@ -2274,10 +2268,10 @@ uint
 d_r_get_random_seed(void);
 
 void
-convert_millis_to_date(uint64 millis, dr_time_t *time OUT);
+convert_millis_to_date(uint64 millis, dr_time_t *time DR_PARAM_OUT);
 
 void
-convert_date_to_millis(const dr_time_t *dr_time, uint64 *millis OUT);
+convert_date_to_millis(const dr_time_t *dr_time, uint64 *millis DR_PARAM_OUT);
 
 uint
 d_r_crc32(const char *buf, const uint len);
@@ -2286,19 +2280,17 @@ utils_init(void);
 void
 utils_exit(void);
 
-#ifdef NOLIBC
-#    ifdef WINDOWS
-#        ifdef isprint
-#            undef isprint
+#ifdef WINDOWS
+#    ifdef isprint
+#        undef isprint
 bool
 isprint(int c);
-#        endif
+#    endif
 
-#        ifdef isdigit
-#            undef isdigit
+#    ifdef isdigit
+#        undef isdigit
 bool
 isdigit(int c);
-#        endif
 #    endif
 #endif
 
@@ -2336,9 +2328,9 @@ void
 divide_uint64_print(uint64 numerator, uint64 denominator, bool percentage, uint precision,
                     uint *top, uint *bottom);
 
-#if defined(DEBUG) || defined(INTERNAL) || defined(CLIENT_INTERFACE)
-/* for printing a float (can't use %f on windows with NOLIBC), NOTE: you must
- * preserve floating point state to call this function!!
+/* For printing a float.
+ * NOTE: You must preserve x87 floating point state to call this function, unless
+ * you can prove the compiler will never use x87 state for float operations.
  * Usage : given double/float a; uint c, d and char *s tmp; dp==double_print
  *         parameterized on precision p width w
  * note that %f is eqv. to %.6f
@@ -2347,7 +2339,6 @@ divide_uint64_print(uint64 numerator, uint64 denominator, bool percentage, uint 
  */
 void
 double_print(double val, uint precision, uint *top, uint *bottom, const char **sign);
-#endif /* DEBUG || INTERNAL */
 
 #ifdef CALL_PROFILE
 /* Max depth of call stack to maintain.

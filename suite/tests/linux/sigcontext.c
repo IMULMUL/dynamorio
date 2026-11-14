@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2026 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -33,8 +33,10 @@
 /* Tests a signal handler accessing sigcontext */
 
 #include "tools.h"
+#include "dr_project_wide_defines.h"
 /* we want the latest defs so we can get at ymm state */
 #include "../../../core/unix/include/sigcontext.h"
+#include "../../../core/unix/include/syscall.h"
 #include <assert.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -74,6 +76,15 @@ static void
 signal_handler(int sig, siginfo_t *siginfo, ucontext_t *ucxt)
 {
     int i, j;
+    kernel_xstate_t *saved_xstate = (kernel_xstate_t *)ucxt->uc_mcontext.fpregs;
+    if (saved_xstate != NULL &&
+        saved_xstate->fpstate.sw_reserved.magic1 == FP_XSTATE_MAGIC1) {
+        /* i#7996: Enabled CPU features need not all be available in this frame.
+         * In particular, claiming absent AMX tile data makes sigreturn fail.
+         */
+        assert(!TESTANY(~saved_xstate->fpstate.sw_reserved.xstate_bv,
+                        saved_xstate->xstate_hdr.xstate_bv));
+    }
     switch (sig) {
     case SIGUSR1: {
         if (ucxt->uc_mcontext.fpregs == NULL) {
@@ -183,6 +194,7 @@ main(int argc, char *argv[])
     int buf[INTS_PER_XMM * NUM_SIMD_SSE_AVX_REGS];
     char *ptr = (char *)buf;
     int i, j;
+    pid_t pid = getpid();
 
     /* do this first to avoid messing w/ xmm state */
     intercept_signal(SIGUSR1, signal_handler, false);
@@ -323,8 +335,21 @@ main(int argc, char *argv[])
         MOVE_TO_YMM(buf, 15)
 #        endif
 #    endif
-        /* now make sure they show up in signal context */
-        kill(getpid(), SIGUSR2);
+        /* Now make sure they show up in the signal context.
+         * But, it's not safe to make a regular call, as the compiler will
+         * insert VZEROUPPER for some configurations.
+         */
+#    ifdef X64
+        __asm__ __volatile__("mov %0, %%rdi; mov %1, %%rsi; mov %2, %%rax; syscall"
+                             :
+                             : "m"(pid), "i"(SIGUSR2), "i"(SYS_kill)
+                             : "rdi", "rsi", "rax");
+#    else
+        __asm__ __volatile__("mov %0, %%ebx; mov %1, %%ecx; mov %2, %%eax; int $0x80"
+                             :
+                             : "m"(pid), "i"(SIGUSR2), "i"(SYS_kill)
+                             : "ebx", "ecx", "eax");
+#    endif
 
         /* Ensure they are preserved across the sigreturn (xref i#3812). */
 #    ifdef __AVX512F__

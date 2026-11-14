@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2018-2020 Google, LLC  All rights reserved.
+ * Copyright (c) 2018-2025 Google, LLC  All rights reserved.
  * **********************************************************/
 
 /*
@@ -35,17 +35,22 @@
  */
 
 #ifndef _CONFIG_READER_H_
-#define _CONFIG_READER_H_ 1
+#define _CONFIG_READER_H_
+
+#include <cstdint>
 
 #include <fstream>
 #include <map>
 #include <string>
+#include <vector>
+#include <memory>
 
-#include "../common/options.h"
-#include "../simulator/cache.h"
-#include "../simulator/cache_simulator_create.h"
+#include "options.h"
+#include "cache_simulator_create.h"
+#include "cache_replacement_policy_config.h"
 
-using namespace std;
+namespace dynamorio {
+namespace drmemtrace {
 
 // Cache configuration settings.
 struct cache_params_t {
@@ -55,8 +60,10 @@ struct cache_params_t {
         , size(0)
         , assoc(0)
         , inclusive(false)
+        , exclusive(false)
         , parent(CACHE_PARENT_MEMORY)
         , replace_policy(REPLACE_POLICY_LRU)
+        , replace_policy_config(nullptr)
         , prefetcher(PREFETCH_POLICY_NONE)
         , miss_file("")
     {
@@ -75,6 +82,8 @@ struct cache_params_t {
     unsigned int assoc;
     // Is the cache inclusive of its children.
     bool inclusive;
+    // Is the cache exclusive of its children.
+    bool exclusive;
     // Name of the cache's parent. LLC's parent is main memory
     // (CACHE_PARENT_MEMORY).
     std::string parent;
@@ -83,6 +92,8 @@ struct cache_params_t {
     // Cache replacement policy as described by the runtime option
     // op_replace_policy (see ../common/options.cpp).
     std::string replace_policy;
+    // Parameters of cache replacement policy
+    std::unique_ptr<cache_replacement_policy_config_t> replace_policy_config;
     // Type of prefetcher as described by the runtime option
     // op_data_prefetcher (see ../common/options.cpp).
     std::string prefetcher;
@@ -96,24 +107,9 @@ public:
     bool
     configure(std::istream *config_file, cache_simulator_knobs_t &knobs,
               std::map<std::string, cache_params_t> &caches);
-
-private:
-    std::istream *fin_;
-
-    bool
-    configure_cache(cache_params_t &cache);
-    bool
-    check_cache_config(int num_cores, std::map<std::string, cache_params_t> &caches_map);
-    bool
-    convert_string_to_size(const std::string &s, uint64_t &size);
-    bool
-    is_true(std::string bool_val)
-    {
-        if (bool_val == "true" || bool_val == "True" || bool_val == "TRUE") {
-            return true;
-        }
-        return false;
-    }
 };
+
+} // namespace drmemtrace
+} // namespace dynamorio
 
 #endif /* _CONFIG_READER_H_ */

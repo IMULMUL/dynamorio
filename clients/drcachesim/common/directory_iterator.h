@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2017-2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2017-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -34,10 +34,12 @@
  */
 
 #ifndef _DIRECTORY_ITERATOR_H_
-#define _DIRECTORY_ITERATOR_H_ 1
+#define _DIRECTORY_ITERATOR_H_
 
 #include <assert.h>
+
 #include <iterator>
+#include <string>
 #ifdef WINDOWS
 #    define UNICODE
 #    define _UNICODE
@@ -49,11 +51,19 @@
 
 #include "utils.h"
 
+namespace dynamorio {
+namespace drmemtrace {
+
 // Iterates over files: skips sub-directories.
 // Returns the basenames of the files (i.e., not absolute paths).
 // This class is not thread-safe.
-class directory_iterator_t : public std::iterator<std::input_iterator_tag, std::string> {
+class directory_iterator_t {
 public:
+    using iterator_category = std::input_iterator_tag;
+    using value_type = std::string;
+    using difference_type = std::ptrdiff_t;
+    using pointer = value_type *;
+    using reference = value_type &;
     directory_iterator_t()
     {
     }
@@ -67,7 +77,8 @@ public:
         return error_descr_;
     }
 
-    virtual const std::string &operator*();
+    virtual const std::string &
+    operator*();
 
     // To avoid double-dispatch (requires listing all derived types in the base here)
     // and RTTI in trying to get the right operators called for subclasses, we
@@ -88,7 +99,8 @@ public:
     virtual directory_iterator_t &
     operator++();
 
-    virtual bool operator!()
+    virtual bool
+    operator!()
     {
         return at_eof_;
     }
@@ -98,6 +110,7 @@ public:
     // Static cross-platform utility functions.
     static bool
     is_directory(const std::string &path);
+    // Recursively creates all sub-directories.
     static bool
     create_directory(const std::string &path);
 
@@ -115,5 +128,8 @@ private:
     struct dirent *ent_ = nullptr;
 #endif
 };
+
+} // namespace drmemtrace
+} // namespace dynamorio
 
 #endif /* _DIRECTORY_ITERATOR_H_ */

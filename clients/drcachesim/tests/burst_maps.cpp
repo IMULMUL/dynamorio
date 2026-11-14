@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2017-2019 Google, Inc.  All rights reserved.
+ * Copyright (c) 2017-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -36,6 +36,7 @@
  * being 32-bit reachable from any available space for the code cache.
  */
 
+#include "test_helpers.h"
 /* Like burst_static we deliberately do not include configure.h here. */
 #include "dr_api.h"
 #include "../../common/utils.h"
@@ -48,6 +49,9 @@
 #include <sys/mman.h>
 #include <stdio.h>
 #include <string.h>
+
+namespace dynamorio {
+namespace drmemtrace {
 
 /* XXX: share these with suite/tests/tools.c and the core? */
 #define MAPS_LINE_LENGTH 4096
@@ -159,7 +163,7 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
 }
 
 int
-main(int argc, const char *argv[])
+test_main(int argc, const char *argv[])
 {
     static int outer_iters = 2048;
     /* We trace a 4-iter burst of execution. */
@@ -199,3 +203,6 @@ main(int argc, const char *argv[])
     }
     return 0;
 }
+
+} // namespace drmemtrace
+} // namespace dynamorio

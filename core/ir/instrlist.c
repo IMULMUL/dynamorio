@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2021 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2026 Google, Inc.  All rights reserved.
  * Copyright (c) 2000-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -43,7 +43,7 @@
 #include "decode.h"
 #include "arch.h"
 
-#if defined(DEBUG) && defined(CLIENT_INTERFACE)
+#ifdef DEBUG
 /* case 10450: give messages to clients */
 #    undef ASSERT /* N.B.: if have issues w/ DYNAMO_OPTION, re-instate */
 #    undef ASSERT_TRUNCATE
@@ -57,8 +57,9 @@
 
 /* returns an empty instrlist_t object */
 instrlist_t *
-instrlist_create(dcontext_t *dcontext)
+instrlist_create(void *drcontext)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     instrlist_t *ilist =
         (instrlist_t *)heap_alloc(dcontext, sizeof(instrlist_t) HEAPACCT(ACCT_IR));
     CLIENT_ASSERT(ilist != NULL, "instrlist_create: allocation error");
@@ -74,18 +75,17 @@ instrlist_init(instrlist_t *ilist)
     ilist->first = ilist->last = NULL;
     ilist->flags = 0; /* no flags set */
     ilist->translation_target = NULL;
-#ifdef CLIENT_INTERFACE
     ilist->fall_through_bb = NULL;
-#    ifdef ARM
+#ifdef ARM
     ilist->auto_pred = DR_PRED_NONE;
-#    endif
 #endif
 }
 
 /* frees the instrlist_t object */
 void
-instrlist_destroy(dcontext_t *dcontext, instrlist_t *ilist)
+instrlist_destroy(void *drcontext, instrlist_t *ilist)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     CLIENT_ASSERT(ilist->first == NULL && ilist->last == NULL,
                   "instrlist_destroy: list not empty");
     heap_free(dcontext, ilist, sizeof(instrlist_t) HEAPACCT(ACCT_IR));
@@ -93,8 +93,9 @@ instrlist_destroy(dcontext_t *dcontext, instrlist_t *ilist)
 
 /* frees the Instrs in the instrlist_t */
 void
-instrlist_clear(dcontext_t *dcontext, instrlist_t *ilist)
+instrlist_clear(void *drcontext, instrlist_t *ilist)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
 #ifdef ARM
     /* XXX i#4680: Reset encode state to avoid dangling pointers. */
     if (instrlist_first(ilist) != NULL &&
@@ -110,13 +111,13 @@ instrlist_clear(dcontext_t *dcontext, instrlist_t *ilist)
 
 /* frees the Instrs in the instrlist_t and the instrlist_t object itself */
 void
-instrlist_clear_and_destroy(dcontext_t *dcontext, instrlist_t *ilist)
+instrlist_clear_and_destroy(void *drcontext, instrlist_t *ilist)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     instrlist_clear(dcontext, ilist);
     instrlist_destroy(dcontext, ilist);
 }
 
-#ifdef CLIENT_INTERFACE
 /* Specifies the fall-through target of a basic block if its last
  * instruction is a conditional branch instruction.
  * It can only be called in basic block building event callbacks
@@ -152,7 +153,6 @@ instrlist_get_return_target(instrlist_t *bb)
 {
     return bb->fall_through_bb;
 }
-#endif /* CLIENT_INTERFACE */
 
 /* All future Instrs inserted into ilist that do not have raw bits
  * will have instr_set_translation called with pc as the target
@@ -181,7 +181,7 @@ instrlist_set_our_mangling(instrlist_t *ilist, bool ours)
 void
 instrlist_set_auto_predicate(instrlist_t *ilist, dr_pred_type_t pred)
 {
-#if defined(CLIENT_INTERFACE) && defined(ARM)
+#ifdef ARM
     ilist->auto_pred = pred;
 #endif
 }
@@ -189,7 +189,7 @@ instrlist_set_auto_predicate(instrlist_t *ilist, dr_pred_type_t pred)
 dr_pred_type_t
 instrlist_get_auto_predicate(instrlist_t *ilist)
 {
-#if defined(CLIENT_INTERFACE) && defined(ARM)
+#ifdef ARM
     return ilist->auto_pred;
 #else
     return DR_PRED_NONE;
@@ -199,7 +199,7 @@ instrlist_get_auto_predicate(instrlist_t *ilist)
 bool
 instrlist_get_our_mangling(instrlist_t *ilist)
 {
-    return TEST(INSTR_OUR_MANGLING, ilist->flags);
+    return TESTANY(INSTR_OUR_MANGLING, ilist->flags);
 }
 
 /* returns the first inst in the list */
@@ -269,7 +269,7 @@ check_translation(instrlist_t *ilist, instr_t *inst)
     }
     if (instrlist_get_our_mangling(ilist))
         instr_set_our_mangling(inst, true);
-#if defined(CLIENT_INTERFACE) && defined(ARM)
+#ifdef ARM
     if (instr_is_meta(inst)) {
         dr_pred_type_t auto_pred = ilist->auto_pred;
         if (instr_predicate_is_cond(auto_pred)) {
@@ -443,8 +443,9 @@ instrlist_remove(instrlist_t *ilist, instr_t *inst)
 }
 
 instrlist_t *
-instrlist_clone(dcontext_t *dcontext, instrlist_t *old)
+instrlist_clone(void *drcontext, instrlist_t *old)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     instr_t *inst, *copy;
     instrlist_t *newlist = instrlist_create(dcontext);
 
@@ -488,9 +489,7 @@ instrlist_clone(dcontext_t *dcontext, instrlist_t *old)
         /* restore note field */
         instr_set_note(inst, instr_get_note(copy));
     }
-#ifdef CLIENT_INTERFACE
     newlist->fall_through_bb = old->fall_through_bb;
-#endif
     return newlist;
 }
 
@@ -528,11 +527,12 @@ instrlist_append_instrlist(dcontext_t *dcontext, instrlist_t *ilist,
  * the relative pc for an instr_t jump target
  */
 byte *
-instrlist_encode_to_copy(dcontext_t *dcontext, instrlist_t *ilist, byte *copy_pc,
+instrlist_encode_to_copy(void *drcontext, instrlist_t *ilist, byte *copy_pc,
                          byte *final_pc, byte *max_pc, bool has_instr_jmp_targets)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     instr_t *inst;
-    int len = 0;
+    size_t len = 0;
 #ifdef ARM
     /* XXX i#1734: reset encode state to avoid any stale encode state
      * or dangling pointer.
@@ -546,7 +546,7 @@ instrlist_encode_to_copy(dcontext_t *dcontext, instrlist_t *ilist, byte *copy_pc
     DOCHECK(2, {
         if (!has_instr_jmp_targets) {
             for (inst = instrlist_first(ilist); inst; inst = instr_get_next(inst)) {
-                if (TEST(INSTR_OPERANDS_VALID, (inst)->flags)) {
+                if (TESTANY(INSTR_OPERANDS_VALID, (inst)->flags)) {
                     int i;
                     for (i = 0; i < instr_num_srcs(inst); ++i) {
                         CLIENT_ASSERT(!opnd_is_instr(instr_get_src(inst, i)),
@@ -558,10 +558,10 @@ instrlist_encode_to_copy(dcontext_t *dcontext, instrlist_t *ilist, byte *copy_pc
         }
     });
     if (has_instr_jmp_targets || max_pc != NULL) {
-        /* must set note fields first with offset, or compute length */
+        /* Must first compute offset and total length. */
         for (inst = instrlist_first(ilist); inst; inst = instr_get_next(inst)) {
             if (has_instr_jmp_targets)
-                instr_set_note(inst, (void *)(ptr_int_t)len);
+                inst->offset = len;
             len += instr_length(dcontext, inst);
         }
     }
@@ -572,16 +572,17 @@ instrlist_encode_to_copy(dcontext_t *dcontext, instrlist_t *ilist, byte *copy_pc
         byte *pc = instr_encode_to_copy(dcontext, inst, copy_pc, final_pc);
         if (pc == NULL)
             return NULL;
-        final_pc += pc - copy_pc;
+        final_pc = (byte *)((ptr_uint_t)final_pc + (pc - copy_pc));
         copy_pc = pc;
     }
     return copy_pc;
 }
 
 byte *
-instrlist_encode(dcontext_t *dcontext, instrlist_t *ilist, byte *pc,
+instrlist_encode(void *drcontext, instrlist_t *ilist, byte *pc,
                  bool has_instr_jmp_targets)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     return instrlist_encode_to_copy(dcontext, ilist, pc, pc, NULL, has_instr_jmp_targets);
 }
 
@@ -619,8 +620,9 @@ DR_API
  */
 void
 instrlist_insert_mov_immed_ptrsz(void *drcontext, ptr_int_t val, opnd_t dst,
-                                 instrlist_t *ilist, instr_t *where, OUT instr_t **first,
-                                 OUT instr_t **last)
+                                 instrlist_t *ilist, instr_t *where,
+                                 DR_PARAM_OUT instr_t **first,
+                                 DR_PARAM_OUT instr_t **last)
 {
     CLIENT_ASSERT(opnd_get_size(dst) == OPSZ_PTR, "wrong dst size");
     insert_mov_immed_ptrsz((dcontext_t *)drcontext, val, dst, ilist, where, first, last);
@@ -633,7 +635,8 @@ DR_API
  */
 void
 instrlist_insert_push_immed_ptrsz(void *drcontext, ptr_int_t val, instrlist_t *ilist,
-                                  instr_t *where, OUT instr_t **first, OUT instr_t **last)
+                                  instr_t *where, DR_PARAM_OUT instr_t **first,
+                                  DR_PARAM_OUT instr_t **last)
 {
     insert_push_immed_ptrsz((dcontext_t *)drcontext, val, ilist, where, first, last);
 }
@@ -642,7 +645,7 @@ DR_API
 void
 instrlist_insert_mov_instr_addr(void *drcontext, instr_t *src_inst, byte *encode_pc,
                                 opnd_t dst, instrlist_t *ilist, instr_t *where,
-                                OUT instr_t **first, OUT instr_t **last)
+                                DR_PARAM_OUT instr_t **first, DR_PARAM_OUT instr_t **last)
 {
     CLIENT_ASSERT(opnd_get_size(dst) == OPSZ_PTR, "wrong dst size");
     if (encode_pc == NULL) {
@@ -663,8 +666,9 @@ instrlist_insert_mov_instr_addr(void *drcontext, instr_t *src_inst, byte *encode
 DR_API
 void
 instrlist_insert_push_instr_addr(void *drcontext, instr_t *src_inst, byte *encode_pc,
-                                 instrlist_t *ilist, instr_t *where, OUT instr_t **first,
-                                 OUT instr_t **last)
+                                 instrlist_t *ilist, instr_t *where,
+                                 DR_PARAM_OUT instr_t **first,
+                                 DR_PARAM_OUT instr_t **last)
 {
     if (encode_pc == NULL) {
 #ifdef STANDALONE_DECODER

@@ -1,5 +1,5 @@
 # **********************************************************
-# Copyright (c) 2010-2016 Google, Inc.    All rights reserved.
+# Copyright (c) 2010-2025 Google, Inc.    All rights reserved.
 # **********************************************************
 
 # Redistribution and use in source and binary forms, with or without
@@ -28,7 +28,7 @@
 # OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
 # DAMAGE.
 
-cmake_minimum_required(VERSION 3.7)
+cmake_minimum_required(VERSION 3.14)
 
 include(../../make/policies.cmake NO_POLICY_SCOPE)
 
@@ -52,22 +52,38 @@ if (WIN32)
   set(srcs ${srcs} ${PROJECT_SOURCE_DIR}/core/win32/resources.rc)
 endif ()
 
+macro(configure_drmgr_target target static_DR)
+  if (WIN32)
+    # Avoid link errors about missing __chkstk.
+    append_property_string(TARGET ${target} COMPILE_FLAGS "/Gs65536")
+  endif ()
+  if (${static_DR})
+    use_DynamoRIO_extension(${target} drcontainers_drstatic)
+  else ()
+    use_DynamoRIO_extension(${target} drcontainers)
+  endif ()
+endmacro(configure_drmgr_target)
+
 add_library(drmgr SHARED ${srcs})
 # while private loader means preferred base is not required, more efficient
 # to avoid rebase so we avoid conflict w/ client and other exts
 set(PREFERRED_BASE 0x73000000)
-configure_extension(drmgr OFF)
-use_DynamoRIO_extension(drmgr drcontainers)
+configure_extension(drmgr OFF OFF)
+configure_drmgr_target(drmgr OFF)
 
 # Must be shared to ensure only one copy, since can be used by
 # the client and by multiple other libraries, some of which may
-# be shared: the whole point is to have one master drmgr.
+# be shared: the whole point is to have one unique drmgr.
 # But, we do want to support projects using drmgr statically for
 # an end tool, for performance.
 # To support simultaneously exporting components for use with other clients,
 # we build drmgr both shared and static (i#1342).
 add_library(drmgr_static STATIC ${srcs_static})
-configure_extension(drmgr_static ON)
-use_DynamoRIO_extension(drmgr_static drcontainers)
+configure_extension(drmgr_static ON OFF)
+configure_drmgr_target(drmgr_static OFF)
+
+add_library(drmgr_drstatic STATIC ${srcs_static})
+configure_extension(drmgr_drstatic ON ON)
+configure_drmgr_target(drmgr_drstatic ON)
 
 install_ext_header(drmgr.h)

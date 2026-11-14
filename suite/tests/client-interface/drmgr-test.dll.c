@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -42,14 +42,6 @@
 #    include <signal.h>
 #endif
 
-#define CHECK(x, msg)                                                                \
-    do {                                                                             \
-        if (!(x)) {                                                                  \
-            dr_fprintf(STDERR, "CHECK failed %s:%d: %s\n", __FILE__, __LINE__, msg); \
-            dr_abort();                                                              \
-        }                                                                            \
-    } while (0);
-
 /* CLS tests: easiest to assume a single thread (the 2nd thread the
  * app creates, in this case) hitting callbacks and use global data to
  * check preservation
@@ -61,6 +53,8 @@ static int cb_depth;
 static volatile bool in_opcode_A;
 static volatile bool in_insert_B;
 static volatile bool in_opcode_C;
+static volatile bool in_filter_syscall;
+static volatile bool in_filter_syscall_user_data;
 static volatile bool in_syscall_A;
 static volatile bool in_syscall_A_user_data;
 static volatile bool in_syscall_B;
@@ -79,6 +73,7 @@ static int thread_exit_user_data_events;
 static int thread_exit_null_user_data_events;
 static int mod_load_events;
 static int mod_unload_events;
+static int meta_instru_events;
 
 static void *opcodelock;
 static void *syslock;
@@ -94,6 +89,10 @@ static bool checked_cls_write_from_cache;
 
 static void
 event_exit(void);
+static void
+event_post_attach(void);
+static void
+event_post_attach_user_data(void *user_data);
 static void
 event_thread_init(void *drcontext);
 static void
@@ -121,6 +120,8 @@ event_mod_unload(void *drcontext, const module_data_t *mod, void *user_data);
 static bool
 event_filter_syscall(void *drcontext, int sysnum);
 static bool
+event_filter_syscall_user_data(void *drcontext, int sysnum, void *user_data);
+static bool
 event_pre_sys_A(void *drcontext, int sysnum);
 static bool
 event_pre_sys_A_user_data(void *drcontext, int sysnum, void *user_data);
@@ -138,7 +139,7 @@ static void
 event_post_sys_B_user_data(void *drcontext, int sysnum, void *user_data);
 static dr_emit_flags_t
 event_bb_analysis(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
-                  bool translating, OUT void **user_data);
+                  bool translating, DR_PARAM_OUT void **user_data);
 static dr_emit_flags_t
 event_bb_insert(void *drcontext, void *tag, instrlist_t *bb, instr_t *inst,
                 bool for_trace, bool translating, void *user_data);
@@ -155,7 +156,7 @@ event_opcode_add_insert_C(void *drcontext, void *tag, instrlist_t *bb, instr_t *
 
 static dr_emit_flags_t
 event_bb4_app2app(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
-                  bool translating, OUT void **user_data);
+                  bool translating, DR_PARAM_OUT void **user_data);
 static dr_emit_flags_t
 event_bb4_analysis(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
                    bool translating, void *user_data);
@@ -165,6 +166,24 @@ event_bb4_insert(void *drcontext, void *tag, instrlist_t *bb, instr_t *inst,
 static dr_emit_flags_t
 event_bb4_instru2instru(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
                         bool translating, void *user_data);
+static dr_emit_flags_t
+event_bb5_app2app(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
+                  bool translating, DR_PARAM_OUT void **user_data);
+static dr_emit_flags_t
+event_bb5_analysis(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
+                   bool translating, void *user_data);
+static dr_emit_flags_t
+event_bb5_insert(void *drcontext, void *tag, instrlist_t *bb, instr_t *inst,
+                 bool for_trace, bool translating, void *user_data);
+static dr_emit_flags_t
+event_bb5_instru2instru(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
+                        bool translating, void *user_data);
+static dr_emit_flags_t
+event_bb5_meta_instru(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
+                      bool translating, void *user_data);
+static dr_emit_flags_t
+event_bb_meta_instru(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
+                     bool translating);
 static dr_emit_flags_t
 event_bb4_insert2(void *drcontext, void *tag, instrlist_t *bb, instr_t *inst,
                   bool for_trace, bool translating, void *user_data);
@@ -184,8 +203,10 @@ event_null_signal(void *drcontext, dr_siginfo_t *siginfo, void *user_data);
 
 /* The following test values are arbitrary */
 
+static const uintptr_t post_attach_user_data_test = 83294;
 static const uintptr_t thread_user_data_test = 9090;
 static const uintptr_t opcode_user_data_test = 3333;
+static const uintptr_t filter_syscall_user_data_test = 4242;
 static const uintptr_t syscall_A_user_data_test = 7189;
 static const uintptr_t syscall_B_user_data_test = 3218;
 static const uintptr_t mod_user_data_test = 1070;
@@ -199,6 +220,11 @@ dr_init(client_id_t id)
 {
     drmgr_priority_t priority = { sizeof(priority), "drmgr-test", NULL, NULL, 0 };
     drmgr_priority_t priority4 = { sizeof(priority), "drmgr-test4", NULL, NULL, 0 };
+    drmgr_priority_t priority5 = { sizeof(priority), "drmgr-test5", NULL, NULL, -10 };
+    drmgr_priority_t post_attach_pri_user_data = { sizeof(priority), "drmgr-post-attach",
+                                                   NULL, NULL, -1 };
+    drmgr_priority_t filter_sys_pri_user_data = { sizeof(priority), "drmgr-filter", NULL,
+                                                  NULL, -1 };
     drmgr_priority_t sys_pri_A = { sizeof(priority), "drmgr-test-A", NULL, NULL, 10 };
     drmgr_priority_t sys_pri_A_user_data = { sizeof(priority),
                                              "drmgr-test-A-usr-data-test", "drmgr-test-A",
@@ -242,7 +268,11 @@ dr_init(client_id_t id)
     bool ok;
 
     drmgr_init();
-    dr_register_exit_event(event_exit);
+    drmgr_register_exit_event(event_exit);
+    drmgr_register_post_attach_event(event_post_attach);
+    drmgr_register_post_attach_event_user_data(event_post_attach_user_data,
+                                               &post_attach_pri_user_data,
+                                               (void *)post_attach_user_data_test);
     drmgr_register_thread_init_event(event_thread_init);
     drmgr_register_thread_exit_event(event_thread_exit);
     drmgr_register_thread_init_event_ex(event_thread_init_ex, &thread_init_pri);
@@ -293,10 +323,23 @@ dr_init(client_id_t id)
         event_bb4_instru2instru);
     CHECK(ok, "drmgr_unregister_bb_instrumentation_ex_event failed");
 
-    /* test data passing among all 4 phases */
+    /* check register/unregister instrumentation_all_events */
+    drmgr_instru_events_t events = { sizeof(events),          event_bb5_app2app,
+                                     event_bb5_analysis,      event_bb5_insert,
+                                     event_bb5_instru2instru, event_bb5_meta_instru };
+    ok = drmgr_register_bb_instrumentation_all_events(&events, NULL);
+    CHECK(ok, "drmgr_register_bb_instrumentation_all_events failed");
+    ok = drmgr_unregister_bb_instrumentation_all_events(&events);
+    CHECK(ok, "drmgr_unregister_bb_instrumentation_all_events failed");
+
+    /* test data passing among four first phases */
     ok = drmgr_register_bb_instrumentation_ex_event(event_bb4_app2app, event_bb4_analysis,
                                                     event_bb4_insert,
                                                     event_bb4_instru2instru, &priority4);
+
+    /* test data passing among all five phases */
+    ok = drmgr_register_bb_instrumentation_all_events(&events, &priority5);
+    CHECK(ok, "drmgr_register_bb_instrumentation_all_events failed");
 
     drmgr_register_module_load_event_user_data(event_mod_load, NULL,
                                                (void *)mod_user_data_test);
@@ -310,7 +353,11 @@ dr_init(client_id_t id)
         drmgr_register_cls_field(event_thread_context_init, event_thread_context_exit);
     CHECK(cls_idx != -1, "drmgr_register_tls_field failed");
 
-    dr_register_filter_syscall_event(event_filter_syscall);
+    ok = drmgr_register_filter_syscall_event(event_filter_syscall) &&
+        drmgr_register_filter_syscall_event_user_data(
+             event_filter_syscall_user_data, &filter_sys_pri_user_data,
+             (void *)filter_syscall_user_data_test);
+    CHECK(ok, "drmgr register filter failed");
     ok = drmgr_register_pre_syscall_event_ex(event_pre_sys_A, &sys_pri_A) &&
         drmgr_register_pre_syscall_event_user_data(event_pre_sys_A_user_data,
                                                    &sys_pri_A_user_data,
@@ -336,6 +383,9 @@ dr_init(client_id_t id)
 
     ok = drmgr_register_bb_app2app_event(one_time_bb_event, NULL);
     CHECK(ok, "drmgr app2app registration failed");
+
+    ok = drmgr_register_bb_meta_instru_event(event_bb_meta_instru, &priority);
+    CHECK(ok, "drmgr meta_instru registration failed");
 
     ok = drmgr_register_kernel_xfer_event(event_kernel_xfer);
     CHECK(ok, "drmgr_register_kernel_xfer_event failed");
@@ -371,6 +421,9 @@ event_exit(void)
     if (mod_unload_events > 0)
         dr_fprintf(STDERR, "saw event_mod_unload\n");
 
+    if (meta_instru_events > 0)
+        dr_fprintf(STDERR, "saw event_meta_instru\n");
+
     if (!drmgr_unregister_bb_instrumentation_event(event_bb_analysis))
         CHECK(false, "drmgr unregistration failed");
 
@@ -385,6 +438,12 @@ event_exit(void)
             event_bb4_app2app, event_bb4_analysis, event_bb4_insert,
             event_bb4_instru2instru))
         CHECK(false, "drmgr unregistration failed");
+
+    drmgr_instru_events_t events = { sizeof(events),          event_bb5_app2app,
+                                     event_bb5_analysis,      event_bb5_insert,
+                                     event_bb5_instru2instru, event_bb5_meta_instru };
+    if (!drmgr_unregister_bb_instrumentation_all_events(&events))
+        CHECK(false, "drmgr_unregister_bb_instrumentation_all_events failed");
 
     if (!drmgr_unregister_opcode_instrumentation_event(event_opcode_add_insert_A, OP_add))
         CHECK(false, "drmgr opcode unregistration failed");
@@ -407,8 +466,46 @@ event_exit(void)
     if (!drmgr_unregister_kernel_xfer_event(event_kernel_xfer))
         CHECK(false, "drmgr_unregister_kernel_xfer_event failed");
 
+    if (!drmgr_unregister_bb_meta_instru_event(event_bb_meta_instru))
+        CHECK(false, "drmgr meta_instru unregistration failed");
+
+    if (!drmgr_unregister_filter_syscall_event(event_filter_syscall) ||
+        !drmgr_unregister_filter_syscall_event_user_data(event_filter_syscall_user_data))
+        CHECK(false, "drmgr unregister filter failed");
+    if (!drmgr_unregister_pre_syscall_event(event_pre_sys_A) ||
+        !drmgr_unregister_pre_syscall_event_user_data(event_pre_sys_A_user_data) ||
+        !drmgr_unregister_pre_syscall_event(event_pre_sys_B) ||
+        !drmgr_unregister_pre_syscall_event_user_data(event_pre_sys_B_user_data))
+        CHECK(false, "drmgr unregister sys failed");
+    if (!drmgr_unregister_post_syscall_event(event_post_sys_A) ||
+        !drmgr_unregister_post_syscall_event_user_data(event_post_sys_A_user_data) ||
+        !drmgr_unregister_post_syscall_event(event_post_sys_B) ||
+        !drmgr_unregister_post_syscall_event_user_data(event_post_sys_B_user_data))
+        CHECK(false, "drmgr unregister sys failed");
+    if (!drmgr_unregister_post_attach_event(event_post_attach) ||
+        !drmgr_unregister_post_attach_event_user_data(event_post_attach_user_data))
+        CHECK(false, "drmgr unregister filter failed");
+
+    // Test re-init.
+    drmgr_exit();
+    drmgr_init();
+
     drmgr_exit();
     dr_fprintf(STDERR, "all done\n");
+}
+
+static void
+event_post_attach(void)
+{
+    dr_fprintf(STDERR, "in event_post_attach\n");
+}
+
+static void
+event_post_attach_user_data(void *user_data)
+{
+    dr_fprintf(STDERR, "in event_post_attach_user_data\n");
+    CHECK(user_data == (void *)post_attach_user_data_test,
+          "incorrect user data post attach");
 }
 
 static void
@@ -565,7 +662,7 @@ event_thread_context_exit(void *drcontext, bool thread_exit)
 
 static dr_emit_flags_t
 event_bb_analysis(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
-                  bool translating, OUT void **user_data)
+                  bool translating, DR_PARAM_OUT void **user_data)
 {
     /* point at first non-label instr */
     *user_data = (void *)instrlist_first_nonlabel(bb);
@@ -720,10 +817,10 @@ event_opcode_add_insert_C(void *drcontext, void *tag, instrlist_t *bb, instr_t *
     return DR_EMIT_DEFAULT;
 }
 
-/* test data passed among all 4 phases */
+/* test data passed among four first phases */
 static dr_emit_flags_t
 event_bb4_app2app(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
-                  bool translating, OUT void **user_data)
+                  bool translating, DR_PARAM_OUT void **user_data)
 {
     *user_data = (void *)((ptr_uint_t)tag + 1);
     return DR_EMIT_DEFAULT;
@@ -761,6 +858,69 @@ event_bb4_instru2instru(void *drcontext, void *tag, instrlist_t *bb, bool for_tr
     return DR_EMIT_DEFAULT;
 }
 
+/* test data passed among all five phases */
+static dr_emit_flags_t
+event_bb5_app2app(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
+                  bool translating, DR_PARAM_OUT void **user_data)
+{
+    int *phase_cnt = (int *)dr_thread_alloc(drcontext, sizeof(int));
+    *phase_cnt = 1;
+    *user_data = (void *)phase_cnt;
+    return DR_EMIT_DEFAULT;
+}
+
+static dr_emit_flags_t
+event_bb5_analysis(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
+                   bool translating, void *user_data)
+{
+    int *phase_cnt = (int *)user_data;
+    (*phase_cnt)++;
+    CHECK(*phase_cnt == 2, "user data not preserved");
+    return DR_EMIT_DEFAULT;
+}
+
+static dr_emit_flags_t
+event_bb5_insert(void *drcontext, void *tag, instrlist_t *bb, instr_t *inst,
+                 bool for_trace, bool translating, void *user_data)
+{
+    /* Increment the count once per bb. */
+    if (drmgr_is_first_instr(drcontext, inst)) {
+        int *phase_cnt = (int *)user_data;
+        (*phase_cnt)++;
+        CHECK(*phase_cnt == 3, "user data not preserved");
+    }
+    return DR_EMIT_DEFAULT;
+}
+
+static dr_emit_flags_t
+event_bb5_instru2instru(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
+                        bool translating, void *user_data)
+{
+    int *phase_cnt = (int *)user_data;
+    (*phase_cnt)++;
+    CHECK(*phase_cnt == 4, "user data not preserved");
+    return DR_EMIT_DEFAULT;
+}
+
+static dr_emit_flags_t
+event_bb5_meta_instru(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
+                      bool translating, void *user_data)
+{
+    meta_instru_events++;
+    int *phase_cnt = (int *)user_data;
+    (*phase_cnt)++;
+    CHECK(*phase_cnt == 5, "user data not preserved");
+    dr_thread_free(drcontext, user_data, sizeof(int));
+    return DR_EMIT_DEFAULT;
+}
+
+static dr_emit_flags_t
+event_bb_meta_instru(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
+                     bool translating)
+{
+    return DR_EMIT_DEFAULT;
+}
+
 #ifdef UNIX
 static dr_signal_action_t
 event_signal(void *drcontext, dr_siginfo_t *siginfo, void *user_data)
@@ -786,6 +946,30 @@ event_null_signal(void *drcontext, dr_siginfo_t *siginfo, void *user_data)
 static bool
 event_filter_syscall(void *drcontext, int sysnum)
 {
+    if (!in_filter_syscall) {
+        dr_mutex_lock(syslock);
+        if (!in_filter_syscall) {
+            dr_fprintf(STDERR, "in filter_syscall\n");
+            in_filter_syscall = true;
+        }
+        dr_mutex_unlock(syslock);
+    }
+    return true;
+}
+
+static bool
+event_filter_syscall_user_data(void *drcontext, int sysnum, void *user_data)
+{
+    if (!in_filter_syscall_user_data) {
+        dr_mutex_lock(syslock);
+        if (!in_filter_syscall_user_data) {
+            dr_fprintf(STDERR, "in filter_syscall_user_data\n");
+            in_filter_syscall_user_data = true;
+            CHECK(user_data == (void *)filter_syscall_user_data_test,
+                  "incorrect user data filter syscall");
+        }
+        dr_mutex_unlock(syslock);
+    }
     return true;
 }
 

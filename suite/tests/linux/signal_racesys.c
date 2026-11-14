@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2017 Google, Inc.  All rights reserved.
+ * Copyright (c) 2017-2026 Google, Inc.  All rights reserved.
  * Copyright (c) 2016 ARM Limited. All rights reserved.
  * **********************************************************/
 
@@ -95,24 +95,24 @@ setup(void)
         fail("timer_create");
 }
 
-int try
-    (uint64_t time)
-    {
-        struct itimerspec spec = { { 0, 0 },
-                                   /* overflows for 32-bit so cast to pointer-sized */
-                                   { (size_t)time / 1000000000, time % 1000000000 } };
-        struct timespec ts = { 3155760000U, 0 };
-        int result;
+int
+try(uint64_t time)
+{
+    struct itimerspec spec = { { 0, 0 },
+                               /* overflows for 32-bit so cast to pointer-sized */
+                               { (size_t)time / 1000000000, time % 1000000000 } };
+    struct timespec ts = { 3155760000U, 0 };
+    int result;
 
-        result = sigsetjmp(env, 1);
-        if (result == 0) {
-            if (timer_settime(timer, 0, &spec, 0) != 0)
-                fail("timer_settime");
-            nanosleep_wrapper(&ts, 0);
-            return 0;
-        }
-        return result - 1;
+    result = sigsetjmp(env, 1);
+    if (result == 0) {
+        if (timer_settime(timer, 0, &spec, 0) != 0)
+            fail("timer_settime");
+        nanosleep_wrapper(&ts, 0);
+        return 0;
     }
+    return result - 1;
+}
 
 int
 main(int argc, const char *argv[])
@@ -130,8 +130,7 @@ main(int argc, const char *argv[])
 #    if VERBOSE
         print("%8d %llu\n", i, (unsigned long long)time);
 #    endif
-        int r = try
-            (time);
+        int r = try(time);
         ++counts[r];
 
         /* Count number of successive steps in same direction. */

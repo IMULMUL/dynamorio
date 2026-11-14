@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2015-2020 Google, LLC  All rights reserved.
+ * Copyright (c) 2015-2023 Google, LLC  All rights reserved.
  * **********************************************************/
 
 /*
@@ -35,6 +35,9 @@
 #include <iostream>
 #include <stdint.h>
 
+namespace dynamorio {
+namespace drmemtrace {
+
 const char *cache_miss_stats_t::kNTA = "nta";
 const char *cache_miss_stats_t::kT0 = "t0";
 
@@ -51,7 +54,7 @@ cache_miss_stats_t::cache_miss_stats_t(bool warmup_enabled, unsigned int line_si
                                        unsigned int miss_count_threshold,
                                        double miss_frac_threshold,
                                        double confidence_threshold)
-    : cache_stats_t("", warmup_enabled, false)
+    : cache_stats_t(line_size, "", warmup_enabled, false)
     , kLineSize(line_size)
     , kMissCountThreshold(miss_count_threshold)
     , kMissFracThreshold(miss_frac_threshold)
@@ -80,6 +83,8 @@ cache_miss_stats_t::dump_miss(const memref_t &memref)
         return;
     }
 
+    // TODO i#6905: Consider incorporating PID information into the pc_cache_misses_ hash
+    // map and adjusting subsequent calculations that depend on this data.
     const addr_t pc = memref.data.pc;
     const addr_t addr = memref.data.addr / kLineSize;
     pc_cache_misses_[pc].push_back(addr);
@@ -209,3 +214,6 @@ cache_miss_analyzer_t::print_results()
     std::cerr << std::dec;
     return true;
 }
+
+} // namespace drmemtrace
+} // namespace dynamorio

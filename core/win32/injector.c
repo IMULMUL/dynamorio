@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2021 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2026 Google, Inc.  All rights reserved.
  * Copyright (c) 2002-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -83,7 +83,7 @@
 #endif
 #define FP stderr
 
-/* FIXME: case 64 would like ^C to kill child process, it doesn't.
+/* XXX: case 64 would like ^C to kill child process, it doesn't.
  * also, child process seems able to read stdin but not to write
  * to stdout or stderr (in fact it dies if it tries)
  * I think Ctrl-C is delivered only if you have a debugger(windbg) attached.
@@ -92,14 +92,14 @@
 
 /* global vars */
 static int limit;                   /* in seconds */
-static BOOL use_environment = TRUE; /* FIXME : for now default to using
+static BOOL use_environment = TRUE; /* XXX : for now default to using
                                      * the environment, below we check and
                                      * never use the environment if using
                                      * debug injection.  Revisit.
                                      */
 static double wallclock;            /* in seconds */
 
-/* FIXME : assert stuff, internal error, display_message duplicated from
+/* XXX : assert stuff, internal error, display_message duplicated from
  * pre_inject, share? */
 
 /* for asserts, copied from utils.h */
@@ -202,7 +202,7 @@ HandlerRoutine(DWORD dwCtrlType //  control signal type
 
 /* Always null-terminates */
 static bool
-char_to_tchar(const char *str, OUT TCHAR *wbuf, size_t wbuflen /*# elements*/)
+char_to_tchar(const char *str, DR_PARAM_OUT TCHAR *wbuf, size_t wbuflen /*# elements*/)
 {
     int res = MultiByteToWideChar(CP_UTF8, 0 /*=>MB_PRECOMPOSED*/, str, -1 /*null-term*/,
                                   wbuf, (int)wbuflen);
@@ -214,7 +214,7 @@ char_to_tchar(const char *str, OUT TCHAR *wbuf, size_t wbuflen /*# elements*/)
 
 /* Always null-terminates */
 static bool
-tchar_to_char(const TCHAR *wstr, OUT char *buf, size_t buflen /*# elements*/)
+tchar_to_char(const TCHAR *wstr, DR_PARAM_OUT char *buf, size_t buflen /*# elements*/)
 {
     int res = WideCharToMultiByte(CP_UTF8, 0, wstr, -1 /*null-term*/, buf, (int)buflen,
                                   NULL, NULL);
@@ -231,6 +231,7 @@ typedef struct _dr_inject_info_t {
     PROCESS_INFORMATION pi;
     bool using_debugger_injection;
     bool using_thread_injection;
+    bool attached;
     TCHAR wimage_name[MAXIMUM_PATH];
     /* We need something to point at for dr_inject_get_image_name so we just
      * keep a utf8 buffer as well.
@@ -329,7 +330,7 @@ dr_inject_print_stats(void *data, int elapsed_secs, bool showstats, bool showmem
 /* Following code handles the copying of environment variables to the
  * registry (the -env option, default on) and unsetting them later
  *
- * FIXME : race conditions with someone else modifying this registry key,
+ * XXX : race conditions with someone else modifying this registry key,
  *         doesn't restore registry if -no_wait
  * NOTE : doesn't propagate if using debug injection method (by design)
  *
@@ -396,13 +397,13 @@ set_registry_from_env(const TCHAR *image_name, const TCHAR *dll_path)
     /* we always want to set the rununder to make sure RUNUNDER_ON is on
      * to support following children; we set RUNUNDER_EXPLICIT to allow
      * injecting even when preinject is configured. */
-    /* FIXME: we read only decimal */
+    /* XXX: we read only decimal */
     rununder_int_value = _ttoi(rununder_value);
     rununder_int_value |= RUNUNDER_ON | RUNUNDER_EXPLICIT;
 
     do_rununder = true;
     _itot(rununder_int_value, rununder_value,
-          10 /* FIXME : is the radix abstracted somewhere */);
+          10 /* XXX : is the radix abstracted somewhere */);
 
     /* for follow_children, we set DYNAMORIO_AUTOINJECT (unless
      * overridden by env var: then child will use env value, while
@@ -477,7 +478,7 @@ unset_registry_from_env(const TCHAR *image_name)
 #define TEMP_CMD(name, NAME)                                                           \
     if (overwrote_##name##_value) {                                                    \
         res = RegSetValueEx(image_name_key, _TEXT(DYNAMORIO_VAR_##NAME), 0,            \
-                            REG_SZ /* FIXME : abstracted somewhere? */,                \
+                            REG_SZ /* XXX : abstracted somewhere? */,                  \
                             (BYTE *)old_##name##_value,                                \
                             (DWORD)(_tcslen(old_##name##_value) + 1) * sizeof(TCHAR)); \
         ASSERT(res == ERROR_SUCCESS);                                                  \
@@ -514,7 +515,7 @@ unset_registry_from_env(const TCHAR *image_name)
  * debug key injection method
  *
  * This whole section can go away once we have our own version of create
- * process that doesn't check the debugger key FIXME
+ * process that doesn't check the debugger key XXX
  */
 
 static HKEY debugger_key;
@@ -529,7 +530,7 @@ using_debugger_key_injection(const TCHAR *image_name)
 {
     int res;
 
-    debug_stop_function = (BOOL(*)(int))(
+    debug_stop_function = (BOOL (*)(int))(
         GetProcAddress(GetModuleHandle(TEXT("Kernel32")), "DebugActiveProcessStop"));
 
     _sntprintf(debugger_key_full_name, BUFFER_SIZE_ELEMENTS(debugger_key_full_name),
@@ -545,7 +546,7 @@ using_debugger_key_injection(const TCHAR *image_name)
     res = RegQueryValueEx(debugger_key, _TEXT(DEBUGGER_INJECTION_VALUE_NAME), NULL, NULL,
                           (BYTE *)debugger_key_value, &debugger_key_value_size);
     if (ERROR_SUCCESS != res ||
-        /* FIXME : it would be better to check if our commandline matched
+        /* XXX : it would be better to check if our commandline matched
          * what was in the registry value, instead of looking for drinject */
         _tcsstr(debugger_key_value, _TEXT(DRINJECT_NAME)) == 0) {
         RegCloseKey(debugger_key);
@@ -622,7 +623,7 @@ get_image_name(const char *app_name)
     return name_start;
 }
 
-/* FIXME i#803: Until we have i#803 and support targeting cross-arch
+/* XXX i#803: Until we have i#803 and support targeting cross-arch
  * children, we require the child to match our bitwidth.
  * module_is_64bit() takes in a base, but there's no need to map the
  * whole thing in.  Thus we have our own impl.
@@ -755,7 +756,8 @@ append_app_arg_and_space(char *buf, size_t bufsz, size_t *sofar, const char *arg
  */
 DYNAMORIO_EXPORT
 int
-dr_inject_process_create(const char *app_name, const char **argv, void **data OUT)
+dr_inject_process_create(const char *app_name, const char **argv,
+                         void **data DR_PARAM_OUT)
 {
     dr_inject_info_t *info = HeapAlloc(GetProcessHeap(), 0, sizeof(*info));
     STARTUPINFO si;
@@ -814,7 +816,7 @@ dr_inject_process_create(const char *app_name, const char **argv, void **data OU
     _tcsncpy(info->wimage_name, get_image_wname(wapp_name),
              BUFFER_SIZE_ELEMENTS(info->wimage_name));
 
-    /* FIXME, won't need to check this, or unset/restore debugger_key_injection
+    /* XXX, won't need to check this, or unset/restore debugger_key_injection
      * if we have our own version of CreateProcess that doesn't check the
      * debugger key */
     info->using_debugger_injection = using_debugger_key_injection(info->wimage_name);
@@ -843,6 +845,118 @@ dr_inject_process_create(const char *app_name, const char **argv, void **data OU
     return errcode;
 }
 
+static int
+create_attach_thread(HANDLE process_handle DR_PARAM_IN,
+                     PHANDLE thread_handle DR_PARAM_OUT, PDWORD tid DR_PARAM_OUT)
+{
+    uint64 kernel32;
+    uint64 sleep_address;
+    bool target_is_32;
+
+    *thread_handle = NULL;
+    *tid = 0;
+
+    target_is_32 = is_32bit_process(process_handle);
+    kernel32 = find_remote_dll_base(process_handle, !target_is_32, "kernel32.dll");
+    if (kernel32 == 0) {
+        return ERROR_INVALID_PARAMETER;
+    }
+
+    sleep_address = get_remote_proc_address(process_handle, kernel32, "SleepEx");
+    if (sleep_address == 0) {
+        return ERROR_INVALID_PARAMETER;
+    }
+
+    *thread_handle = CreateRemoteThread(process_handle, NULL, 0,
+                                        (LPTHREAD_START_ROUTINE)(SIZE_T)sleep_address,
+                                        (LPVOID)(SIZE_T)INFINITE, CREATE_SUSPENDED, tid);
+    if (*thread_handle == NULL) {
+        return GetLastError();
+    }
+
+    return ERROR_SUCCESS;
+}
+
+DYNAMORIO_EXPORT
+int
+dr_inject_process_attach(process_id_t pid, void **data DR_PARAM_OUT,
+                         char **app_name DR_PARAM_OUT)
+{
+    dr_inject_info_t *info = HeapAlloc(GetProcessHeap(), 0, sizeof(*info));
+    memset(info, 0, sizeof(*info));
+    bool received_initial_debug_event = false;
+    DEBUG_EVENT dbgevt = { 0 };
+    wchar_t exe_path[MAX_PATH];
+    DWORD exe_path_size = MAX_PATH;
+    wchar_t *exe_name;
+    HANDLE process_handle;
+    int res;
+
+    *data = info;
+
+    if (DebugActiveProcess((DWORD)pid) == false) {
+        return GetLastError();
+    }
+
+    DebugSetProcessKillOnExit(false);
+
+    info->using_debugger_injection = false;
+    info->attached = true;
+
+    do {
+        dbgevt.dwProcessId = (DWORD)pid;
+        WaitForDebugEvent(&dbgevt, INFINITE);
+        ContinueDebugEvent(dbgevt.dwProcessId, dbgevt.dwThreadId, DBG_CONTINUE);
+
+        if (dbgevt.dwDebugEventCode == CREATE_PROCESS_DEBUG_EVENT) {
+            received_initial_debug_event = true;
+        }
+    } while (received_initial_debug_event == false);
+
+    info->pi.dwProcessId = dbgevt.dwProcessId;
+
+    DuplicateHandle(GetCurrentProcess(), dbgevt.u.CreateProcessInfo.hProcess,
+                    GetCurrentProcess(), &info->pi.hProcess, 0, FALSE,
+                    DUPLICATE_SAME_ACCESS);
+
+    process_handle = info->pi.hProcess;
+
+    /* XXX i#725: Attach does not begin as long as the injected thread is blocking.
+     * To overcome it, We create a new thread in the target process that will live
+     * as long as the target lives, and inject into it.
+     * For better transparency we should exit the thread immediately after injection.
+     * Would require changing termination assumptions in win32/syscall.c.
+     */
+    res = create_attach_thread(process_handle, &info->pi.hThread, &info->pi.dwThreadId);
+    if (res != ERROR_SUCCESS) {
+        return res;
+    }
+
+    BOOL(__stdcall * query_full_process_image_name_w)(HANDLE, DWORD, LPWSTR, PDWORD) =
+        (BOOL(__stdcall *)(HANDLE, DWORD, LPWSTR, PDWORD))(GetProcAddress(
+            GetModuleHandle(TEXT("Kernel32")), "QueryFullProcessImageNameW"));
+
+    if (query_full_process_image_name_w(process_handle, 0, exe_path, &exe_path_size) ==
+        0) {
+        return GetLastError();
+    }
+
+    exe_name = wcsrchr(exe_path, '\\');
+    if (exe_name == NULL) {
+        return ERROR_INVALID_PARAMETER;
+    }
+
+    wchar_to_char(info->image_name, BUFFER_SIZE_ELEMENTS(info->image_name), exe_name,
+                  wcslen(exe_name) * sizeof(wchar_t));
+
+    char_to_tchar(info->image_name, info->wimage_name,
+                  BUFFER_SIZE_ELEMENTS(info->image_name));
+
+    *app_name = info->image_name;
+
+    return ERROR_SUCCESS;
+}
+
 DYNAMORIO_EXPORT
 bool
 dr_inject_use_late_injection(void *data)
@@ -865,9 +979,9 @@ dr_inject_process_inject(void *data, bool force_injection, const char *library_p
     if (!force_injection) {
         int inject_flags = systemwide_should_inject(info->pi.hProcess, NULL);
         bool syswide_will_inject = systemwide_inject_enabled() &&
-            TEST(INJECT_TRUE, inject_flags) && !TEST(INJECT_EXPLICIT, inject_flags);
+            TESTANY(INJECT_TRUE, inject_flags) && !TESTANY(INJECT_EXPLICIT, inject_flags);
         bool should_not_takeover =
-            TEST(INJECT_EXCLUDED, inject_flags) && info->using_debugger_injection;
+            TESTANY(INJECT_EXCLUDED, inject_flags) && info->using_debugger_injection;
         /* case 10794: to support follow_children we inject even if
          * syswide_will_inject.  we use RUNUNDER_EXPLICIT to avoid
          * user32 injection from happening, to get consistent injection.
@@ -954,6 +1068,10 @@ bool
 dr_inject_process_run(void *data)
 {
     dr_inject_info_t *info = (dr_inject_info_t *)data;
+    if (info->attached == true) {
+        /* detach the debugger */
+        DebugActiveProcessStop(info->pi.dwProcessId);
+    }
     /* resume the suspended app process so its main thread can run */
     ResumeThread(info->pi.hThread);
     close_handle(info->pi.hThread);

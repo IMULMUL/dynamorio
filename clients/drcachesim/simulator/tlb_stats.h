@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2015-2017 Google, Inc.  All rights reserved.
+ * Copyright (c) 2015-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -34,14 +34,17 @@
  */
 
 #ifndef _TLB_STATS_H_
-#define _TLB_STATS_H_ 1
+#define _TLB_STATS_H_
 
 #include "caching_device_stats.h"
 
+namespace dynamorio {
+namespace drmemtrace {
+
 class tlb_stats_t : public caching_device_stats_t {
 public:
-    tlb_stats_t()
-        : caching_device_stats_t("")
+    tlb_stats_t(int block_size)
+        : caching_device_stats_t("", block_size)
     {
     }
     // XXX: support page privilege and MMU-related exceptions
@@ -49,5 +52,8 @@ public:
     // It might be necessary to report stats of exceptions
     // triggered by address translation, e.g., address unaligned exception.
 };
+
+} // namespace drmemtrace
+} // namespace dynamorio
 
 #endif /* _TLB_STATS_H_ */

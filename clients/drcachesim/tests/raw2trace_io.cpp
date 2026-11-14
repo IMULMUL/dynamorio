@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2017-2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2017-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -38,6 +38,7 @@
  * because raw2trace uses drmodtrack, which doesn't isolate under static memtrace.
  */
 
+#include "test_helpers.h"
 #include "droption.h"
 #include "tracer/raw2trace.h"
 #include "tracer/raw2trace_directory.h"
@@ -51,6 +52,14 @@
 #include <sys/wait.h>
 #include <syscall.h>
 #include <unistd.h>
+
+namespace dynamorio {
+namespace drmemtrace {
+
+using ::dynamorio::droption::droption_parser_t;
+using ::dynamorio::droption::DROPTION_SCOPE_ALL;
+using ::dynamorio::droption::DROPTION_SCOPE_FRONTEND;
+using ::dynamorio::droption::droption_t;
 
 static droption_t<std::string> op_indir(DROPTION_SCOPE_FRONTEND, "indir", "",
                                         "[Required] Directory with trace input files",
@@ -148,6 +157,8 @@ test_raw2trace(raw2trace_directory_t *dir)
          * raw2trace::read_and_map_modules().
          */
         raw2trace_t raw2trace(dir->modfile_bytes_, dir->in_files_, dir->out_files_,
+                              dir->out_archives_, dir->encoding_file_,
+                              dir->serial_schedule_file_, dir->cpu_schedule_file_,
                               GLOBAL_DCONTEXT, 1);
         std::string error = raw2trace.do_conversion();
         if (!error.empty()) {
@@ -202,7 +213,7 @@ test_trace_timestamp_reader(const raw2trace_directory_t *dir)
     // size of this buffer, and the first read for timestamp2 below that checks the
     // exact position of the timestamp entry. Consider removing some checks or making
     // them flexible in some way.
-    offline_entry_t buffer[5];
+    offline_entry_t buffer[6];
     file->read((char *)buffer, BUFFER_SIZE_BYTES(buffer));
 
     std::string error;
@@ -218,7 +229,7 @@ test_trace_timestamp_reader(const raw2trace_directory_t *dir)
     REPORT("Read timestamp from thread header");
 
     uint64 timestamp2 = 0;
-    if (drmemtrace_get_timestamp_from_offline_trace(buffer + 4, sizeof(offline_entry_t),
+    if (drmemtrace_get_timestamp_from_offline_trace(buffer + 5, sizeof(offline_entry_t),
                                                     &timestamp2) != DRMEMTRACE_SUCCESS)
         return false;
     if (timestamp != timestamp2)
@@ -254,7 +265,7 @@ test_trace_timestamp_reader(const raw2trace_directory_t *dir)
 }
 
 int
-main(int argc, const char *argv[])
+test_main(int argc, const char *argv[])
 {
     std::string parse_err;
     if (!droption_parser_t::parse_argv(DROPTION_SCOPE_FRONTEND, argc, (const char **)argv,
@@ -280,3 +291,6 @@ main(int argc, const char *argv[])
         return 1;
     return 0;
 }
+
+} // namespace drmemtrace
+} // namespace dynamorio

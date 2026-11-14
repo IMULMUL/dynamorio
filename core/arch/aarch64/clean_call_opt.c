@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2019 Google, Inc. All rights reserved.
+ * Copyright (c) 2019-2025 Google, Inc. All rights reserved.
  * Copyright (c) 2016-2018 ARM Limited. All rights reserved.
  * **********************************************************/
 
@@ -35,46 +35,44 @@
 
 #include "../globals.h"
 #include "arch.h"
-#include "instr_create.h"
+#include "instr_create_shared.h"
 #include "instrument.h" /* instrlist_meta_preinsert */
 #include "../clean_call_opt.h"
 #include "disassemble.h"
 
-#ifdef CLIENT_INTERFACE /* around whole file */
-
 /* Shorten code generation lines. */
-#    define PRE instrlist_meta_preinsert
-#    define OPREG opnd_create_reg
+#define PRE instrlist_meta_preinsert
+#define OPREG opnd_create_reg
 
 /* For fast recognition we do not check the instructions operand by operand.
  * Instead we test the encoding directly.
  */
 
 /* remove variable bits in the encoding */
-#    define STP_LDP_ENC_MASK 0x7fc07fff
-#    define STR_LDR_ENC_MASK 0xbfc003ff
-#    define MOV_STK_ENC_MASK 0x7f0003ff
-#    define STP_LDP_REG_MASK 0xffff83e0
-#    define STR_LDR_REG_MASK 0xffffffe0
+#define STP_LDP_ENC_MASK 0x7fc07fff
+#define STR_LDR_ENC_MASK 0xbfc003ff
+#define MOV_STK_ENC_MASK 0x7f0003ff
+#define STP_LDP_REG_MASK 0xffff83e0
+#define STR_LDR_REG_MASK 0xffffffe0
 
 /* stp x29, x30, [sp, #frame_size]! */
-#    define PUSH_FP_LR_ENC 0x29807bfd
+#define PUSH_FP_LR_ENC 0x29807bfd
 /* ldp x29, x30, [sp], #frame_size */
-#    define POP_FP_LR_ENC 0x28c07bfd
+#define POP_FP_LR_ENC 0x28c07bfd
 /* add sp, sp, #frame_size */
-#    define ADD_SP_ENC 0x110003ff
+#define ADD_SP_ENC 0x110003ff
 /* sub sp, sp, #frame_size */
-#    define SUB_SP_ENC 0x510003ff
+#define SUB_SP_ENC 0x510003ff
 /* mov x29, sp */
-#    define MOV_X29_SP_ENC 0x910003fd
+#define MOV_X29_SP_ENC 0x910003fd
 /* stp xx, xx, [sp, #offset] */
-#    define STP_SP_ENC 0x290003e0
+#define STP_SP_ENC 0x290003e0
 /* ldp xx, xx, [sp, #offset] */
-#    define LDP_SP_ENC 0x294003e0
+#define LDP_SP_ENC 0x294003e0
 /* str xx, [sp, #offset] */
-#    define STR_SP_ENC 0xb90003e0
+#define STR_SP_ENC 0xb90003e0
 /* ldr xx, [sp, #offset] */
-#    define LDR_SP_ENC 0xb94003e0
+#define LDR_SP_ENC 0xb94003e0
 
 static inline bool
 instr_is_push_fp_and_lr(instr_t *instr)
@@ -185,8 +183,7 @@ analyze_callee_regs_usage(dcontext_t *dcontext, callee_info_t *ci)
     memset(ci->reg_used, 0, sizeof(bool) * DR_NUM_GPR_REGS);
     ci->num_simd_used = 0;
     /* num_opmask_used is not applicable to ARM/AArch64. */
-    ASSERT(proc_num_simd_registers() == MCXT_NUM_SIMD_SLOTS);
-    memset(ci->simd_used, 0, sizeof(bool) * proc_num_simd_registers());
+    memset(ci->simd_used, 0, sizeof(bool) * MCXT_NUM_SIMD_SLOTS);
     ci->write_flags = false;
 
     num_regparm = MIN(ci->num_args, NUM_REGPARM);
@@ -202,7 +199,6 @@ analyze_callee_regs_usage(dcontext_t *dcontext, callee_info_t *ci)
     }
 
     for (instr = instrlist_first(ilist); instr != NULL; instr = instr_get_next(instr)) {
-
         /* General purpose registers */
         for (i = 0; i < DR_NUM_GPR_REGS; i++) {
             reg_id_t reg = DR_REG_START_GPR + (reg_id_t)i;
@@ -215,13 +211,42 @@ analyze_callee_regs_usage(dcontext_t *dcontext, callee_info_t *ci)
             }
         }
 
-        /* SIMD register usage */
-        for (i = 0; i < proc_num_simd_registers(); i++) {
-            if (!ci->simd_used[i] && instr_uses_reg(instr, (DR_REG_Q0 + (reg_id_t)i))) {
+        /* SIMD/SVE register usage. */
+        for (i = 0; i < MCXT_NUM_SIMD_SVE_SLOTS; i++) {
+            if (!ci->simd_used[i] &&
+                instr_uses_reg(instr,
+                               (proc_has_feature(FEATURE_SVE) ? DR_REG_Z0 : DR_REG_Q0) +
+                                   (reg_id_t)i)) {
                 LOG(THREAD, LOG_CLEANCALL, 2,
                     "CLEANCALL: callee " PFX " uses VREG%d at " PFX "\n", ci->start, i,
                     instr_get_app_pc(instr));
                 ci->simd_used[i] = true;
+                ci->num_simd_used++;
+            }
+        }
+
+        if (proc_has_feature(FEATURE_SVE)) {
+            /* SVE predicate register usage */
+            for (i = MCXT_NUM_SIMD_SVE_SLOTS;
+                 i < (MCXT_NUM_SIMD_SVE_SLOTS + MCXT_NUM_SVEP_SLOTS); i++) {
+                const uint reg_idx = i - MCXT_NUM_SIMD_SVE_SLOTS;
+                if (!ci->simd_used[i] &&
+                    instr_uses_reg(instr, DR_REG_P0 + (reg_id_t)reg_idx)) {
+                    LOG(THREAD, LOG_CLEANCALL, 2,
+                        "CLEANCALL: callee " PFX " uses P%d at " PFX "\n", ci->start,
+                        reg_idx, instr_get_app_pc(instr));
+                    ci->simd_used[i] = true;
+                    ci->num_simd_used++;
+                }
+            }
+
+            /* SVE FFR register usage */
+            const uint ffr_index = MCXT_NUM_SIMD_SVE_SLOTS + MCXT_NUM_SVEP_SLOTS;
+            if (!ci->simd_used[ffr_index] && instr_uses_reg(instr, DR_REG_FFR)) {
+                LOG(THREAD, LOG_CLEANCALL, 2,
+                    "CLEANCALL: callee " PFX " uses FFR at " PFX "\n", ci->start,
+                    instr_get_app_pc(instr));
+                ci->simd_used[ffr_index] = true;
                 ci->num_simd_used++;
             }
         }
@@ -401,7 +426,7 @@ app_pc
 check_callee_instr_level2(dcontext_t *dcontext, callee_info_t *ci, app_pc next_pc,
                           app_pc cur_pc, app_pc tgt_pc)
 {
-    /* FIXME i#2796: For opt level greater than 1, we abort. */
+    /* XXX i#2796: For opt level greater than 1, we abort. */
     return NULL;
 }
 
@@ -439,7 +464,7 @@ check_callee_ilist_inline(dcontext_t *dcontext, callee_info_t *ci)
 
         /* For now, any accesses to SP or X29, if it is used as frame pointer,
          * prevent inlining.
-         * FIXME i#2796: Some access to SP or X29 can be re-written.
+         * XXX i#2796: Some access to SP or X29 can be re-written.
          */
         if ((instr_reg_in_src(instr, DR_REG_XSP) ||
              (instr_reg_in_src(instr, DR_REG_X29) && ci->standard_fp)) &&
@@ -458,7 +483,7 @@ check_callee_ilist_inline(dcontext_t *dcontext, callee_info_t *ci)
 void
 analyze_clean_call_aflags(dcontext_t *dcontext, clean_call_info_t *cci, instr_t *where)
 {
-    /* FIXME i#2796: NYI on AArch64
+    /* TODO i#2796: NYI on AArch64
      * Non-essential for cleancall_opt=1 optimizations.
      */
 }
@@ -478,7 +503,7 @@ insert_inline_reg_save(dcontext_t *dcontext, clean_call_info_t *cci, instrlist_t
     insert_get_mcontext_base(dcontext, ilist, where, ci->spill_reg);
 
     insert_save_inline_registers(dcontext, ilist, where, cci->reg_skip, DR_REG_START_GPR,
-                                 true, (void *)ci);
+                                 GPR_REG_TYPE, (void *)ci);
 
     /* Save nzcv */
     if (!cci->skip_save_flags && ci->write_flags) {
@@ -489,7 +514,7 @@ insert_inline_reg_save(dcontext_t *dcontext, clean_call_info_t *cci, instrlist_t
         dr_save_arith_flags_to_reg(dcontext, ilist, where, nzcv_spill_reg);
     }
 
-    /* FIXME i#2796: Save fpcr, fpsr. */
+    /* XXX i#2796: Save fpcr, fpsr. */
 }
 
 void
@@ -514,13 +539,13 @@ insert_inline_reg_restore(dcontext_t *dcontext, clean_call_info_t *cci,
     }
 
     insert_restore_inline_registers(dcontext, ilist, where, cci->reg_skip, DR_REG_X0,
-                                    true, (void *)ci);
+                                    GPR_REG_TYPE, (void *)ci);
 
     /* Restore reg used for unprotected_context_t pointer. */
     PRE(ilist, where,
         instr_create_restore_from_tls(dcontext, ci->spill_reg, TLS_REG2_SLOT));
 
-    /* FIXME i#2796: Restore fpcr, fpsr. */
+    /* XXX i#2796: Restore fpcr, fpsr. */
 }
 
 void
@@ -548,7 +573,7 @@ insert_inline_arg_setup(dcontext_t *dcontext, clean_call_info_t *cci, instrlist_
     arg = args[0];
 
     if (opnd_uses_reg(arg, ci->spill_reg)) {
-        /* FIXME i#2796: Try to pass arg via spill register, like on X86. */
+        /* XXX i#2796: Try to pass arg via spill register, like on X86. */
         ASSERT_NOT_IMPLEMENTED(false);
     }
 
@@ -559,9 +584,7 @@ insert_inline_arg_setup(dcontext_t *dcontext, clean_call_info_t *cci, instrlist_
         insert_mov_immed_ptrsz(dcontext, opnd_get_immed_int(arg),
                                opnd_create_reg(regparm), ilist, where, NULL, NULL);
     } else {
-        /* FIXME i#2796: Implement passing additional argument types. */
+        /* XXX i#2796: Implement passing additional argument types. */
         ASSERT_NOT_IMPLEMENTED(false);
     }
 }
-
-#endif /* CLIENT_INTERFACE */

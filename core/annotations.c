@@ -1,5 +1,5 @@
 /* ******************************************************
- * Copyright (c) 2014-2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2014-2026 Google, Inc.  All rights reserved.
  * ******************************************************/
 
 /*
@@ -33,16 +33,18 @@
 #include "globals.h"
 #include "hashtable.h"
 #include "instr.h"
-#include "instr_create.h"
+#include "instr_create_shared.h"
 #include "decode_fast.h"
 #include "utils.h"
 #include "annotations.h"
 
 #ifdef ANNOTATIONS /* around whole file */
 
+#    include "annotations_api.h"
+
 #    if !(defined(WINDOWS) && defined(X64))
-#        include "../third_party/valgrind/valgrind.h"
-#        include "../third_party/valgrind/memcheck.h"
+#        include "valgrind.h"
+#        include "memcheck.h"
 #    endif
 
 /* Macros for identifying an annotation head and extracting the pointer to its name.
@@ -227,11 +229,11 @@ valgrind_running_on_valgrind(dr_vg_client_request_t *request);
 #    endif
 
 static bool
-is_annotation_tag(dcontext_t *dcontext, IN OUT app_pc *start_pc, instr_t *scratch,
-                  OUT const char **name);
+is_annotation_tag(dcontext_t *dcontext, DR_PARAM_INOUT app_pc *cur_pc, instr_t *scratch,
+                  DR_PARAM_OUT const char **name);
 
 static void
-identify_annotation(dcontext_t *dcontext, IN OUT annotation_layout_t *layout,
+identify_annotation(dcontext_t *dcontext, DR_PARAM_INOUT annotation_layout_t *layout,
                     instr_t *scratch);
 
 /* Create argument operands for the instrumented clean call */
@@ -256,7 +258,7 @@ free_annotation_handler(void *p);
  */
 
 void
-annotation_init()
+annotation_init(void)
 {
     handlers = strhash_hash_create(
         GLOBAL_DCONTEXT, 8, 80, /* favor a small table */
@@ -276,7 +278,7 @@ annotation_init()
     vg_router.args = &vg_router_arg;
     vg_router.symbol_name = NULL; /* No symbols in Valgrind annotations. */
     vg_router.receiver_list = &vg_receiver;
-    vg_receiver.instrumentation.callback = (void *)(void (*)())handle_vg_annotation;
+    vg_receiver.instrumentation.callback = (void *)(void (*)(void))handle_vg_annotation;
     vg_receiver.save_fpstate = false;
     vg_receiver.next = NULL;
 #    endif
@@ -300,7 +302,7 @@ annotation_init()
 }
 
 void
-annotation_exit()
+annotation_exit(void)
 {
 #    if !(defined(WINDOWS) && defined(X64))
     uint i;
@@ -315,8 +317,9 @@ annotation_exit()
 }
 
 bool
-instrument_annotation(dcontext_t *dcontext, IN OUT app_pc *start_pc,
-                      OUT instr_t **substitution _IF_WINDOWS_X64(IN bool hint_is_safe))
+instrument_annotation(dcontext_t *dcontext, DR_PARAM_INOUT app_pc *start_pc,
+                      DR_PARAM_OUT instr_t **substitution
+                          _IF_WINDOWS_X64(DR_PARAM_IN bool hint_is_safe))
 {
     annotation_layout_t layout = { 0 };
     /* This instr_t is used for analytical decoding throughout the detection functions.
@@ -352,14 +355,15 @@ instrument_annotation(dcontext_t *dcontext, IN OUT app_pc *start_pc,
 #    endif
 
     instr_init(dcontext, &scratch);
-    TRY_EXCEPT(my_dcontext, { identify_annotation(dcontext, &layout, &scratch); },
-               { /* EXCEPT */
-                 LOG(THREAD, LOG_ANNOTATIONS, 2,
-                     "Failed to instrument annotation at " PFX "\n", *start_pc);
-                 /* layout.type is already ANNOTATION_TYPE_NONE */
-               });
+    TRY_EXCEPT(
+        my_dcontext, { identify_annotation(dcontext, &layout, &scratch); },
+        { /* EXCEPT */
+          LOG(THREAD, LOG_ANNOTATIONS, 2, "Failed to instrument annotation at " PFX "\n",
+              *start_pc);
+          /* layout.type is already ANNOTATION_TYPE_NONE */
+        });
     if (layout.type != ANNOTATION_TYPE_NONE) {
-        LOG(GLOBAL, LOG_ANNOTATIONS, 2,
+        LOG(THREAD, LOG_ANNOTATIONS, 2,
             "Decoded %s annotation %s. Next pc now " PFX ".\n",
             (layout.type == ANNOTATION_TYPE_EXPRESSION) ? "expression" : "statement",
             layout.name, layout.resume_pc);
@@ -388,6 +392,9 @@ instrument_annotation(dcontext_t *dcontext, IN OUT app_pc *start_pc,
                      * The placeholder is "ok to mangle" because it (partially)
                      * implements the app's annotation. The placeholder will be
                      * removed post-client during mangling.
+                     * We only support writing the return value and no other registers
+                     * (otherwise we'd need drrg to further special-case
+                     * DR_NOTE_ANNOTATION).
                      */
                     instr_t *return_placeholder =
                         INSTR_XL8(INSTR_CREATE_mov_st(dcontext, opnd_create_reg(REG_XAX),
@@ -476,6 +483,8 @@ instrument_valgrind_annotation(dcontext_t *dcontext, instrlist_t *bb, instr_t *x
     /* Append `mov $0x0,%edx` so that clients and tools recognize that %xdx will be
      * written here. The placeholder is "ok to mangle" because it (partially) implements
      * the app's annotation. The placeholder will be removed post-client during mangling.
+     * We only support writing the return value and no other registers (otherwise
+     * we'd need drreg to further special-case DR_NOTE_ANNOTATION).
      */
     return_placeholder = INSTR_XL8(
         INSTR_CREATE_mov_st(dcontext, opnd_create_reg(REG_XDX), OPND_CREATE_INT32(0)),
@@ -757,12 +766,9 @@ handle_vg_annotation(app_pc request_args)
     }
 
     /* Put the result in %xdx where the target app expects to find it. */
-#        ifdef CLIENT_INTERFACE
     if (dcontext->client_data->mcontext_in_dcontext) {
         get_mcontext(dcontext)->xdx = result;
-    } else
-#        endif
-    {
+    } else {
         priv_mcontext_t *state = get_priv_mcontext_from_dstack(dcontext);
         state->xdx = result;
     }
@@ -777,6 +783,12 @@ lookup_valgrind_request(ptr_uint_t request)
     case VG_USERREQ__MAKE_MEM_DEFINED_IF_ADDRESSABLE:
         return DR_VG_ID__MAKE_MEM_DEFINED_IF_ADDRESSABLE;
     case VG_USERREQ__DISCARD_TRANSLATIONS: return DR_VG_ID__DISCARD_TRANSLATIONS;
+    case VG_USERREQ__MAKE_MEM_UNDEFINED: return DR_VG_ID__MAKE_MEM_UNDEFINED;
+    case VG_USERREQ__MAKE_MEM_DEFINED: return DR_VG_ID__MAKE_MEM_DEFINED;
+    case VG_USERREQ__CHECK_MEM_IS_ADDRESSABLE: return DR_VG_ID__CHECK_MEM_IS_ADDRESSABLE;
+    case VG_USERREQ__CHECK_MEM_IS_DEFINED: return DR_VG_ID__CHECK_MEM_IS_DEFINED;
+    case VG_USERREQ__MALLOCLIKE_BLOCK: return DR_VG_ID__MALLOCLIKE_BLOCK;
+    case VG_USERREQ__FREELIKE_BLOCK: return DR_VG_ID__FREELIKE_BLOCK;
     }
     return DR_VG_ID__LAST;
 }
@@ -839,11 +851,11 @@ valgrind_running_on_valgrind(dr_vg_client_request_t *request)
  *              (note there is a special case for Windows x64, which is not inline asm)
  *     (step 7) if it matches, point `**name` to the character beyond the separator ':'
  *
- * See https://github.com/DynamoRIO/dynamorio/wiki/Annotations for complete examples.
+ * See https://dynamorio.org/page_annotations.html for complete examples.
  */
 static inline bool
-is_annotation_tag(dcontext_t *dcontext, IN OUT app_pc *cur_pc, instr_t *scratch,
-                  OUT const char **name)
+is_annotation_tag(dcontext_t *dcontext, DR_PARAM_INOUT app_pc *cur_pc, instr_t *scratch,
+                  DR_PARAM_OUT const char **name)
 {
     app_pc start_pc = *cur_pc;
 
@@ -920,7 +932,7 @@ is_annotation_tag(dcontext_t *dcontext, IN OUT app_pc *cur_pc, instr_t *scratch,
  *            (note that the Statement annotation concludes with a special case).
  */
 static inline void
-identify_annotation(dcontext_t *dcontext, IN OUT annotation_layout_t *layout,
+identify_annotation(dcontext_t *dcontext, DR_PARAM_INOUT annotation_layout_t *layout,
                     instr_t *scratch)
 {
     app_pc cur_pc = layout->start_pc, last_call = NULL;
@@ -947,7 +959,7 @@ identify_annotation(dcontext_t *dcontext, IN OUT annotation_layout_t *layout,
         /* If the target app contains an annotation whose argument is a function call
          * that gets inlined, and that function contains the same annotation, the
          * compiler will fuse the headers. See
-         * https://github.com/DynamoRIO/dynamorio/wiki/Annotations for a sample of
+         * https://dynamorio.org/page_annotations.html for a sample of
          * fused headers. This loop identifies and skips any fused headers.
          */
         while (true) {
@@ -987,13 +999,13 @@ identify_annotation(dcontext_t *dcontext, IN OUT annotation_layout_t *layout,
  *   (step 7) advance the label pointer to the name token.
  */
 static inline void
-identify_annotation(dcontext_t *dcontext, IN OUT annotation_layout_t *layout,
+identify_annotation(dcontext_t *dcontext, DR_PARAM_INOUT annotation_layout_t *layout,
                     instr_t *scratch)
 {
     app_pc cur_pc = layout->start_pc;
     if (is_annotation_tag(dcontext, &cur_pc, scratch, &layout->name)) { /* step 1 */
 #        ifdef WINDOWS
-        if (*(cur_pc++) == RAW_OPCODE_pop_eax) {                        /* step 2 */
+        if (*(cur_pc++) == RAW_OPCODE_pop_eax) { /* step 2 */
 #        else
         if (instr_get_opcode(scratch) == OP_bsf) { /* step 2 */
 #        endif
@@ -1022,11 +1034,11 @@ create_arg_opnds(dr_annotation_handler_t *handler, uint num_args,
     ASSERT(call_type == DR_ANNOTATION_CALL_TYPE_FASTCALL); /* architecture constraint */
     switch (num_args) { /* Create up to six register args */
     default:
-    case 6: handler->args[5] = opnd_create_reg(DR_REG_R9);
-    case 5: handler->args[4] = opnd_create_reg(DR_REG_R8);
-    case 4: handler->args[3] = opnd_create_reg(DR_REG_XCX);
-    case 3: handler->args[2] = opnd_create_reg(DR_REG_XDX);
-    case 2: handler->args[1] = opnd_create_reg(DR_REG_XSI);
+    case 6: handler->args[5] = opnd_create_reg(DR_REG_R9); DR_FALLTHROUGH;
+    case 5: handler->args[4] = opnd_create_reg(DR_REG_R8); DR_FALLTHROUGH;
+    case 4: handler->args[3] = opnd_create_reg(DR_REG_XCX); DR_FALLTHROUGH;
+    case 3: handler->args[2] = opnd_create_reg(DR_REG_XDX); DR_FALLTHROUGH;
+    case 2: handler->args[1] = opnd_create_reg(DR_REG_XSI); DR_FALLTHROUGH;
     case 1: handler->args[0] = opnd_create_reg(DR_REG_XDI);
     }
     /* Create the remaining args on the stack */
@@ -1049,9 +1061,9 @@ create_arg_opnds(dr_annotation_handler_t *handler, uint num_args,
     ASSERT(call_type == DR_ANNOTATION_CALL_TYPE_FASTCALL); /* architecture constraint */
     switch (num_args) { /* Create up to four register args */
     default:
-    case 4: handler->args[3] = opnd_create_reg(DR_REG_R9);
-    case 3: handler->args[2] = opnd_create_reg(DR_REG_R8);
-    case 2: handler->args[1] = opnd_create_reg(DR_REG_XDX);
+    case 4: handler->args[3] = opnd_create_reg(DR_REG_R9); DR_FALLTHROUGH;
+    case 3: handler->args[2] = opnd_create_reg(DR_REG_R8); DR_FALLTHROUGH;
+    case 2: handler->args[1] = opnd_create_reg(DR_REG_XDX); DR_FALLTHROUGH;
     case 1: handler->args[0] = opnd_create_reg(DR_REG_XCX);
     }
     /* Create the remaining args on the stack */
@@ -1075,7 +1087,7 @@ create_arg_opnds(dr_annotation_handler_t *handler, uint num_args,
     if (call_type == DR_ANNOTATION_CALL_TYPE_FASTCALL) {
         switch (num_args) { /* Create 1 or 2 register args */
         default:
-        case 2: handler->args[1] = opnd_create_reg(DR_REG_XDX);
+        case 2: handler->args[1] = opnd_create_reg(DR_REG_XDX); DR_FALLTHROUGH;
         case 1: handler->args[0] = opnd_create_reg(DR_REG_XCX);
         }
         /* Create the remaining args on the stack */

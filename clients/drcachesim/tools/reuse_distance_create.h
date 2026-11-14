@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2018 Google, Inc.  All rights reserved.
+ * Copyright (c) 2018-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -33,9 +33,12 @@
 /* reuse-distance tool creation */
 
 #ifndef _REUSE_DISTANCE_CREATE_H_
-#define _REUSE_DISTANCE_CREATE_H_ 1
+#define _REUSE_DISTANCE_CREATE_H_
 
 #include "analysis_tool.h"
+
+namespace dynamorio {
+namespace drmemtrace {
 
 /**
  * @file drmemtrace/reuse_distance_create.h
@@ -54,8 +57,10 @@ struct reuse_distance_knobs_t {
         , distance_threshold(100)
         , report_top(10)
         , skip_list_distance(500)
+        , distance_limit(0)
         , verify_skip(false)
         , verbose(0)
+        , histogram_bin_multiplier(1.00)
     {
     }
     unsigned int line_size;
@@ -63,12 +68,17 @@ struct reuse_distance_knobs_t {
     unsigned int distance_threshold;
     unsigned int report_top;
     unsigned int skip_list_distance;
+    unsigned int distance_limit;
     bool verify_skip;
     unsigned int verbose;
+    double histogram_bin_multiplier;
 };
 
 /** Creates an analysis tool which computes reuse distance. */
 analysis_tool_t *
 reuse_distance_tool_create(const reuse_distance_knobs_t &knobs);
+
+} // namespace drmemtrace
+} // namespace dynamorio
 
 #endif /* _REUSE_DISTANCE_CREATE_H_ */

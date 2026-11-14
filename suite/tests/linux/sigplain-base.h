@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2012-2018 Google, Inc.  All rights reserved.
+ * Copyright (c) 2012-2026 Google, Inc.  All rights reserved.
  * Copyright (c) 2003-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -142,8 +142,10 @@ main(int argc, char *argv[])
     sigemptyset(&mask);
     sigaddset(&mask, SIGURG);
     sigaddset(&mask, SIGALRM);
-    rc = sigprocmask(SIG_SETMASK, &mask, NULL);
-    ASSERT_NOERR(rc);
+    sigset_t returned_mask = {
+        0, /* Set padding to 0 so we can use memcmp */
+    };
+    set_check_signal_mask(&mask, &returned_mask);
 
 #if USE_SIGSTACK
     sigstack.ss_sp = (char *)malloc(ALT_STACK_SIZE);
@@ -195,7 +197,7 @@ main(int argc, char *argv[])
     };
     rc = sigprocmask(SIG_BLOCK, NULL, &check_mask);
     ASSERT_NOERR(rc);
-    assert(memcmp(&mask, &check_mask, sizeof(mask)) == 0);
+    assert(memcmp(&returned_mask, &check_mask, sizeof(returned_mask)) == 0);
 
 #if USE_TIMER
     memset(&t, 0, sizeof(t));
@@ -208,9 +210,9 @@ main(int argc, char *argv[])
         print("Got some timer hits!\n");
 #endif
 
-        /* We leave the sigstack in place for the timer so any racy alarm arriving
-         * after we disabled the itimer will be on the alt stack.
-         */
+    /* We leave the sigstack in place for the timer so any racy alarm arriving
+     * after we disabled the itimer will be on the alt stack.
+     */
 #if USE_SIGSTACK && !USE_TIMER
     stack_t check_stack;
     rc = sigaltstack(NULL, &check_stack);

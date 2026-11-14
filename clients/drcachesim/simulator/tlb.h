@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2015-2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2015-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -34,23 +34,38 @@
  */
 
 #ifndef _TLB_H_
-#define _TLB_H_ 1
+#define _TLB_H_
+
+#include <optional>
+#include <random>
 
 #include "caching_device.h"
+#include "memref.h"
 #include "tlb_entry.h"
 #include "tlb_stats.h"
 
+namespace dynamorio {
+namespace drmemtrace {
+
 class tlb_t : public caching_device_t {
 public:
+    tlb_t(const std::string &name = "tlb");
+
     void
     request(const memref_t &memref) override;
+
+    // TODO i#4816: The addition of the pid as a lookup parameter beyond just the tag
+    // needs to be imposed on the parent methods invalidate(), contains_tag(), and
+    // propagate_eviction() by overriding them.
 
 protected:
     void
     init_blocks() override;
-
     // Optimization: remember last pid in addition to last tag
     memref_pid_t last_pid_;
 };
+
+} // namespace drmemtrace
+} // namespace dynamorio
 
 #endif /* _TLB_H_ */

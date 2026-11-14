@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2020-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -34,12 +34,15 @@
  */
 
 #ifndef _PREFETCH_ANALYZER_H_
-#define _PREFETCH_ANALYZER_H_ 1
+#define _PREFETCH_ANALYZER_H_
 
 #include "../analysis_tool.h"
 #include "../common/memref.h"
 #include "../common/trace_entry.h"
 #include <map>
+
+namespace dynamorio {
+namespace drmemtrace {
 
 class prefetch_analyzer_t : public analysis_tool_t {
 public:
@@ -51,5 +54,8 @@ public:
 protected:
     std::map<trace_type_t, int> trace_type_freq_;
 };
+
+} // namespace drmemtrace
+} // namespace dynamorio
 
 #endif /* _PREFETCH_ANALYZER_H_ */

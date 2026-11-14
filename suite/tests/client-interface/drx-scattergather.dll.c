@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2019 Google, Inc.  All rights reserved.
+ * Copyright (c) 2019-2023 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -30,22 +30,15 @@
  * DAMAGE.
  */
 
-/* TODO i#2985: Test the future drx_expand_scatter_gather() extension using drmgr. */
+/* Tests drx_expand_scatter_gather(). */
 
 #include "dr_api.h"
+#include "client_tools.h"
 #include "drmgr.h"
 #include "drreg.h"
 #include "drx.h"
 #include "drx-scattergather-shared.h"
 #include <limits.h>
-
-#define CHECK(x, msg)                                                                \
-    do {                                                                             \
-        if (!(x)) {                                                                  \
-            dr_fprintf(STDERR, "CHECK failed %s:%d: %s\n", __FILE__, __LINE__, msg); \
-            dr_abort();                                                              \
-        }                                                                            \
-    } while (0);
 
 static uint64 global_sg_count;
 
@@ -65,6 +58,7 @@ inscount(uint num_instrs)
     global_sg_count += num_instrs;
 }
 
+#if defined(X86)
 /* Global, because the markers will be in a different app2app list after breaking up
  * scatter/gather into separate basic blocks during expansion.
  */
@@ -73,6 +67,7 @@ static app_pc mask_update_test_avx512_gather_pc = (app_pc)INT_MAX;
 static app_pc mask_clobber_test_avx512_scatter_pc = (app_pc)INT_MAX;
 static app_pc mask_update_test_avx512_scatter_pc = (app_pc)INT_MAX;
 static app_pc mask_update_test_avx2_gather_pc = (app_pc)INT_MAX;
+#endif
 
 static dr_emit_flags_t
 event_app_instruction(void *drcontext, void *tag, instrlist_t *bb, instr_t *instr,
@@ -91,20 +86,38 @@ event_app_instruction(void *drcontext, void *tag, instrlist_t *bb, instr_t *inst
     return DR_EMIT_DEFAULT;
 }
 
+/* i#1672: we need a way to only test the scatter/gather instructions in our
+ * test application, and ignore scatter/gather instructions from OS libraries.
+ * As AArch64 does not have annotations yet the best way to do this seems to be
+ * to use the module interface to check that the current module is the exe.
+ */
+static app_pc exe_start;
+
 static dr_emit_flags_t
 event_bb_analysis(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
                   bool translating, void *user_data)
 {
     uint num_sg_instrs = 0;
     bool is_emulation = false;
-    for (instr_t *instr = instrlist_first(bb); instr != NULL;
+
+    bool from_exe = false;
+    module_data_t *module = dr_lookup_module(dr_fragment_app_pc(tag));
+    if (module != NULL) {
+        from_exe = (module->start == exe_start);
+        dr_free_module_data(module);
+    } else {
+        DR_ASSERT(false);
+    }
+
+    for (instr_t *instr = instrlist_first(bb); instr != NULL && from_exe;
          instr = instr_get_next(instr)) {
         if (instr_is_gather(instr) || instr_is_scatter(instr)) {
-            /* FIXME i#2985: some scatter/gather instructions will not get expanded in
+            /* XXX i#2985: some scatter/gather instructions will not get expanded in
              * 32-bit mode.
              */
             IF_X64(dr_fprintf(STDERR, "Unexpected scatter or gather instruction\n"));
         }
+
         if (drmgr_is_emulation_start(instr)) {
             emulated_instr_t emulated_instr;
             emulated_instr.size = sizeof(emulated_instr);
@@ -189,6 +202,7 @@ event_bb_app2app(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
             scatter_gather_present = true;
         } else if (instr_is_scatter(instr)) {
             scatter_gather_present = true;
+#if defined(X86)
         } else if (instr_is_mov_constant(instr, &val) &&
                    val == TEST_AVX512_GATHER_MASK_CLOBBER_MARKER) {
             instr_t *next_instr = instr_get_next(instr);
@@ -257,6 +271,7 @@ event_bb_app2app(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
                         search_for_next_gather_pc(drcontext, next_instr);
                 }
             }
+#endif /* defined(X86) */
         }
     }
     bool expansion_ok = drx_expand_scatter_gather(drcontext, bb, &expanded);
@@ -268,6 +283,7 @@ event_bb_app2app(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
     }
     CHECK((scatter_gather_present IF_X64(&&expanded)) || (expansion_ok && !expanded),
           "drx_expand_scatter_gather() bad OUT values");
+#if defined(X86)
     for (instr = instrlist_first(bb); instr != NULL; instr = instr_get_next(instr)) {
         if (instr_get_opcode(instr) == OP_kandnw &&
             (instr_get_app_pc(instr) == mask_clobber_test_avx512_gather_pc ||
@@ -281,7 +297,7 @@ event_bb_app2app(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
              */
             instrlist_postinsert(
                 bb, instr,
-                INSTR_XL8(INSTR_CREATE_ud2a(drcontext),
+                INSTR_XL8(INSTR_CREATE_ud2(drcontext),
                           /* It's guaranteed by the test that there will be a next
                            * app instruction, because the emulated sequence consists
                            * of 16 mask updates, and this is just the first.
@@ -296,7 +312,7 @@ event_bb_app2app(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
              * update.
              */
             instrlist_preinsert(bb, instr,
-                                INSTR_XL8(INSTR_CREATE_ud2a(drcontext),
+                                INSTR_XL8(INSTR_CREATE_ud2(drcontext),
                                           /* It's again guaranteed by the test that there
                                            * will be a next app instruction.
                                            */
@@ -304,7 +320,7 @@ event_bb_app2app(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
         } else if (instr_is_mov(instr) && instr_reads_memory(instr) &&
                    (instr_get_app_pc(instr) == mask_update_test_avx2_gather_pc)) {
             instrlist_postinsert(bb, instr,
-                                 INSTR_XL8(INSTR_CREATE_ud2a(drcontext),
+                                 INSTR_XL8(INSTR_CREATE_ud2(drcontext),
                                            /* It's again guaranteed by the test that there
                                             * will be a next app instruction.
                                             */
@@ -313,6 +329,7 @@ event_bb_app2app(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
             break;
         }
     }
+#endif /* defined(X86) */
     *user_data = (uint *)dr_thread_alloc(drcontext, sizeof(uint));
     return DR_EMIT_DEFAULT;
 }
@@ -329,8 +346,14 @@ dr_init(client_id_t id)
     CHECK(ok, "drx_init failed");
     res = drreg_init(&ops);
     CHECK(res == DRREG_SUCCESS, "drreg_init failed");
-    dr_register_exit_event(event_exit);
+    drmgr_register_exit_event(event_exit);
     ok = drmgr_register_bb_instrumentation_ex_event(event_bb_app2app, event_bb_analysis,
                                                     event_app_instruction, NULL, NULL);
     CHECK(ok, "drmgr register bb failed");
+
+    module_data_t *exe = dr_get_main_module();
+    if (exe != NULL) {
+        exe_start = exe->start;
+        dr_free_module_data(exe);
+    }
 }

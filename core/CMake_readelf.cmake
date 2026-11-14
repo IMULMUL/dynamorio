@@ -1,5 +1,5 @@
 # **********************************************************
-# Copyright (c) 2015-2019 Google, Inc.    All rights reserved.
+# Copyright (c) 2015-2025 Google, Inc.    All rights reserved.
 # Copyright (c) 2009 VMware, Inc.    All rights reserved.
 # **********************************************************
 
@@ -119,7 +119,7 @@ endif ()
 
 if (check_libc)
   execute_process(COMMAND
-    ${READELF_EXECUTABLE} -s ${${lib_file}}
+    ${READELF_EXECUTABLE} -s --wide ${${lib_file}}
     RESULT_VARIABLE readelf_result
     ERROR_VARIABLE readelf_error
     OUTPUT_VARIABLE string
@@ -127,23 +127,47 @@ if (check_libc)
   if (readelf_result OR readelf_error)
     message(FATAL_ERROR "*** ${READELF_EXECUTABLE} failed: ***\n${readelf_error}")
   endif (readelf_result OR readelf_error)
-  # Avoid dependences beyond glibc 2.4 (2.17 on AArch64) for maximum backward
+
+  # Avoid dependences beyond the oldest well-supported version of glibc for maximum backward
   # portability without going to extremes with a fixed toolchain (xref i#1504):
   execute_process(COMMAND
     ${READELF_EXECUTABLE} -h ${${lib_file}}
     OUTPUT_VARIABLE file_header_result
     )
-  if (file_header_result MATCHES "AArch64")
-    set (glibc_version_regexp "2\\.(1[8-9]|[2-9][0-9])")
-  else ()
-    set (glibc_version_regexp "2\\.([5-9]|[1-9][0-9])")
-  endif ()
-  string(REGEX MATCH " GLOBAL [ A-Z]* UND [^\n]*@GLIBC_${glibc_version_regexp}"
-    has_recent "${string}")
-  if (has_recent)
-    string(REGEX MATCH " GLOBAL DEFAULT  UND [^\n]*@GLIBC_${glibc_version_regexp}[^\n]*\n"
-      symname "${string}")
-    message(FATAL_ERROR "*** Error: ${${lib_file}} has too-recent import: ${symname}")
+
+  # To determine the minimum version of glibc that we should support for packaging, we
+  # should check the Linux distributions that are known not to be rolling releases and
+  # offer long support, and then check the oldest option available that is not yet EOL.
+  # As of June 2025, these are:
+  #  * Debian Bullseye, which is on glibc 2.31
+  #  * RHEL 8, which is on glibc 2.28
+  #  * Ubuntu 22.04, which is on glibc 2.35
+  #
+  # Therefore, we want to support at least glibc 2.28.
+  # Unfortunately, there is a compatibility break where glibc 2.34 contains
+  # `__libc_start_main@GLIBC_2.34` and non-trivial changes such that any binary
+  # built with 2.34+ will not run on a system with 2.33 or older.
+  # Since the oldest glibc Github Actions provides is Ubuntu 22.04's 2.35,
+  # we cannot easily build a pre-2.34 version.  For now we make 2.34 the minimum
+  # so our Github Actions docs and package builds succeed.
+  # XXX i#5860: Set up a pre-2.34 build somewhere such as Travis so our binary
+  # releases will work on RHEL8 and Debian Bullseye.
+  set (glibc_version "2.34")
+
+  set (glibc_version_regexp " GLOBAL [ A-Z]* UND [^\n]*@GLIBC_([0-9]+\\.[0-9]+)")
+  string(REGEX MATCHALL "${glibc_version_regexp}" imports "${string}")
+
+  foreach (import ${imports})
+    string(REGEX MATCH "${glibc_version_regexp}" match "${import}")
+    set(version ${CMAKE_MATCH_1})
+
+    if (${version} VERSION_GREATER ${glibc_version})
+      set(too_recent "${too_recent}\n  ${import}")
+    endif ()
+  endforeach ()
+
+  if (too_recent)
+    message(FATAL_ERROR "*** Error: ${${lib_file}} has too-recent import(s):${too_recent}")
   endif ()
 endif ()
 

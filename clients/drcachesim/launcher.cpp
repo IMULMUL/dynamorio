@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2015-2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2015-2026 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -57,8 +57,16 @@
 #include "dr_config.h"
 #include "dr_frontend.h"
 #include "droption.h"
-#include "common/options.h"
-#include "common/utils.h"
+#include "options.h"
+#include "utils.h"
+
+using namespace ::dynamorio::drmemtrace;
+using ::dynamorio::droption::droption_parser_t;
+using ::dynamorio::droption::DROPTION_SCOPE_ALL;
+using ::dynamorio::droption::DROPTION_SCOPE_FRONTEND;
+using ::dynamorio::droption::droption_t;
+
+namespace {
 
 #define FATAL_ERROR(msg, ...)                               \
     do {                                                    \
@@ -67,6 +75,7 @@
         exit(1);                                            \
     } while (0)
 
+#undef NOTIFY
 #define NOTIFY(level, prefix, msg, ...)                              \
     do {                                                             \
         if (op_verbose.get_value() >= level) {                       \
@@ -76,6 +85,7 @@
     } while (0)
 
 static analyzer_t *analyzer;
+static record_analyzer_t *record_analyzer;
 #ifdef UNIX
 static pid_t child;
 #endif
@@ -92,8 +102,14 @@ signal_handler(int sig, siginfo_t *info, void *cxt)
     if (child != 0)
         kill(child, SIGINT);
     // Destroy pipe file if it's open.
-    if (analyzer != NULL)
+    if (analyzer != nullptr) {
         delete analyzer;
+        analyzer = nullptr;
+    }
+    if (record_analyzer != nullptr) {
+        delete record_analyzer;
+        record_analyzer = nullptr;
+    }
     exit(1);
 }
 #endif
@@ -152,12 +168,19 @@ configure_application(char *app_name, char **app_argv, std::string tracer_ops,
     pid = dr_inject_get_process_id(*inject_data);
 
     process = dr_inject_get_image_name(*inject_data);
+
+    // Change the max instrs per bb from DR's default 256 down to 126 so we can
+    // distinguish raw PC records from top-byte-set addresses (see offline_type_t
+    // comments in trace_entry.h).
+    std::string default_dr_ops =
+        std::string("-") + MAX_BB_INSTRS_NAME + " " + std::to_string(MAX_BB_INSTRS);
+    std::string dr_ops = default_dr_ops + " " + op_dr_ops.get_value();
+
     NOTIFY(1, "INFO", "configuring %s pid=" PIDFMT " dr_ops=\"%s\"", process, pid,
-           op_dr_ops.get_value().c_str());
+           dr_ops.c_str());
     if (dr_register_process(process, pid, false /*local*/, op_dr_root.get_value().c_str(),
                             DR_MODE_CODE_MANIPULATION, op_dr_debug.get_value(),
-                            DR_PLATFORM_DEFAULT,
-                            op_dr_ops.get_value().c_str()) != DR_SUCCESS) {
+                            DR_PLATFORM_DEFAULT, dr_ops.c_str()) != DR_SUCCESS) {
         FATAL_ERROR("failed to register DynamoRIO configuration");
     }
     NOTIFY(1, "INFO", "configuring client \"%s\" ops=\"%s\"",
@@ -189,6 +212,8 @@ configure_application(char *app_name, char **app_argv, std::string tracer_ops,
     }
     return true;
 }
+
+} // namespace
 
 int
 _tmain(int argc, const TCHAR *targv[])
@@ -260,7 +285,8 @@ _tmain(int argc, const TCHAR *targv[])
                         droption_parser_t::usage_short(DROPTION_SCOPE_ALL).c_str());
         }
     }
-    have_trace_file = !op_infile.get_value().empty() || !op_indir.get_value().empty();
+    have_trace_file = !op_infile.get_value().empty() || !op_indir.get_value().empty() ||
+        !op_multi_indir.get_value().empty();
 
     if (!have_trace_file) {
         if (app_idx >= argc) {
@@ -278,7 +304,7 @@ _tmain(int argc, const TCHAR *targv[])
 
         if (drfront_is_64bit_app(app_name, &is64, &is32) == DRFRONT_SUCCESS &&
             IF_X64_ELSE(!is64, is64 && !is32)) {
-            /* FIXME i#1703: since drinjectlib doesn't support cross-arch
+            /* XXX i#1703: since drinjectlib doesn't support cross-arch
              * injection (DRi#803), we need to launch the other frontend.
              */
             FATAL_ERROR("application has bitwidth unsupported by this launcher");
@@ -299,17 +325,32 @@ _tmain(int argc, const TCHAR *targv[])
     }
 
     if (op_offline.get_value() && !have_trace_file) {
-        // Initial sanity check: may still be unwritable by this user, but this
-        // serves as at least an existence check.
-        if (!file_is_writable(op_outdir.get_value().c_str())) {
-            FATAL_ERROR("invalid -outdir %s", op_outdir.get_value().c_str());
+        const std::string &outdir = op_outdir.get_value();
+        if (!outdir_is_none(outdir)) {
+            // Initial sanity check: may still be unwritable by this user, but this
+            // serves as at least an existence check.
+            if (!file_is_writable(outdir.c_str())) {
+                FATAL_ERROR("invalid -outdir %s", outdir.c_str());
+            }
         }
     } else {
-        analyzer = new analyzer_multi_t;
-        if (!*analyzer) {
-            std::string error_string_ = analyzer->get_error_string();
-            FATAL_ERROR("failed to initialize analyzer%s%s",
-                        error_string_.empty() ? "" : ": ", error_string_.c_str());
+        // We assume RECORD_FILTER isn't a substring of some other tool.
+        // We use it as the trigger since the other record tool, schedule_stats,
+        // should only be run if RECORD_FILTER is also being run.
+        if (op_tool.get_value().find(RECORD_FILTER) != std::string::npos) {
+            record_analyzer = new record_analyzer_multi_t;
+            if (!*record_analyzer) {
+                std::string error_string_ = record_analyzer->get_error_string();
+                FATAL_ERROR("failed to initialize record analyzer%s%s",
+                            error_string_.empty() ? "" : ": ", error_string_.c_str());
+            }
+        } else {
+            analyzer = new analyzer_multi_t;
+            if (!*analyzer) {
+                std::string error_string_ = analyzer->get_error_string();
+                FATAL_ERROR("failed to initialize analyzer%s%s",
+                            error_string_.empty() ? "" : ": ", error_string_.c_str());
+            }
         }
     }
 
@@ -353,10 +394,18 @@ _tmain(int argc, const TCHAR *targv[])
     }
 
     if (!op_offline.get_value() || have_trace_file) {
-        if (!analyzer->run()) {
-            std::string error_string_ = analyzer->get_error_string();
-            FATAL_ERROR("failed to run analyzer%s%s", error_string_.empty() ? "" : ": ",
-                        error_string_.c_str());
+        if (analyzer != nullptr) {
+            if (!analyzer->run()) {
+                std::string error_string_ = analyzer->get_error_string();
+                FATAL_ERROR("failed to run analyzer%s%s",
+                            error_string_.empty() ? "" : ": ", error_string_.c_str());
+            }
+        } else {
+            if (!record_analyzer->run()) {
+                std::string error_string_ = record_analyzer->get_error_string();
+                FATAL_ERROR("failed to run analyzer%s%s",
+                            error_string_.empty() ? "" : ": ", error_string_.c_str());
+            }
         }
     }
 
@@ -392,6 +441,14 @@ _tmain(int argc, const TCHAR *targv[])
         }
         // release analyzer's space
         delete analyzer;
+    } else if (record_analyzer != nullptr) {
+        if (!record_analyzer->print_stats()) {
+            std::string error_string_ = record_analyzer->get_error_string();
+            FATAL_ERROR("failed to print results%s%s", error_string_.empty() ? "" : ": ",
+                        error_string_.c_str());
+        }
+        // release analyzer's space
+        delete record_analyzer;
     }
 
     sc = drfront_cleanup_args(argv, argc);

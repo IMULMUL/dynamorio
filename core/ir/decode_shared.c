@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2019 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2001-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -42,7 +42,7 @@
 #include "instr.h"
 #include "decode.h"
 
-#if defined(DEBUG) && defined(CLIENT_INTERFACE)
+#ifdef DEBUG
 /* case 10450: give messages to clients */
 /* we can't undef ASSERT b/c of DYNAMO_OPTION */
 #    undef ASSERT_TRUNCATE
@@ -151,6 +151,9 @@ const char *const size_names[] = {
     "OPSZ_4_of_32_evex64",
     "OPSZ_8_of_32_evex64",
     "OPSZ_8x16",
+    "OPSZ_256",
+    "OPSZ_192",
+    "OPSZ_addr",
     "OPSZ_1_of_4",
     "OPSZ_2_of_4",
     "OPSZ_1_of_8",
@@ -174,12 +177,60 @@ const char *const size_names[] = {
     "OPSZ_eighth_16_vex32_evex64",
 };
 
+/* AArch64 SVE or RISC-V Vector's vector length in bits. */
+int vector_length;
+
+/* AArch64 SVE valid vector lengths. */
+int sve_vector_lengths[] = { 128,  256,  384,  512,  640,  768,  896,  1024,
+                             1152, 1280, 1408, 1536, 1664, 1792, 1920, 2048 };
+
+bool
+dr_set_vector_length(int vl)
+{
+#if defined(AARCH64)
+    for (int i = 0; i < sizeof(sve_vector_lengths) / sizeof(sve_vector_lengths[0]); i++) {
+        if (vl == sve_vector_lengths[i]) {
+            vector_length = vl;
+            return true;
+        }
+    }
+#elif defined(RISCV64)
+    const int riscv_vlen_min = 64;
+    const int riscv_vlen_max = 65536;
+    if (vl >= riscv_vlen_min && vl <= riscv_vlen_max && IS_POWER_OF_2(vl)) {
+        vector_length = vl;
+        return true;
+    }
+#endif
+    /* Make unusual values visible in case our internal uses mess up. */
+    ASSERT_CURIOSITY(false);
+    return false;
+}
+
+int
+dr_get_vector_length(void)
+{
+    return vector_length;
+}
+
 /* point at this when you need a canonical invalid instr
  * type is OP_INVALID so can be copied to instr->opcode
  */
 #define xx 0 /* TYPE_NONE */, OPSZ_NA
-const instr_info_t invalid_instr = { OP_INVALID, 0x000000, "(bad)", xx, xx, xx,
-                                     xx,         xx,       0,       0,  0 };
+const instr_info_t invalid_instr = { OP_INVALID,
+                                     0x000000,
+#ifdef X86
+                                     DR_INSTR_CATEGORY_UNCATEGORIZED,
+#endif
+                                     "(bad)",
+                                     xx,
+                                     xx,
+                                     xx,
+                                     xx,
+                                     xx,
+                                     0,
+                                     0,
+                                     0 };
 #undef xx
 
 /* PR 302344: used for shared traces -tracedump_origins where we
@@ -196,13 +247,18 @@ static dr_isa_mode_t initexit_isa_mode = DEFAULT_ISA_MODE_STATIC;
  * mis-interpreting application code.
  */
 bool
-dr_set_isa_mode(dcontext_t *dcontext, dr_isa_mode_t new_mode,
-                dr_isa_mode_t *old_mode_out OUT)
+dr_set_isa_mode(void *drcontext, dr_isa_mode_t new_mode,
+                dr_isa_mode_t *old_mode_out DR_PARAM_OUT)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     dr_isa_mode_t old_mode;
     /* We would disallow but some early init routines need to use global heap */
-    if (dcontext == GLOBAL_DCONTEXT)
+    if (dcontext == GLOBAL_DCONTEXT) {
         dcontext = get_thread_private_dcontext();
+        /* If we're pre-thread-init, go back to GLOBAL_DCONTEXT. */
+        if (dcontext == NULL)
+            dcontext = GLOBAL_DCONTEXT;
+    }
     /* Support GLOBAL_DCONTEXT or NULL for standalone/static modes */
     if (dcontext == NULL || dcontext == GLOBAL_DCONTEXT) {
 #if !defined(STANDALONE_DECODER)
@@ -227,8 +283,9 @@ dr_set_isa_mode(dcontext_t *dcontext, dr_isa_mode_t new_mode,
  * that flag.
  */
 dr_isa_mode_t
-dr_get_isa_mode(dcontext_t *dcontext)
+dr_get_isa_mode(void *drcontext)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
 #if !defined(STANDALONE_DECODER) && defined(DEBUG)
     dcontext_t *orig_dcontext = dcontext;
 #endif

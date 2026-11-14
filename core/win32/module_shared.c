@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2010-2021 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2026 Google, Inc.  All rights reserved.
  * Copyright (c) 2008 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -46,13 +46,13 @@
 
 #include "configure.h"
 #if defined(NOT_DYNAMORIO_CORE)
+#    include "dr_project_wide_defines.h"
 #    define ASSERT(x)
 #    define ASSERT_NOT_REACHED()
 #    define ASSERT_NOT_IMPLEMENTED(x)
 #    define DODEBUG(x)
 #    define DOCHECK(n, x)
 #    define DECLARE_NEVERPROT_VAR(var, ...) var = __VA_ARGS__;
-#    define ALIGN_BACKWARD(x, alignment) (((ULONG_PTR)x) & (~((alignment)-1)))
 #    define PAGE_SIZE 4096
 #else
 /* we include globals.h mainly for ASSERT, even though we're
@@ -64,9 +64,7 @@
 #    if !defined(NOT_DYNAMORIO_CORE_PROPER)
 #        include "../module_shared.h" /* for is_in_code_section() */
 #    endif
-#    ifdef CLIENT_INTERFACE
-#        include "instrument.h" /* dr_lookup_module_by_name */
-#    endif
+#    include "instrument.h" /* dr_lookup_module_by_name */
 #endif
 
 #include "ntdll.h"
@@ -95,8 +93,7 @@ is_readable_without_exception(const byte *pc, size_t size);
 
 #define MAX_FUNCNAME_SIZE 128
 
-#if defined(CLIENT_INTERFACE) && !defined(NOT_DYNAMORIO_CORE) && \
-    !defined(NOT_DYNAMORIO_CORE_PROPER)
+#if !defined(NOT_DYNAMORIO_CORE) && !defined(NOT_DYNAMORIO_CORE_PROPER)
 #    include "instrument.h"
 typedef struct _pe_symbol_export_iterator_t {
     dr_symbol_export_t info;
@@ -121,7 +118,7 @@ typedef struct _pe_symbol_export_iterator_t {
  * from pc to pc+size-1 are readable and that reading from there won't
  * generate an exception.  this is a stronger check than
  * !not_readable() below.
- * FIXME : beware of multi-thread races, just because this returns true,
+ * XXX : beware of multi-thread races, just because this returns true,
  * doesn't mean another thread can't make the region unreadable between the
  * check here and the actual read later.  See d_r_safe_read() as an alt.
  */
@@ -163,7 +160,7 @@ is_readable_without_exception(const byte *pc, size_t size)
  * Handles both 32-bit and 64-bit remote processes.
  */
 uint64
-get_remote_process_entry(HANDLE process_handle, OUT bool *x86_code)
+get_remote_process_entry(HANDLE process_handle, DR_PARAM_OUT bool *x86_code)
 {
     uint64 peb_base;
     /* Handle the two possible widths of peb.ImageBaseAddress: */
@@ -226,7 +223,7 @@ get_module_exports_directory_common(app_pc base_addr,
 #endif
         expdir = OPT_HDR(nt, DataDirectory) + IMAGE_DIRECTORY_ENTRY_EXPORT;
 
-        /* avoid preinject link issues: we don't have is_readable_pe_base */
+    /* avoid preinject link issues: we don't have is_readable_pe_base */
 #if !defined(NOT_DYNAMORIO_CORE_PROPER) && !defined(NOT_DYNAMORIO_CORE)
     /* callers should have done this in release builds */
     ASSERT(is_readable_pe_base(base_addr));
@@ -337,12 +334,13 @@ get_module_exports_directory_check_common(app_pc base_addr,
  * Only one of name and ordinal should be specified: the other should be
  * NULL (name) or UINT_MAX (ordinal).
  * NOTE - will return NULL for forwarded exports, exports pointing outside of
- * the module and for exports not in a code section (FIXME - is this the
+ * the module and for exports not in a code section (XXX - is this the
  * behavior we want?). Name is case insensitive.
  */
 static generic_func_t
 get_proc_address_common(module_base_t lib, const char *name,
-                        uint ordinal _IF_NOT_X64(bool ldr64), const char **forwarder OUT)
+                        uint ordinal _IF_NOT_X64(bool ldr64),
+                        const char **forwarder DR_PARAM_OUT)
 {
     app_pc module_base;
     size_t exports_size;
@@ -367,10 +365,10 @@ get_proc_address_common(module_base_t lib, const char *name,
     if (lib == NULL || (ordinal == UINT_MAX && (name == NULL || *name == '\0')))
         return NULL;
 
-        /* avoid non-core issues: we don't have get_allocation_size or is_readable_pe_base
-         */
+    /* avoid non-core issues: we don't have get_allocation_size or is_readable_pe_base
+     */
 #if !defined(NOT_DYNAMORIO_CORE_PROPER) && !defined(NOT_DYNAMORIO_CORE)
-    /* FIXME - get_allocation_size and is_readable_pe_base are expensive
+    /* XXX - get_allocation_size and is_readable_pe_base are expensive
      * operations, we could put the onus on the caller to only pass in a
      * valid module_handle_t/pe_base and just assert instead if performance of
      * this routine becomes a concern, esp. since the caller has likely
@@ -436,7 +434,7 @@ get_proc_address_common(module_base_t lib, const char *name,
          */
         ord -= exports->Base;
     } else {
-        /* FIXME - linear walk, if this routine becomes performance critical we
+        /* XXX - linear walk, if this routine becomes performance critical we
          * we should use a binary search. */
         bool match = false;
         for (i = 0; i < exports->NumberOfNames; i++) {
@@ -444,7 +442,7 @@ get_proc_address_common(module_base_t lib, const char *name,
             ASSERT_CURIOSITY((app_pc)export_name > module_base && /* sanity check */
                                  (app_pc)export_name < module_base + module_size ||
                              EXEMPT_TEST("win32.partial_map.exe"));
-            /* FIXME - xref case 9717, we haven't verified that export_name string is
+            /* XXX - xref case 9717, we haven't verified that export_name string is
              * safely readable (might not be the case for improperly formed or partially
              * mapped module) and the try will only protect us if we have a thread_private
              * dcontext. Could use is_string_readable_without_exception(), but that may be
@@ -482,7 +480,7 @@ get_proc_address_common(module_base_t lib, const char *name,
     /* avoid non-core issues: we don't have module_size */
 #if !defined(NOT_DYNAMORIO_CORE_PROPER) && !defined(NOT_DYNAMORIO_CORE)
     if (func < module_base || func >= module_base + module_size) {
-        /* FIXME - export isn't in the module, should we still return
+        /* XXX - export isn't in the module, should we still return
          * it?  Will shimeng.dll or the like ever do this to replace
          * a function?  For now we return NULL. Xref case 9717, can also
          * happen for a partial map in which case NULL is the right thing
@@ -503,7 +501,7 @@ get_proc_address_common(module_base_t lib, const char *name,
     }
 #endif
     if (func >= (app_pc)exports && func < (app_pc)exports + exports_size) {
-        /* FIXME - is forwarded function, should we still return it
+        /* XXX - is forwarded function, should we still return it
          * or return the target? Check - what does GetProcAddress do?
          * For now we return NULL. Looking up the target would require
          * a get_module_handle call which might not be safe here.
@@ -520,17 +518,6 @@ get_proc_address_common(module_base_t lib, const char *name,
     }
     /* avoid non-core issues: we don't have is_in_code_section */
 #if !defined(NOT_DYNAMORIO_CORE_PROPER) && !defined(NOT_DYNAMORIO_CORE)
-#    ifndef CLIENT_INTERFACE
-    /* CLIENT_INTERFACE uses a data export for versioning (PR 250952) */
-    /* FIXME - this check is also somewhat costly. */
-    if (!is_in_code_section(module_base, func, NULL, NULL)) {
-        /* FIXME - export isn't in a code section. Prob. a data
-         * export?  For now we return NULL as all current users are
-         * going to call or hook the returned value. */
-        ASSERT_CURIOSITY(false && "get_proc_addr export not in code section");
-        return NULL;
-    }
-#    endif
 #endif
     /* get around warnings converting app_pc to generic_func_t */
     return convert_data_to_function(func);
@@ -562,20 +549,21 @@ d_r_get_proc_address(module_base_t lib, const char *name)
 
 /* could be linked w/ non-core but only used by loader.c so far */
 generic_func_t
-get_proc_address_ex(module_base_t lib, const char *name, const char **forwarder OUT)
+get_proc_address_ex(module_base_t lib, const char *name,
+                    const char **forwarder DR_PARAM_OUT)
 {
     return get_proc_address_common(lib, name, UINT_MAX _IF_NOT_X64(false), forwarder);
 }
 
 /* could be linked w/ non-core but only used by loader.c so far */
 generic_func_t
-get_proc_address_by_ordinal(module_base_t lib, uint ordinal, const char **forwarder OUT)
+get_proc_address_by_ordinal(module_base_t lib, uint ordinal,
+                            const char **forwarder DR_PARAM_OUT)
 {
     return get_proc_address_common(lib, NULL, ordinal _IF_NOT_X64(false), forwarder);
 }
 
-#    if defined(CLIENT_INTERFACE) && !defined(NOT_DYNAMORIO_CORE) && \
-        !defined(NOT_DYNAMORIO_CORE_PROPER)
+#    if !defined(NOT_DYNAMORIO_CORE) && !defined(NOT_DYNAMORIO_CORE_PROPER)
 
 generic_func_t
 get_proc_address_resolve_forward(module_base_t lib, const char *name)
@@ -718,14 +706,14 @@ dr_symbol_export_iterator_stop(dr_symbol_export_iterator_t *dr_iter)
     global_heap_free(iter, sizeof(*iter) HEAPACCT(ACCT_CLIENT));
 }
 
-#    endif /* CLIENT_INTERFACE */
+#    endif /* core proper */
 
 /* returns NULL if no loader module is found
  * N.B.: walking loader data structures at random times is dangerous! See
  * get_ldr_module_by_pc in module.c for code to grab the ldr lock (which is
  * also unsafe).  Here we presume that we already own the ldr lock and that
  * the ldr list is consistent, which should be the case for preinject (the only
- * user).  FIXME stick this in module.c with get_ldr_module_by_pc, would need
+ * user).  XXX stick this in module.c with get_ldr_module_by_pc, would need
  * to get module.c compiled into preinjector which is a significant hassle.
  */
 LDR_MODULE *
@@ -793,7 +781,7 @@ ldr_module_statically_linked(LDR_MODULE *mod)
     win8plus = (get_os_version() >= WINDOWS_VERSION_8);
 #    endif
     if (win8plus) {
-        return (mod->LoadCount == -1 || TEST(LDR_PROCESS_STATIC_IMPORT, mod->Flags) ||
+        return (mod->LoadCount == -1 || TESTANY(LDR_PROCESS_STATIC_IMPORT, mod->Flags) ||
                 mod->LoadReason == LoadReasonStaticDependency ||
                 mod->LoadReason == LoadReasonStaticForwarderDependency);
     } else
@@ -995,7 +983,7 @@ get_ldr_module_64(const wchar_t *name, uint64 base, LDR_MODULE_64 *out)
  * get_ldr_module_by_pc in module.c for code to grab the ldr lock (which is
  * also unsafe).  Here we presume that we already own the ldr lock and that
  * the ldr list is consistent, which should be the case for preinject (the only
- * user).  FIXME stick this in module.c with get_ldr_module_by_pc, would need
+ * user).  XXX stick this in module.c with get_ldr_module_by_pc, would need
  * to get module.c compiled into preinjector which is a significant hassle.
  *
  * This is now used by more than just preinjector, and it's up to the caller
@@ -1157,10 +1145,10 @@ load_library_64(const char *path)
             /* The WOW64 x64 loader on Vista+ does not seem to
              * call any entry points so we do so here.
              *
-             * FIXME i#979: we should walk the Ldr list afterward to see what
+             * XXX i#979: we should walk the Ldr list afterward to see what
              * dependent libs were loaded so we can call their entry points.
              *
-             * FIXME i#979: we should check for the Ldr entry existing already to
+             * XXX i#979: we should check for the Ldr entry existing already to
              * avoid calling the entry point twice!
              */
             LDR_MODULE_64 mod;
@@ -1212,12 +1200,19 @@ nt_get_context64_size(void)
         ASSERT(ntdll64 != 0);
         ntdll64_RtlGetExtendedContextLength =
             get_proc_address_64(ntdll64, "RtlGetExtendedContextLength");
-        invoke_func64_t args = { ntdll64_RtlGetExtendedContextLength, CONTEXT_XSTATE,
-                                 len_param };
-        NTSTATUS res = switch_modes_and_call(&args);
-        ASSERT(NT_SUCCESS(res));
-        /* Add 16 so we can align it forward to 16. */
-        context64_size = len + 16;
+        bool extended = false;
+        if (ntdll64_RtlGetExtendedContextLength != 0) {
+            invoke_func64_t args = { ntdll64_RtlGetExtendedContextLength, CONTEXT_XSTATE,
+                                     len_param };
+            extended = NT_SUCCESS(switch_modes_and_call(&args));
+        }
+        if (extended && len > 0) {
+            /* Add 16 so we can align it forward to 16. */
+            context64_size = len + 16;
+        } else {
+            /* Fall back to plain CONTEXT_64 size; add 16 to align forward to 16. */
+            context64_size = sizeof(CONTEXT_64) + 16;
+        }
     }
     return context64_size;
 }
@@ -1341,6 +1336,48 @@ read_remote_maybe64(HANDLE process, uint64 addr, size_t bufsz, void *buf)
         num_read == bufsz;
 }
 
+uint64
+find_remote_dll_base(HANDLE phandle, bool find64bit, char *dll_name)
+{
+    MEMORY_BASIC_INFORMATION64 mbi;
+    uint64 got;
+    NTSTATUS res;
+    uint64 addr = 0;
+    char name[MAXIMUM_PATH];
+    do {
+        res = remote_query_virtual_memory_maybe64(phandle, addr, &mbi, sizeof(mbi), &got);
+        if (got != sizeof(mbi) || !NT_SUCCESS(res))
+            break;
+#    if VERBOSE
+        print_file(STDERR, "0x%I64x-0x%I64x type=0x%x state=0x%x\n", mbi.BaseAddress,
+                   mbi.BaseAddress + mbi.RegionSize, mbi.Type, mbi.State);
+#    endif
+        if (mbi.Type == MEM_IMAGE && mbi.BaseAddress == mbi.AllocationBase) {
+            bool is_64;
+            if (get_remote_dll_short_name(phandle, mbi.BaseAddress, name,
+                                          BUFFER_SIZE_ELEMENTS(name), &is_64)) {
+#    if VERBOSE
+                print_file(STDERR, "found |%s| @ 0x%I64x 64=%d\n", name, mbi.BaseAddress,
+                           is_64);
+#    endif
+                if (_strcmpi(name, dll_name) == 0 && BOOLS_MATCH(find64bit, is_64))
+                    return mbi.BaseAddress;
+            }
+        }
+        if (addr + mbi.RegionSize < addr)
+            break;
+        /* XXX - this check is needed because otherwise, for 32-bit targets on a 64
+         * bit machine, this loop doesn't return if the dll is not loaded.
+         * When addr passes 0x800000000000 remote_query_virtual_memory_maybe64
+         * returns the previous mbi (ending at 0x7FFFFFFF0000).
+         * For now just return if the addr is not inside the mbi region. */
+        if (mbi.BaseAddress + mbi.RegionSize < addr)
+            break;
+        addr += mbi.RegionSize;
+    } while (true);
+    return 0;
+}
+
 /* Handles 32-bit or 64-bit remote processes.
  * Ignores forwarders and ordinals.
  */
@@ -1439,8 +1476,8 @@ get_remote_proc_address(HANDLE process, uint64 remote_base, const char *name)
 
 /* Handles 32-bit or 64-bit remote processes. */
 bool
-get_remote_dll_short_name(HANDLE process, uint64 remote_base, OUT char *name,
-                          size_t name_len, OUT bool *is_64)
+get_remote_dll_short_name(HANDLE process, uint64 remote_base, DR_PARAM_OUT char *name,
+                          size_t name_len, DR_PARAM_OUT bool *is_64)
 {
     uint64 lib = remote_base;
     size_t exports_size;

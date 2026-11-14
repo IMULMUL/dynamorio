@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2021 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2007-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -96,7 +96,7 @@
 #define NONE SYSCALL_NOT_PRESENT
 /* to make some system calls actionable only in DEBUG (because all we do is log) */
 #define ACTION_LOG IF_DEBUG_ELSE(true, false)
-#define ACTION_CLIENT IF_CLIENT_INTERFACE_ELSE(true, false)
+#define ACTION_CLIENT true
 /* clang-format off */
 /*                                                                                                                 vista         vista
  *                                                                                     xp-w7                vista   x64   vista   x64                                      w8.1    w8.1  w8.1    w10     w10   w10    w11     w11  w11     w12     w12  w12     w13     w13  w13     w14     w14  w14   w15     w15  w15
@@ -192,13 +192,13 @@ SYSCALL(TerminateJobObject,           true,     2, 0x08, NONE, NONE, NONE, 0xdf,
      *   (NtContinue is already up above)
      *   plus grep 'Alert|Wait' in ntdll.h (ZwDelayExecution)
      */
-    /* FIXME - don't think all of these are in fact alertable, plus many file
+    /* XXX - don't think all of these are in fact alertable, plus many file
      * io syscalls are alertable depending on the options passed when the file
      * handle was created.  There also may other alertable system calls we
      * don't know about and since we don't even use ignore syscalls (with no
      * plan to bring it back) having them in our arrays doesn't serve much
      * purpose. */
-    /* FIXME: NT4.0 (only) has two more exported *Wait* routines,
+    /* XXX: NT4.0 (only) has two more exported *Wait* routines,
      * NtSetHighWaitLowThread and NtSetLowWaitHighThread, that each
      * have a gap in the system call numbering, but in the ntdll dump
      * they look like int 2b and 2c, resp.  Now, Inside Win2K lists int 2c as

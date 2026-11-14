@@ -1,5 +1,5 @@
 # **********************************************************
-# Copyright (c) 2010-2020 Google, Inc.    All rights reserved.
+# Copyright (c) 2010-2025 Google, Inc.    All rights reserved.
 # Copyright (c) 2009-2010 VMware, Inc.    All rights reserved.
 # **********************************************************
 
@@ -29,7 +29,7 @@
 # OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
 # DAMAGE.
 
-cmake_minimum_required(VERSION 3.7)
+cmake_minimum_required(VERSION 3.14)
 
 include(../../make/policies.cmake NO_POLICY_SCOPE)
 
@@ -106,12 +106,8 @@ if (WIN32)
   if (dbghelp_path)
     DR_install(FILES "${dbghelp_path}" DESTINATION ${INSTALL_CLIENTS_BIN})
   endif ()
-  # for build dir
-  add_custom_command(TARGET drcov2lcov POST_BUILD
-    COMMAND ${CMAKE_COMMAND}
-    ARGS -E copy ${DR_LIBRARY_OUTPUT_DIRECTORY}/dynamorio.dll
-    ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/dynamorio.dll
-    VERBATIM)
+  # We need a copy of DR for the build dir:
+  add_dependencies(drcov2lcov client_dr_copy)
 endif (WIN32)
 
 set(INSTALL_DRCOV_CONFIG ${INSTALL_CLIENTS_BASE})
@@ -185,9 +181,9 @@ add_custom_command(
   drcov2lcov
   COMMAND ${CMAKE_COMMAND}
   ARGS -D src=${srcdoc}
-       -D dst=${gendoc}
-       -D CMAKE_CROSSCOMPILING=${CMAKE_CROSSCOMPILING}
-       -D prog=$<TARGET_FILE:drcov2lcov>
-       -D prog_arg=-help_html
-       -P ${CMAKE_CURRENT_SOURCE_DIR}/../common/gendocs.cmake
+      -D dst=${gendoc}
+      -D CMAKE_CROSSCOMPILING=${CMAKE_CROSSCOMPILING}
+      -D prog=$<TARGET_FILE:drcov2lcov>
+      -D prog_arg=-help_html
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/../common/gendocs.cmake
   VERBATIM)

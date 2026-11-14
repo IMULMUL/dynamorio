@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2013-2019 Google, Inc.  All rights reserved.
+ * Copyright (c) 2013-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -38,7 +38,7 @@
 #include "module.h"
 #include "module_private.h"
 #include "instr.h"
-#include "instr_create.h"
+#include "instr_create_shared.h"
 #include "instrument.h" /* instrlist_meta_append */
 #include "decode.h"
 #include "disassemble.h"
@@ -150,10 +150,14 @@ find_dl_fixup(dcontext_t *dcontext, app_pc resolver)
     instr_free(dcontext, &instr);
     return fixup;
 #elif defined(AARCHXX)
-    /* FIXME i#1551, i#1569: NYI on ARM/AArch64 */
+    /* TODO i#1551, i#1569: NYI on ARM/AArch64 */
     ASSERT_NOT_IMPLEMENTED(false);
     return NULL;
-#endif /* X86/ARM */
+#elif defined(RISCV64)
+    /* XXX i#3544: Not implemented */
+    ASSERT_NOT_IMPLEMENTED(false);
+    return NULL;
+#endif /* X86/ARM/RISCV64 */
 }
 
 /* Creates a template stub copied repeatedly for each stub we need to create.
@@ -187,7 +191,7 @@ initialize_plt_stub_template(void)
             instrlist_append(ilist, INSTR_CREATE_jmp(dc, opnd_create_pc(0)));
         });
 #elif defined(ARM)
-    /* FIXME i#1551: NYI on ARM */
+    /* TODO i#1551: NYI on ARM */
     ASSERT_NOT_IMPLEMENTED(false);
 #endif
     next_pc =
@@ -285,9 +289,10 @@ create_opt_plt_stub(app_pc plt_tgt, app_pc stub_pc)
                        "kstat is not compatible with ");
 
     /* mov plt_tgt => XAX */
-    instr =
-        XINST_CREATE_load_int(dcontext, opnd_create_reg(IF_X86_ELSE(REG_XAX, DR_REG_R0)),
-                              OPND_CREATE_INTPTR(plt_tgt));
+    instr = XINST_CREATE_load_int(
+        dcontext,
+        opnd_create_reg(IF_X86_ELSE(REG_XAX, IF_RISCV64_ELSE(DR_REG_A0, DR_REG_R0))),
+        OPND_CREATE_INTPTR(plt_tgt));
     pc = instr_encode(dcontext, instr, stub_pc);
     instr_destroy(dcontext, instr);
     if (pc == NULL)
@@ -419,7 +424,7 @@ module_change_hooks(module_area_t *ma, bool add_hooks, bool at_map)
     bool got_unprotected = false;
     app_pc *pltgot;
 
-    /* FIXME: We can't handle un-relocated modules yet. */
+    /* XXX: We can't handle un-relocated modules yet. */
     ASSERT_CURIOSITY(!at_map && "hooking at map NYI");
     if (add_hooks && at_map)
         return;
@@ -711,7 +716,7 @@ static app_pc
 special_ret_stub_create(dcontext_t *dcontext, app_pc tgt)
 {
     instrlist_t ilist;
-    app_pc stub_pc, pc;
+    app_pc stub_pc;
 
     /* alloc and encode special ret stub */
     stub_pc = special_heap_alloc(ret_stub_heap);
@@ -730,7 +735,7 @@ special_ret_stub_create(dcontext_t *dcontext, app_pc tgt)
     APP(&ilist,
         XINST_CREATE_jump(dcontext,
                           opnd_create_pc(get_native_ret_ibl_xfer_entry(dcontext))));
-    pc = instrlist_encode(dcontext, &ilist, stub_pc, false);
+    instrlist_encode(dcontext, &ilist, stub_pc, false);
     instrlist_clear(dcontext, &ilist);
 
     return (app_pc)native_module_htable_add(native_ret_table, ret_stub_heap,
@@ -775,7 +780,7 @@ native_module_at_runtime_resolve_ret(app_pc xsp, int ret_imm)
     app_pc call_tgt, ret_tgt;
 
     if (!d_r_safe_read(xsp, sizeof(app_pc), &call_tgt) ||
-        !d_r_safe_read(xsp + ret_imm + sizeof(XSP_SZ), sizeof(app_pc), &ret_tgt)) {
+        !d_r_safe_read(xsp + ret_imm + XSP_SZ, sizeof(app_pc), &ret_tgt)) {
         ASSERT(false && "fail to read app stack!\n");
         return;
     }
@@ -784,11 +789,11 @@ native_module_at_runtime_resolve_ret(app_pc xsp, int ret_imm)
         dcontext_t *dcontext = get_thread_private_dcontext();
         app_pc stub_pc = native_module_get_ret_stub(dcontext, ret_tgt);
         DEBUG_DECLARE(bool ok =)
-        safe_write_ex(xsp + ret_imm + sizeof(XSP_SZ), sizeof(app_pc), &stub_pc,
+        safe_write_ex(xsp + ret_imm + XSP_SZ, sizeof(app_pc), &stub_pc,
                       NULL /* bytes written */);
         ASSERT(stub_pc != NULL && ok);
         LOG(THREAD, LOG_ALL, 3, "replace return target " PFX " with " PFX " at " PFX "\n",
-            ret_tgt, stub_pc, (xsp + ret_imm + sizeof(XSP_SZ)));
+            ret_tgt, stub_pc, (xsp + ret_imm + XSP_SZ));
     }
 }
 
@@ -845,7 +850,7 @@ native_exec_replace_next_tag(dcontext_t *dcontext)
         instr_free(dcontext, &instr);
         return true;
 #elif defined(ARM)
-        /* FIXME i#1551: NYI on ARM */
+        /* TODO i#1551: NYI on ARM */
         ASSERT_NOT_REACHED();
 #endif
     }

@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2016-2021 Google, Inc.   All rights reserved.
+ * Copyright (c) 2016-2025 Google, Inc.   All rights reserved.
  * **********************************************************/
 
 /*
@@ -33,9 +33,7 @@
 /* DynamoRIO Code Coverage Library */
 
 #ifndef _DRCOVLIB_H_
-#define _DRCOVLIB_H_ 1
-
-#include "drmgr.h"
+#define _DRCOVLIB_H_
 
 /**
  * @file drcovlib.h
@@ -49,7 +47,7 @@ extern "C" {
 /**
  * \addtogroup drcovlib Code Coverage Library
  */
-/*@{*/ /* begin doxygen group */
+/**@{*/ /* begin doxygen group */
 
 /** Success code for each drcovlib operation */
 typedef enum {
@@ -113,8 +111,13 @@ typedef struct _drcovlib_options_t {
  * make drcovlib usable in standalone mode.
  */
 
-/* file format version */
-#define DRCOV_VERSION 2
+/* File format version. */
+#define DRCOV_VERSION_MODULE_OFFSETS 2
+/* Version 3 changes module offsets to be offsets from the module segment,
+ * rather than the whole module base as in version 2.
+ */
+#define DRCOV_VERSION_SEGMENT_OFFSETS 3
+#define DRCOV_VERSION DRCOV_VERSION_SEGMENT_OFFSETS
 
 /* i#1532: drsyms can't mix arch for ELF */
 #ifdef LINUX
@@ -137,7 +140,10 @@ typedef struct _drcovlib_options_t {
 
 /* Data structure for the coverage info itself */
 typedef struct _bb_entry_t {
-    uint start; /* offset of bb start from the image base */
+    /* The offset of the bb start from the containing segment base.
+     * We do not support a single module segment larger than 4GB.
+     */
+    uint start;
     ushort size;
     ushort mod_id;
 } bb_entry_t;
@@ -188,7 +194,7 @@ DR_EXPORT
  * @return whether successful or an error code on failure.
  */
 drcovlib_status_t
-drcovlib_logfile(void *drcontext, OUT const char **path);
+drcovlib_logfile(void *drcontext, DR_PARAM_OUT const char **path);
 
 DR_EXPORT
 /**
@@ -256,8 +262,16 @@ typedef struct _drmodtrack_info_t {
     uint index;
     /**
      * The offset of this segment from the beginning of this backing file.
+     * If this field is not present in an older-version offline file, it will be
+     * filled in with -1.  On Windows this field is always 0.
      */
     uint64 offset;
+    /**
+     * The preferred base address of this segment of the module.
+     * If this field is not present in an older-version offline file, it will be
+     * filled in with -1.
+     */
+    app_pc preferred_base;
 } drmodtrack_info_t;
 
 DR_EXPORT
@@ -276,14 +290,36 @@ DR_EXPORT
 /**
  * Returns the base address in \p mod_base and the unique index identifier in \p
  * mod_index for the module that contains \p pc.  If there is no such module,
- * returns DRCOVLIB_ERROR_NOT_FOUND.  For modules that containing multiple
+ * returns DRCOVLIB_ERROR_NOT_FOUND.  For modules that contain multiple
  * non-contiguous mapped segments, each segment has its own unique identifier, and
  * this routine returns the appropriate identifier, but \p mod_base contains the
  * lowest address of any segment in the module, not the start address of the
- * segment that contains pc.
+ * segment that contains pc: use drmodtrack_lookup_segment() to obtain the segment
+ * base address.
  */
 drcovlib_status_t
-drmodtrack_lookup(void *drcontext, app_pc pc, OUT uint *mod_index, OUT app_pc *mod_base);
+drmodtrack_lookup(void *drcontext, app_pc pc, DR_PARAM_OUT uint *mod_index,
+                  DR_PARAM_OUT app_pc *mod_base);
+
+DR_EXPORT
+/**
+ * Returns the segment base address in \p segment_base and the unique
+ * segment index identifier in \p segment_index for the module segment
+ * that contains \p pc.  If there is no such module, returns
+ * DRCOVLIB_ERROR_NOT_FOUND.
+ */
+drcovlib_status_t
+drmodtrack_lookup_segment(void *drcontext, app_pc pc, DR_PARAM_OUT uint *segment_index,
+                          DR_PARAM_OUT app_pc *segment_base);
+
+DR_EXPORT
+/**
+ * Returns the base address in \p mod_base for the index identifier \p
+ * mod_index that was previously returned by drmodtrack_lookup().
+ */
+drcovlib_status_t
+drmodtrack_lookup_pc_from_index(void *drcontext, uint mod_index,
+                                DR_PARAM_OUT app_pc *mod_base);
 
 DR_EXPORT
 /**
@@ -301,7 +337,7 @@ DR_EXPORT
  * If the buffer is too small, returns DRCOVLIB_ERROR_BUF_TOO_SMALL.
  */
 drcovlib_status_t
-drmodtrack_dump_buf(char *buf, size_t size, OUT size_t *wrote);
+drmodtrack_dump_buf(char *buf, size_t size, DR_PARAM_OUT size_t *wrote);
 
 DR_EXPORT
 /**
@@ -330,8 +366,8 @@ DR_EXPORT
  * from 0 to the number of modules minus one as the \p index.
  */
 drcovlib_status_t
-drmodtrack_offline_read(file_t file, const char *map, OUT const char **next_line,
-                        OUT void **handle, OUT uint *num_mods);
+drmodtrack_offline_read(file_t file, const char *map, DR_PARAM_OUT const char **next_line,
+                        DR_PARAM_OUT void **handle, DR_PARAM_OUT uint *num_mods);
 
 DR_EXPORT
 /**
@@ -343,7 +379,7 @@ DR_EXPORT
  * path's containing buffer size is limited to MAXIMUM_PATH.
  */
 drcovlib_status_t
-drmodtrack_offline_lookup(void *handle, uint index, OUT drmodtrack_info_t *info);
+drmodtrack_offline_lookup(void *handle, uint index, DR_PARAM_OUT drmodtrack_info_t *info);
 
 DR_EXPORT
 /**
@@ -356,7 +392,8 @@ DR_EXPORT
  * set \p wrote).
  */
 drcovlib_status_t
-drmodtrack_offline_write(void *handle, char *buf, size_t buf_size, OUT size_t *wrote);
+drmodtrack_offline_write(void *handle, char *buf, size_t buf_size,
+                         DR_PARAM_OUT size_t *wrote);
 
 DR_EXPORT
 /**
@@ -389,10 +426,11 @@ DR_EXPORT
 drcovlib_status_t
 drmodtrack_add_custom_data(void *(*load_cb)(module_data_t *module, int seg_idx),
                            int (*print_cb)(void *data, char *dst, size_t max_len),
-                           const char *(*parse_cb)(const char *src, OUT void **data),
+                           const char *(*parse_cb)(const char *src,
+                                                   DR_PARAM_OUT void **data),
                            void (*free_cb)(void *data));
 
-/*@}*/ /* end doxygen group */
+/**@}*/ /* end doxygen group */
 
 #ifdef __cplusplus
 }

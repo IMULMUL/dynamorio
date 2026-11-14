@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2014-2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2014-2026 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -31,11 +31,13 @@
  */
 
 #include "../globals.h"
+#include "../isa_regdeps/decode.h"
+#include "encode_api.h"
 #include "instr.h"
 #include "decode.h"
 #include "decode_private.h"
 #include "decode_fast.h" /* ensure we export decode_next_pc, decode_sizeof */
-#include "instr_create.h"
+#include "instr_create_shared.h"
 #include "disassemble.h"
 
 /* ARM decoder.
@@ -53,11 +55,11 @@
  *   widely varying unpredictable conditions when pc or lr is used:
  *   xref notes at the top of table_a32_pred.c.
  */
-/* FIXME i#1569: add A64 support: for now just A32 */
+/* XXX i#1569: add A64 support: for now just A32 */
 
 /* Global data structure to track the decode state,
  * it should be only used for drdecodelib or early init/late exit.
- * FIXME i#1595: add multi-dcontext support to drdecodelib.
+ * XXX i#1595: add multi-dcontext support to drdecodelib.
  */
 static decode_state_t global_decode_state;
 
@@ -172,7 +174,7 @@ decode_in_it_block(decode_state_t *state, app_pc pc, decode_info_t *di)
 bool
 is_isa_mode_legal(dr_isa_mode_t mode)
 {
-    return (mode == DR_ISA_ARM_THUMB || DR_ISA_ARM_A32);
+    return (mode == DR_ISA_ARM_THUMB || mode == DR_ISA_ARM_A32 || mode == DR_ISA_REGDEPS);
 }
 
 /* We need to call canonicalize_pc_target() on all next_tag-writing
@@ -183,7 +185,7 @@ is_isa_mode_legal(dr_isa_mode_t mode)
 app_pc
 canonicalize_pc_target(dcontext_t *dcontext, app_pc pc)
 {
-    if (TEST(0x1, (ptr_uint_t)pc)) {
+    if (TESTANY(0x1, (ptr_uint_t)pc)) {
         dr_isa_mode_t old_mode;
         dr_set_isa_mode(dcontext, DR_ISA_ARM_THUMB, &old_mode);
         DOLOG(2, LOG_TOP, {
@@ -251,7 +253,7 @@ decode_cur_pc(app_pc instr_pc, dr_isa_mode_t mode, uint opcode, instr_t *instr)
         } else
             return instr_pc + THUMB_CUR_PC_OFFS;
     } else {
-        /* FIXME i#1569: A64 NYI */
+        /* TODO i#1569: A64 NYI */
         ASSERT_NOT_IMPLEMENTED(false);
         return instr_pc;
     }
@@ -445,7 +447,7 @@ decode_immed(decode_info_t *di, uint start_bit, opnd_size_t opsize, bool is_sign
     if (is_signed) {
         ptr_uint_t top_bit = (1 << (opnd_size_in_bits(opsize) - 1));
         val = (ptr_int_t)(int)((di->instr_word >> start_bit) & mask);
-        if (TEST(top_bit, val))
+        if (TESTANY(top_bit, val))
             val |= (~mask);
     } else
         val = (ptr_int_t)(ptr_uint_t)((di->instr_word >> start_bit) & mask);
@@ -455,7 +457,7 @@ decode_immed(decode_info_t *di, uint start_bit, opnd_size_t opsize, bool is_sign
 /* This routine creates the decoded operand(s) itself */
 static bool
 decode_SIMD_modified_immed(decode_info_t *di, byte optype, opnd_t *array,
-                           uint *counter INOUT)
+                           uint *counter DR_PARAM_OUT)
 {
     ptr_uint_t val; /* unsigned for logical shifts */
     /* This is a SIMD modified immedate: an 8-bit value with a 4-bit
@@ -523,14 +525,14 @@ decode_SIMD_modified_immed(decode_info_t *di, byte optype, opnd_t *array,
          */
         uint high = 0, low = 0;
         uint64 val64;
-        high |= TEST(0x80, val) ? 0xff000000 : 0;
-        high |= TEST(0x40, val) ? 0x00ff0000 : 0;
-        high |= TEST(0x20, val) ? 0x0000ff00 : 0;
-        high |= TEST(0x10, val) ? 0x000000ff : 0;
-        low |= TEST(0x08, val) ? 0xff000000 : 0;
-        low |= TEST(0x04, val) ? 0x00ff0000 : 0;
-        low |= TEST(0x02, val) ? 0x0000ff00 : 0;
-        low |= TEST(0x01, val) ? 0x000000ff : 0;
+        high |= TESTANY(0x80, val) ? 0xff000000 : 0;
+        high |= TESTANY(0x40, val) ? 0x00ff0000 : 0;
+        high |= TESTANY(0x20, val) ? 0x0000ff00 : 0;
+        high |= TESTANY(0x10, val) ? 0x000000ff : 0;
+        low |= TESTANY(0x08, val) ? 0xff000000 : 0;
+        low |= TESTANY(0x04, val) ? 0x00ff0000 : 0;
+        low |= TESTANY(0x02, val) ? 0x0000ff00 : 0;
+        low |= TESTANY(0x01, val) ? 0x000000ff : 0;
         val64 = ((uint64)high << 32) | low;
         array[(*counter)++] = opnd_create_immed_int64(val64, OPSZ_8);
         return true;
@@ -546,7 +548,7 @@ decode_SIMD_modified_immed(decode_info_t *di, byte optype, opnd_t *array,
 /* This routine creates the decoded operand(s) itself */
 static bool
 decode_VFP_modified_immed(decode_info_t *di, byte optype, opnd_t *array,
-                          uint *counter INOUT)
+                          uint *counter DR_PARAM_OUT)
 {
     ptr_uint_t val; /* unsigned for logical shifts */
     /* This is a VFP modified immedate which is expanded.
@@ -582,7 +584,7 @@ decode_VFP_modified_immed(decode_info_t *di, byte optype, opnd_t *array,
 
 static bool
 decode_float_reglist(decode_info_t *di, opnd_size_t downsz, opnd_size_t upsz,
-                     opnd_t *array, uint *counter INOUT)
+                     opnd_t *array, uint *counter DR_PARAM_OUT)
 {
     uint i;
     uint count = (uint)decode_immed(di, 0, OPSZ_1, false /*unsigned*/);
@@ -632,7 +634,7 @@ decode_float_reglist(decode_info_t *di, opnd_size_t downsz, opnd_size_t upsz,
 }
 
 static dr_shift_type_t
-decode_shift_values(ptr_int_t sh2, ptr_int_t val, uint *amount OUT)
+decode_shift_values(ptr_int_t sh2, ptr_int_t val, uint *amount DR_PARAM_OUT)
 {
     if (sh2 == SHIFT_ENCODING_LSL && val == 0) {
         *amount = 0;
@@ -656,7 +658,7 @@ decode_shift_values(ptr_int_t sh2, ptr_int_t val, uint *amount OUT)
 }
 
 static dr_shift_type_t
-decode_index_shift(decode_info_t *di, ptr_int_t known_shift, uint *amount OUT)
+decode_index_shift(decode_info_t *di, ptr_int_t known_shift, uint *amount DR_PARAM_OUT)
 {
     ptr_int_t sh2, val;
     if (di->isa_mode == DR_ISA_ARM_THUMB) {
@@ -681,7 +683,7 @@ decode_index_shift(decode_info_t *di, ptr_int_t known_shift, uint *amount OUT)
 }
 
 static void
-decode_register_shift(decode_info_t *di, opnd_t *array, uint *counter IN)
+decode_register_shift(decode_info_t *di, opnd_t *array, uint *counter DR_PARAM_OUT)
 {
     if (*counter > 2 && di->shift_type_idx == *counter - 2) {
         /* Mark the register as shifted for proper disassembly. */
@@ -770,7 +772,7 @@ gpr_list_num_bits(byte optype)
 
 static bool
 decode_operand(decode_info_t *di, byte optype, opnd_size_t opsize, opnd_t *array,
-               uint *counter INOUT)
+               uint *counter DR_PARAM_OUT)
 {
     uint i;
     ptr_int_t val = 0;
@@ -1666,7 +1668,7 @@ decode_T32_16_ext_bits_10_8_idx(uint instr_word)
 {
     uint idx;
     /* check whether Rn is also listed in reglist */
-    if (TEST((1 << ((instr_word >> 8) & 0x7) /*Rn*/), (instr_word & 0xff) /*reglist*/))
+    if (TESTANY((1 << ((instr_word >> 8) & 0x7) /*Rn*/), (instr_word & 0xff) /*reglist*/))
         idx = 0;
     else
         idx = 1;
@@ -1789,15 +1791,16 @@ instr_it_block_compute_immediates(dr_pred_type_t pred0, dr_pred_type_t pred1,
 }
 
 instr_t *
-instr_it_block_create(dcontext_t *dcontext, dr_pred_type_t pred0, dr_pred_type_t pred1,
+instr_it_block_create(void *drcontext, dr_pred_type_t pred0, dr_pred_type_t pred1,
                       dr_pred_type_t pred2, dr_pred_type_t pred3)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     byte firstcond = 0, mask = 0;
     if (!instr_it_block_compute_immediates(pred0, pred1, pred2, pred3, &firstcond,
                                            &mask)) {
         CLIENT_ASSERT(false, "invalid predicates");
     }
-    /* I did not want to include the massive instr_create.h here */
+    /* I did not want to include the massive instr_create_api.h here */
     return INSTR_CREATE_it(dcontext, OPND_CREATE_INT(firstcond), OPND_CREATE_INT(mask));
 }
 
@@ -1813,7 +1816,7 @@ decode_instr_info_T32_32(decode_info_t *di)
     /* First, split by whether coprocessor or not */
     if (TESTALL(0xec00, di->halfwordA)) {
         /* coproc */
-        if (TEST(0x1000, di->halfwordA)) {
+        if (TESTANY(0x1000, di->halfwordA)) {
             idx = (((instr_word >> 20) & 0x3) |
                    ((instr_word >> 21) & 0x1c)); /*bits 25:23,21:20*/
             info = &T32_coproc_f[idx];
@@ -1900,7 +1903,7 @@ decode_instr_info_T32_32(decode_info_t *di)
             idx = (idx == 0) ? 0 : 1;
             info = &T32_ext_imm126[info->code][idx];
         } else if (info->type == EXT_OPCBX) {
-            if (!TEST(0x800, di->halfwordB))
+            if (!TESTANY(0x800, di->halfwordB))
                 idx = 0;
             else
                 idx = 1 + ((di->halfwordB >> 8) & 0x7) /*bits 10:8*/;
@@ -2250,12 +2253,10 @@ read_instruction(dcontext_t *dcontext, byte *pc, byte *orig_pc,
     di->decorated_pc = pc;
     /* We support auto-decoding an LSB=1 address as Thumb (i#1688).  We don't
      * change the thread mode, just the local mode, and we return an LSB=1 next pc.
+     * We allow either of the copy or orig to have the LSB set and do not require
+     * them to match as some uses cases have a local buffer for pc.
      */
-    if (TEST(0x1, (ptr_uint_t)pc)) {
-        if (!TEST(0x1, (ptr_uint_t)orig_pc)) {
-            CLIENT_ASSERT(false, "must have consistent LSB for decode pc and orig_pc");
-            return NULL;
-        }
+    if (TESTANY(0x1, (ptr_uint_t)pc) || TESTANY(0x1, (ptr_uint_t)orig_pc)) {
         di->isa_mode = DR_ISA_ARM_THUMB;
         pc = PC_AS_LOAD_TGT(DR_ISA_ARM_THUMB, pc);
         orig_pc = PC_AS_LOAD_TGT(DR_ISA_ARM_THUMB, orig_pc);
@@ -2328,7 +2329,7 @@ read_instruction(dcontext_t *dcontext, byte *pc, byte *orig_pc,
     if (TESTANY(DECODE_PREDICATE_22 | DECODE_PREDICATE_8, info->flags)) {
         di->predicate = DR_PRED_EQ +
             decode_predicate(di->instr_word,
-                             TEST(DECODE_PREDICATE_22, info->flags) ? 22 : 8);
+                             TESTANY(DECODE_PREDICATE_22, info->flags) ? 22 : 8);
     }
 
     /* We should now have either a valid OP_ opcode or an invalid opcode */
@@ -2393,9 +2394,9 @@ decode_eflags_to_instr_eflags(decode_info_t *di, const instr_info_t *info)
 }
 
 byte *
-decode_eflags_usage(dcontext_t *dcontext, byte *pc, uint *usage,
-                    dr_opnd_query_flags_t flags)
+decode_eflags_usage(void *drcontext, byte *pc, uint *usage, dr_opnd_query_flags_t flags)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     const instr_info_t *info;
     decode_info_t di;
     uint eflags;
@@ -2429,6 +2430,14 @@ decode_opcode(dcontext_t *dcontext, byte *pc, instr_t *instr)
 static byte *
 decode_common(dcontext_t *dcontext, byte *pc, byte *orig_pc, instr_t *instr)
 {
+    /* #DR_ISA_REGDEPS synthetic ISA has its own decoder.
+     * XXX i#1684: when DR can be built with full dynamic architecture selection we won't
+     * need to pollute the decoding of other architectures with this synthetic ISA special
+     * case.
+     */
+    if (dr_get_isa_mode(dcontext) == DR_ISA_REGDEPS)
+        return decode_isa_regdeps(dcontext, pc, instr);
+
     const instr_info_t *info = &invalid_instr;
     decode_info_t di;
     byte *next_pc;
@@ -2439,8 +2448,9 @@ decode_common(dcontext_t *dcontext, byte *pc, byte *orig_pc, instr_t *instr)
     CLIENT_ASSERT(instr->opcode == OP_INVALID || instr->opcode == OP_UNDECODED,
                   "decode: instr is already decoded, may need to call instr_reset()");
 
-    next_pc = read_instruction(dcontext, pc, orig_pc, &info,
-                               &di _IF_DEBUG(!TEST(INSTR_IGNORE_INVALID, instr->flags)));
+    next_pc =
+        read_instruction(dcontext, pc, orig_pc, &info,
+                         &di _IF_DEBUG(!TESTANY(INSTR_IGNORE_INVALID, instr->flags)));
     instr_set_isa_mode(instr, di.isa_mode);
     instr_set_opcode(instr, info->type);
     di.opcode = info->type; /* needed for decode_cur_pc */
@@ -2468,14 +2478,16 @@ decode_common(dcontext_t *dcontext, byte *pc, byte *orig_pc, instr_t *instr)
         }
         if (info->dst2_type != TYPE_NONE) {
             if (!decode_operand(&di, info->dst2_type, info->dst2_size,
-                                TEST(DECODE_4_SRCS, info->flags) ? srcs : dsts,
-                                TEST(DECODE_4_SRCS, info->flags) ? &num_srcs : &num_dsts))
+                                TESTANY(DECODE_4_SRCS, info->flags) ? srcs : dsts,
+                                TESTANY(DECODE_4_SRCS, info->flags) ? &num_srcs
+                                                                    : &num_dsts))
                 goto decode_invalid;
         }
         if (info->src1_type != TYPE_NONE) {
             if (!decode_operand(&di, info->src1_type, info->src1_size,
-                                TEST(DECODE_3_DSTS, info->flags) ? dsts : srcs,
-                                TEST(DECODE_3_DSTS, info->flags) ? &num_dsts : &num_srcs))
+                                TESTANY(DECODE_3_DSTS, info->flags) ? dsts : srcs,
+                                TESTANY(DECODE_3_DSTS, info->flags) ? &num_dsts
+                                                                    : &num_srcs))
                 goto decode_invalid;
         }
         if (info->src2_type != TYPE_NONE) {
@@ -2528,35 +2540,39 @@ decode_invalid:
 }
 
 byte *
-decode(dcontext_t *dcontext, byte *pc, instr_t *instr)
+decode(void *drcontext, byte *pc, instr_t *instr)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     return decode_common(dcontext, pc, pc, instr);
 }
 
 byte *
-decode_from_copy(dcontext_t *dcontext, byte *copy_pc, byte *orig_pc, instr_t *instr)
+decode_from_copy(void *drcontext, byte *copy_pc, byte *orig_pc, instr_t *instr)
 {
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     return decode_common(dcontext, copy_pc, orig_pc, instr);
 }
 
 byte *
-decode_cti(dcontext_t *dcontext, byte *pc, instr_t *instr)
+decode_cti(void *drcontext, byte *pc, instr_t *instr)
 {
     /* XXX i#1551: build a fast decoder for branches -- though it may not make
      * sense for 32-bit where many instrs can write to the pc.
      */
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     return decode(dcontext, pc, instr);
 }
 
 byte *
-decode_next_pc(dcontext_t *dcontext, byte *pc)
+decode_next_pc(void *drcontext, byte *pc)
 {
     /* XXX: check for invalid opcodes, though maybe it's fine to never do so
      * (xref i#1685).
      */
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     dr_isa_mode_t isa_mode;
     byte *read_pc = pc;
-    if (TEST(0x1, (ptr_uint_t)pc)) {
+    if (TESTANY(0x1, (ptr_uint_t)pc)) {
         isa_mode = DR_ISA_ARM_THUMB; /* and keep LSB=1 (i#1688) */
         read_pc = PC_AS_LOAD_TGT(DR_ISA_ARM_THUMB, read_pc);
     } else {
@@ -2573,11 +2589,12 @@ decode_next_pc(dcontext_t *dcontext, byte *pc)
 }
 
 int
-decode_sizeof(dcontext_t *dcontext, byte *pc, int *num_prefixes)
+decode_sizeof(void *drcontext, byte *pc, int *num_prefixes)
 {
     /* XXX: check for invalid opcodes, though maybe it's fine to never do so
      * (xref i#1685).
      */
+    dcontext_t *dcontext = (dcontext_t *)drcontext;
     byte *next_pc = decode_next_pc(dcontext, pc);
     return next_pc - pc;
 }
@@ -2619,7 +2636,7 @@ decode_raw_jmp_target(dcontext_t *dcontext, byte *pc)
     if (mode == DR_ISA_ARM_A32) {
         uint word = *(uint *)pc;
         int disp = word & 0xffffff;
-        if (TEST(0x800000, disp))
+        if (TESTANY(0x800000, disp))
             disp |= 0xff000000; /* sign-extend */
         return decode_cur_pc(pc, mode, OP_b, NULL) + (disp << 2);
     } else {
@@ -2646,13 +2663,13 @@ const instr_info_t *
 instr_info_extra_opnds(const instr_info_t *info)
 {
     /* XXX i#1551: pick proper *_extra_operands table */
-    if (TEST(DECODE_EXTRA_SHIFT, info->flags))
+    if (TESTANY(DECODE_EXTRA_SHIFT, info->flags))
         return &A32_extra_operands[0];
-    else if (TEST(DECODE_EXTRA_WRITEBACK, info->flags))
+    else if (TESTANY(DECODE_EXTRA_WRITEBACK, info->flags))
         return &A32_extra_operands[1];
-    else if (TEST(DECODE_EXTRA_WRITEBACK2, info->flags))
+    else if (TESTANY(DECODE_EXTRA_WRITEBACK2, info->flags))
         return &A32_extra_operands[2];
-    else if (TEST(DECODE_EXTRA_OPERANDS, info->flags))
+    else if (TESTANY(DECODE_EXTRA_OPERANDS, info->flags))
         return (const instr_info_t *)(info->code);
     else
         return NULL;
@@ -2666,14 +2683,14 @@ instr_info_opnd_type(const instr_info_t *info, bool src, int num)
     while (info != NULL) {
         if (!src && i++ == num)
             return info->dst1_type;
-        if (TEST(DECODE_4_SRCS, info->flags)) {
+        if (TESTANY(DECODE_4_SRCS, info->flags)) {
             if (src && i++ == num)
                 return info->dst2_type;
         } else {
             if (!src && i++ == num)
                 return info->dst2_type;
         }
-        if (TEST(DECODE_3_DSTS, info->flags)) {
+        if (TESTANY(DECODE_3_DSTS, info->flags)) {
             if (!src && i++ == num)
                 return info->src1_type;
         } else {
@@ -3012,11 +3029,11 @@ check_ISA(dr_isa_mode_t isa_mode)
                     int dst_type[MAX_TYPES];
                     while (ops != NULL) {
                         dst_type[num_dsts++] = ops->dst1_type;
-                        if (TEST(DECODE_4_SRCS, ops->flags))
+                        if (TESTANY(DECODE_4_SRCS, ops->flags))
                             src_type[num_srcs++] = ops->dst2_type;
                         else
                             dst_type[num_dsts++] = ops->dst2_type;
-                        if (TEST(DECODE_3_DSTS, ops->flags))
+                        if (TESTANY(DECODE_3_DSTS, ops->flags))
                             dst_type[num_dsts++] = ops->src1_type;
                         else
                             src_type[num_srcs++] = ops->src1_type;
@@ -3048,11 +3065,11 @@ decode_debug_checks_arch(void)
 #endif /* DEBUG */
 
 #ifdef DECODE_UNIT_TEST
-/* FIXME i#1551: add unit tests here.  How divide vs suite/tests/api/ tests? */
-#    include "instr_create.h"
+/* XXX i#1551: add unit tests here.  How divide vs suite/tests/api/ tests? */
+#    include "instr_create_shared.h"
 
 int
-main()
+main(int argc, const char *argv[])
 {
     bool res = true;
     standalone_init();

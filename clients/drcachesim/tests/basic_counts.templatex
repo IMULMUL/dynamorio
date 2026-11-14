@@ -20,43 +20,57 @@ All done
 ---- <application exited with code 0> ----
 Basic counts tool results:
 Total counts:
-     .* total \(fetched\) instructions
-     .* total unique \(fetched\) instructions
-     .* total non-fetched instructions
+     .* total instructions
+     .* total unique instructions
      .* total prefetches
      .* total data loads
      .* total data stores
      .* total icache flushes
      .* total dcache flushes
            1 total threads
-     .* total scheduling markers
+     .* total timestamp \+ cpuid markers
+     .* total idle markers
+     .* total wait markers
 #if defined(WINDOWS) && !defined(X64)
-          26 total transfer markers
+          26 total kernel transfer markers
 #else
-          13 total transfer markers
+          13 total kernel transfer markers
 #endif
      .* total function id markers
      .* total function return address markers
      .* total function argument markers
      .* total function return value markers
+     .* total physical address \+ virtual address marker pairs
+     .* total physical address unavailable markers
+     .* total system call number markers
+     .* total blocking system call markers
+     .* total skipped memref markers
      .* total other markers
+     .* total encodings
 Thread .* counts:
-     .* \(fetched\) instructions
-     .* unique \(fetched\) instructions
-     .* non-fetched instructions
+     .* instructions
+     .* unique instructions
      .* prefetches
      .* data loads
      .* data stores
      .* icache flushes
      .* dcache flushes
-     .* scheduling markers
+     .* timestamp \+ cpuid markers
+     .* idle markers
+     .* wait markers
 #if defined(WINDOWS) && !defined(X64)
-          26 transfer markers
+          26 kernel transfer markers
 #else
-          13 transfer markers
+          13 kernel transfer markers
 #endif
      .* function id markers
      .* function return address markers
      .* function argument markers
      .* function return value markers
+     .* physical address \+ virtual address marker pairs
+     .* physical address unavailable markers
+     .* system call number markers
+     .* blocking system call markers
+     .* skipped memref markers
      .* other markers
+     .* encodings

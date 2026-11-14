@@ -38,7 +38,7 @@
 #include "tools.h"
 
 int
-main()
+main(int argc, const char *argv[])
 {
     const size_t size = 0x00008765;
     size_t newsize = size + 0x100; /* these values of size & newsize work for
@@ -46,7 +46,7 @@ main()
                                     * kernel
                                     */
     void *p;
-    print("Calling mmap(0, " PFX ", " PFX ", " PFX ", " PFX ", 0)\n", size,
+    print("Calling mmap(0, " PFX ", 0x%08x, 0x%08x, 0x%08x, 0)\n", size,
           PROT_EXEC | PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1);
     p = mmap(0, size, PROT_EXEC | PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
     if (p == MAP_FAILED) {

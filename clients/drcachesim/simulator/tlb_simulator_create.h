@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2017-2018 Google, Inc.  All rights reserved.
+ * Copyright (c) 2017-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -33,10 +33,13 @@
 /* tlb simulator creation */
 
 #ifndef _TLB_SIMULATOR_CREATE_H_
-#define _TLB_SIMULATOR_CREATE_H_ 1
+#define _TLB_SIMULATOR_CREATE_H_
 
 #include <string>
 #include "analysis_tool.h"
+
+namespace dynamorio {
+namespace drmemtrace {
 
 /**
  * @file drmemtrace/tlb_simulator_create.h
@@ -64,6 +67,8 @@ struct tlb_simulator_knobs_t {
         , warmup_fraction(0.0)
         , sim_refs(1ULL << 63)
         , cpu_scheduling(false)
+        , use_physical(false)
+        , v2p_file("")
         , verbose(0)
     {
     }
@@ -81,11 +86,16 @@ struct tlb_simulator_knobs_t {
     double warmup_fraction;
     uint64_t sim_refs;
     bool cpu_scheduling;
+    bool use_physical;
+    std::string v2p_file;
     unsigned int verbose;
 };
 
 /** Creates an instance of a TLB simulator. */
 analysis_tool_t *
 tlb_simulator_create(const tlb_simulator_knobs_t &knobs);
+
+} // namespace drmemtrace
+} // namespace dynamorio
 
 #endif /* _TLB_SIMULATOR_CREATE_H_ */

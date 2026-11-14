@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2012-2018 Google, Inc.  All rights reserved.
+ * Copyright (c) 2012-2021 Google, Inc.  All rights reserved.
  * Copyright (c) 2008-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -43,7 +43,10 @@
 /*for synch */
 /* Given permissions */
 /* The order is in increasing permissiveness and the values are chosen to
- * match up with equivalent requested states below */
+ * match up with equivalent requested states below.
+ * XXX: THREAD_SYNCH_NO_LOCKS_NO_XFER has more restrictions than THREAD_SYNCH_NO_LOCKS
+ * so it appears to contradict this statement.
+ */
 typedef enum {
     THREAD_SYNCH_NONE = 0,
 
@@ -204,7 +207,7 @@ extern mutex_t all_threads_synch_lock;
  * (TermThread or TermProcess) first
  * Caller must call end_synch_with_all_threads to clean up, unless they pass
  * THREAD_SYNCH_SUSPEND_FAILURE_ABORT and the request fails.
- * Note - if this is a CLIENT_INTERFACE build and the caller doesn't intend to resume all
+ * Note - if the caller doesn't intend to resume all
  * threads (say detach or process exit) then it should first call
  * instrument_client_thread_termination() to inform the client that client-owned threads
  * will be killed/permanently stopped.
@@ -262,6 +265,11 @@ send_all_other_threads_native(void);
 
 void
 detach_on_permanent_stack(bool internal, bool do_cleanup, dr_stats_t *drstats);
+
+#ifdef LINUX
+void
+detach_externally_on_new_stack(void);
+#endif
 
 /*** exported for detach only ***/
 

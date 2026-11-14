@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2020-2026 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -32,7 +32,11 @@
 
 #include "../common/trace_entry.h"
 #include "prefetch_analyzer.h"
+#include <iomanip>
 #include <iostream>
+
+namespace dynamorio {
+namespace drmemtrace {
 
 bool
 prefetch_analyzer_t::process_memref(const memref_t &memref)
@@ -53,3 +57,6 @@ prefetch_analyzer_t::print_results()
     }
     return true;
 }
+
+} // namespace drmemtrace
+} // namespace dynamorio

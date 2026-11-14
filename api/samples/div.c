@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2014 Google, Inc.  All rights reserved.
+ * Copyright (c) 2014-2024 Google, Inc.  All rights reserved.
  * Copyright (c) 2008 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -62,7 +62,7 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
     dr_set_client_name("DynamoRIO Sample Client 'div'", "http://dynamorio.org/issues");
     if (!drmgr_init())
         DR_ASSERT(false);
-    dr_register_exit_event(exit_event);
+    drmgr_register_exit_event(exit_event);
     if (!drmgr_register_bb_instrumentation_event(NULL, event_app_instruction, NULL))
         DR_ASSERT(false);
     count_mutex = dr_mutex_create();
@@ -106,7 +106,7 @@ callback(app_pc addr, uint divisor)
 
 /* If instr is unsigned division, return true and set *opnd to divisor. */
 static bool
-instr_is_div(instr_t *instr, OUT opnd_t *opnd)
+instr_is_div(instr_t *instr, DR_PARAM_OUT opnd_t *opnd)
 {
     int opc = instr_get_opcode(instr);
 #if defined(X86)
@@ -116,6 +116,11 @@ instr_is_div(instr_t *instr, OUT opnd_t *opnd)
     }
 #elif defined(AARCHXX)
     if (opc == OP_udiv) {
+        *opnd = instr_get_src(instr, 1); /* divisor is 2nd src */
+        return true;
+    }
+#elif defined(RISCV64)
+    if (opc == OP_divu) {
         *opnd = instr_get_src(instr, 1); /* divisor is 2nd src */
         return true;
     }
@@ -132,8 +137,13 @@ event_app_instruction(void *drcontext, void *tag, instrlist_t *bb, instr_t *inst
     /* if find div, insert a clean call to our instrumentation routine */
     opnd_t opnd;
     if (instr_is_div(instr, &opnd)) {
+        opnd_t div_opnd;
+        if (opnd_is_reg(opnd))
+            div_opnd = opnd_create_reg(reg_to_pointer_sized(opnd_get_reg(opnd)));
+        else
+            div_opnd = opnd;
         dr_insert_clean_call(drcontext, bb, instr, (void *)callback, false /*no fp save*/,
-                             2, OPND_CREATE_INTPTR(instr_get_app_pc(instr)), opnd);
+                             2, OPND_CREATE_INTPTR(instr_get_app_pc(instr)), div_opnd);
     }
     return DR_EMIT_DEFAULT;
 }

@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2014-2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2014-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2016 ARM Limited. All rights reserved.
  * **********************************************************/
 
@@ -32,7 +32,7 @@
  */
 
 #include "../globals.h"
-#include "instr_create.h"
+#include "instr_create_shared.h"
 #include "instrument.h"
 
 /* Make code more readable by shortening long lines.
@@ -48,7 +48,7 @@ byte *
 remangle_short_rewrite(dcontext_t *dcontext, instr_t *instr, byte *pc, app_pc target)
 {
 #ifdef AARCH64
-    ASSERT_NOT_IMPLEMENTED(false); /* FIXME i#1569 */
+    ASSERT_NOT_IMPLEMENTED(false); /* TODO i#1569 */
     return NULL;
 #else
     uint mangled_sz = CTI_SHORT_REWRITE_LENGTH;
@@ -71,7 +71,7 @@ instr_t *
 convert_to_near_rel_arch(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr)
 {
 #ifdef AARCH64
-    ASSERT_NOT_IMPLEMENTED(false); /* FIXME i#1569 */
+    ASSERT_NOT_IMPLEMENTED(false); /* TODO i#1569 */
     return NULL;
 #else
     int opcode = instr_get_opcode(instr);
@@ -162,10 +162,11 @@ convert_to_near_rel_arch(dcontext_t *dcontext, instrlist_t *ilist, instr_t *inst
 #endif
 }
 
+/* Keep this in sync with patch_mov_immed_arch(). */
 void
 insert_mov_immed_arch(dcontext_t *dcontext, instr_t *src_inst, byte *encode_estimate,
                       ptr_int_t val, opnd_t dst, instrlist_t *ilist, instr_t *instr,
-                      OUT instr_t **first, OUT instr_t **last)
+                      DR_PARAM_OUT instr_t **first, DR_PARAM_OUT instr_t **last)
 {
 #ifdef AARCH64
     instr_t *mov;
@@ -254,7 +255,7 @@ insert_mov_immed_arch(dcontext_t *dcontext, instr_t *src_inst, byte *encode_esti
 void
 insert_push_immed_arch(dcontext_t *dcontext, instr_t *src_inst, byte *encode_estimate,
                        ptr_int_t val, instrlist_t *ilist, instr_t *instr,
-                       OUT instr_t **first, OUT instr_t **last)
+                       DR_PARAM_OUT instr_t **first, DR_PARAM_OUT instr_t **last)
 {
-    ASSERT_NOT_IMPLEMENTED(false); /* FIXME i#1551, i#1569 */
+    ASSERT_NOT_IMPLEMENTED(false); /* TODO i#1551, i#1569 */
 }

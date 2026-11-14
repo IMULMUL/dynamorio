@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2016-2019 Google, Inc.  All rights reserved.
+ * Copyright (c) 2016-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -36,7 +36,7 @@
 #include "drx.h"
 #include "drmgr.h"
 #include "drvector.h"
-#include "../ext_utils.h"
+#include "dr_project_wide_defines.h"
 #include <stddef.h> /* for offsetof */
 #include <string.h> /* for memcpy */
 
@@ -439,7 +439,7 @@ drx_buf_insert_update_buf_ptr_2byte(void *drcontext, drx_buf_t *buf, instrlist_t
             XINST_CREATE_store_2bytes(drcontext,
                                       OPND_CREATE_MEM16(buf->tls_seg, buf->tls_offs),
                                       opnd_create_reg(buf_ptr)));
-#elif defined(AARCH64)
+#elif defined(AARCH64) || defined(RISCV64)
     if (stride > 0xfff) {
         /* Fall back to XINST_CREATE_load_int() if stride has more than 12 bits.
          * Another possibility, avoiding a scratch register, would be:
@@ -490,7 +490,7 @@ drx_buf_insert_buf_store_1byte(void *drcontext, drx_buf_t *buf, instrlist_t *ili
 #ifdef X86
         instr =
             XINST_CREATE_store_1byte(drcontext, OPND_CREATE_MEM8(buf_ptr, offset), opnd);
-#elif defined(AARCHXX)
+#elif defined(AARCHXX) || defined(RISCV64)
         /* this will certainly not fault, so don't set a translation */
         MINSERT(ilist, where,
                 XINST_CREATE_load_int(drcontext, opnd_create_reg(scratch), opnd));
@@ -520,7 +520,7 @@ drx_buf_insert_buf_store_2bytes(void *drcontext, drx_buf_t *buf, instrlist_t *il
 #ifdef X86
         instr = XINST_CREATE_store_2bytes(drcontext, OPND_CREATE_MEM16(buf_ptr, offset),
                                           opnd);
-#elif defined(AARCHXX)
+#elif defined(AARCHXX) || defined(RISCV64)
         /* this will certainly not fault, so don't set a translation */
         MINSERT(ilist, where,
                 XINST_CREATE_load_int(drcontext, opnd_create_reg(scratch), opnd));
@@ -538,7 +538,7 @@ drx_buf_insert_buf_store_2bytes(void *drcontext, drx_buf_t *buf, instrlist_t *il
     return true;
 }
 
-#if defined(X86_64) || defined(AARCH64)
+#if defined(X86_64) || defined(AARCH64) || defined(RISCV64)
 /* only valid on platforms where OPSZ_PTR != OPSZ_4 */
 static bool
 drx_buf_insert_buf_store_4bytes(void *drcontext, drx_buf_t *buf, instrlist_t *ilist,
@@ -551,7 +551,7 @@ drx_buf_insert_buf_store_4bytes(void *drcontext, drx_buf_t *buf, instrlist_t *il
     if (opnd_is_immed(opnd)) {
 #    ifdef X86_64
         instr = XINST_CREATE_store(drcontext, OPND_CREATE_MEM32(buf_ptr, offset), opnd);
-#    elif defined(AARCH64)
+#    elif defined(AARCH64) || defined(RISCV64)
         /* this will certainly not fault, so don't set a translation */
         instrlist_insert_mov_immed_ptrsz(drcontext, opnd_get_immed_int(opnd),
                                          opnd_create_reg(scratch), ilist, where, NULL,
@@ -587,7 +587,7 @@ drx_buf_insert_buf_store_ptrsz(void *drcontext, drx_buf_t *buf, instrlist_t *ili
             if (last == NULL || first == last)
                 break;
         }
-#elif defined(AARCHXX)
+#elif defined(AARCHXX) || defined(RISCV64)
         instr_t *instr;
         instrlist_insert_mov_immed_ptrsz(drcontext, immed, opnd_create_reg(scratch),
                                          ilist, where, &first, &last);
@@ -620,7 +620,7 @@ drx_buf_insert_buf_store(void *drcontext, drx_buf_t *buf, instrlist_t *ilist,
     case OPSZ_2:
         return drx_buf_insert_buf_store_2bytes(drcontext, buf, ilist, where, buf_ptr,
                                                scratch, opnd, offset);
-#if defined(X86_64) || defined(AARCH64)
+#if defined(X86_64) || defined(AARCH64) || defined(RISCV64)
     case OPSZ_4:
         return drx_buf_insert_buf_store_4bytes(drcontext, buf, ilist, where, buf_ptr,
                                                scratch, opnd, offset);
@@ -742,9 +742,15 @@ deduce_buf_ptr(instr_t *instr)
 {
     ushort opcode = (ushort)instr_get_opcode(instr);
 
+#if defined(RISCV64)
+    /* XXX i#3544: Not implemented */
+    DR_ASSERT_MSG(false, "Not implemented");
+#endif
     /* drx_buf will only emit these instructions to store a value */
     if (IF_X86_ELSE(opcode == OP_mov_st,
-                    opcode == OP_str || opcode == OP_strb || opcode == OP_strh)) {
+                    IF_RISCV64_ELSE(opcode == OP_sb || opcode == OP_sw || opcode == OP_sd,
+                                    opcode == OP_str || opcode == OP_strb ||
+                                        opcode == OP_strh))) {
         int i;
         for (i = 0; i < instr_num_dsts(instr); ++i) {
             opnd_t dst = instr_get_dst(instr, i);

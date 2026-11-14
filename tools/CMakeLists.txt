@@ -1,5 +1,5 @@
 # **********************************************************
-# Copyright (c) 2010-2020 Google, Inc.    All rights reserved.
+# Copyright (c) 2010-2025 Google, Inc.    All rights reserved.
 # Copyright (c) 2009-2010 VMware, Inc.    All rights reserved.
 # **********************************************************
 
@@ -32,6 +32,7 @@
 include(../make/policies.cmake NO_POLICY_SCOPE)
 
 add_executable(run_in_bg run_in_bg.c)
+copy_target_to_device(run_in_bg "${location_suffix}")
 
 if (UNIX)
   add_executable(runstats runstats.c)
@@ -39,17 +40,18 @@ if (UNIX)
   if (APPLE)
     # XXX i#1286: implement nudge for MacOS
   else (APPLE)
-    add_executable(nudgeunix nudgeunix.c ${PROJECT_SOURCE_DIR}/core/unix/nudgesig.c)
+    add_executable(drnudgeunix nudgeunix.c ${PROJECT_SOURCE_DIR}/core/unix/nudgesig.c)
   endif ()
   add_executable(drloader drloader.c)
 
   include_directories(
-   ${PROJECT_SOURCE_DIR}/libutil
-   ${PROJECT_SOURCE_DIR}/core
-   ${PROJECT_SOURCE_DIR}/core/lib
+    ${PROJECT_SOURCE_DIR}/libutil
+    ${PROJECT_SOURCE_DIR}/core
+    ${PROJECT_SOURCE_DIR}/core/include
+    ${PROJECT_SOURCE_DIR}/core/lib
   )
 
-  add_definitions(-DNOT_DYNAMORIO_CORE)
+  add_definitions(-DNOT_DYNAMORIO_CORE -DDYNAMORIO_INTERNAL)
 
   # i#1092: remove any stale symlink that might be there.
   file(REMOVE "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/drdeploy")
@@ -87,17 +89,21 @@ if (UNIX)
   set(tool_cflags "")
   set(RESOURCES "")
 
-  if (NOT APPLE) # FIXME i#1286: add MacOS nudge support
-    DR_install(TARGETS nudgeunix DESTINATION ${INSTALL_BIN})
+  if (NOT APPLE) # XXX i#1286: add MacOS nudge support
+    DR_install(TARGETS drnudgeunix DESTINATION ${INSTALL_BIN})
+    # for backward compatibility we add a symlink to the old name
+    add_custom_command(TARGET drnudgeunix POST_BUILD
+      WORKING_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
+      COMMAND ${CMAKE_COMMAND} -E create_symlink drnudgeunix nudgeunix)
   endif ()
 else (UNIX)
-  # FIXME i#98: eventually upgrade to W4 with pragma exceptions.
+  # XXX i#98: eventually upgrade to W4 with pragma exceptions.
   # W2 is default (we're using W3).  We should also replace
   # all references to unsafe functions (e.g., fopen) and
   # remove /wd4996
   string(REGEX REPLACE "/W4" "/W3" CMAKE_C_FLAGS "${CMAKE_C_FLAGS}")
   set(tool_cflags "/wd4996")
-  add_definitions(-DNOT_DYNAMORIO_CORE -DWIN32)
+  add_definitions(-DNOT_DYNAMORIO_CORE -DWIN32 -DDYNAMORIO_INTERNAL)
 
   set(RESOURCES ${PROJECT_SOURCE_DIR}/core/win32/resources.rc)
 
@@ -114,13 +120,14 @@ else (UNIX)
     create_process
     )
   if (NOT X64)
-    # FIXME i#118: ldmp not yet 64-bit
+    # XXX i#118: ldmp not yet 64-bit
     set(tgts ${tgts} ldmp)
   endif (NOT X64)
 
   include_directories(
     ${PROJECT_SOURCE_DIR}/libutil
     ${PROJECT_SOURCE_DIR}/core
+    ${PROJECT_SOURCE_DIR}/core/include
     ${PROJECT_SOURCE_DIR}/core/lib
     )
 
@@ -198,7 +205,7 @@ foreach (deploytgt drconfig drrun drinject)
       ARGS -D lib_fileloc=${CMAKE_CURRENT_BINARY_DIR}/${locvar_name}
            -D check_textrel=ON
            -D check_deps=OFF
-           -D check_libc=ON
+           -D check_libc=${BUILD_PACKAGE}
            -D READELF_EXECUTABLE=${READELF_EXECUTABLE}
            -P ${PROJECT_SOURCE_DIR}/core/CMake_readelf.cmake
       VERBATIM # recommended: p260
@@ -223,3 +230,7 @@ DR_install(FILES
   "${CMAKE_CURRENT_SOURCE_DIR}/windbg-scripts/load_syms${SYMSFX}"
   DESTINATION "${INSTALL_BIN}"
   RENAME "load_syms${SYMSFX}.txt")
+
+if (ANDROID)
+  configure_file(run_on_android_device.sh.in run_on_android_device.sh @ONLY)
+endif ()

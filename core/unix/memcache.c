@@ -1,5 +1,5 @@
 /* *******************************************************************************
- * Copyright (c) 2010-2019 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2026 Google, Inc.  All rights reserved.
  * Copyright (c) 2011 Massachusetts Institute of Technology  All rights reserved.
  * Copyright (c) 2000-2010 VMware, Inc.  All rights reserved.
  * *******************************************************************************/
@@ -45,9 +45,7 @@
 #include "memquery.h"
 #include "os_private.h"
 #include <sys/mman.h>
-#ifdef CLIENT_INTERFACE
-#    include "instrument.h"
-#endif
+#include "instrument.h"
 
 #ifdef HAVE_MEMINFO_QUERY
 #    error Should use direct query and no cache
@@ -88,8 +86,8 @@ allmem_info_merge(void *dst_data, void *src_data);
 
 /* HACK to make all_memory_areas->lock recursive
  * protected for both read and write by all_memory_areas->lock
- * FIXME: provide general rwlock w/ write portion recursive
- * FIXME: eliminate duplicate code (see dynamo_areas_recursion)
+ * XXX: provide general rwlock w/ write portion recursive
+ * XXX: eliminate duplicate code (see dynamo_areas_recursion)
  */
 DECLARE_CXTSWPROT_VAR(uint all_memory_areas_recursion, 0);
 
@@ -119,7 +117,7 @@ memcache_initialized(void)
 }
 
 /* HACK to get recursive write lock for internal and external use
- * FIXME: code blatantly copied from dynamo_vm_areas_{un}lock(); eliminate duplication!
+ * XXX: code blatantly copied from dynamo_vm_areas_{un}lock(); eliminate duplication!
  */
 void
 memcache_lock(void)
@@ -289,7 +287,8 @@ memcache_update(app_pc start, app_pc end_in, uint prot, int type)
                      * write => COW => no longer shareable (i#669)
                      */
                     shareable = info->shareable;
-                    if (TEST(MEMPROT_WRITE, prot) != TEST(MEMPROT_WRITE, info->prot))
+                    if (TESTANY(MEMPROT_WRITE, prot) !=
+                        TESTANY(MEMPROT_WRITE, info->prot))
                         shareable = false;
                     /* re-add so we can merge w/ adjacent non-shareable */
                 } else {
@@ -359,7 +358,7 @@ memcache_remove(app_pc start, app_pc end)
 }
 
 bool
-memcache_query_memory(const byte *pc, OUT dr_mem_info_t *out_info)
+memcache_query_memory(const byte *pc, DR_PARAM_OUT dr_mem_info_t *out_info)
 {
     allmem_info_t *info;
     bool found;
@@ -402,13 +401,16 @@ memcache_query_memory(const byte *pc, OUT dr_mem_info_t *out_info)
             } else {
                 /* /proc/maps could break/combine regions listed so region bounds as
                  * listed by all_memory_areas and /proc/maps won't agree.
-                 * FIXME: Have seen instances where all_memory_areas lists the region as
+                 * XXX: Have seen instances where all_memory_areas lists the region as
                  * r--, where /proc/maps lists it as r-x.  Infact, all regions listed in
                  * /proc/maps are executable, even guard pages --x (see case 8821)
                  */
-                /* we add the whole client lib as a single entry */
-                if (IF_CLIENT_INTERFACE_ELSE(
-                        !is_in_client_lib(start) || !is_in_client_lib(end - 1), true)) {
+                /* We add the whole client lib as a single entry.  Unfortunately we
+                 * can't safely ask about aux client libs so we have to ignore them here
+                 * (else we hit a rank order violation: i#5127).
+                 */
+                if (!is_in_client_lib_ignore_aux(start) ||
+                    !is_in_client_lib_ignore_aux(end - 1)) {
                     SYSLOG_INTERNAL_WARNING_ONCE(
                         "get_memory_info mismatch! "
                         "(can happen if os combines entries in /proc/pid/maps)\n"

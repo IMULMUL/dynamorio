@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2019 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2001-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -43,9 +43,7 @@
 #include "../utils.h"
 #include "../fragment.h"
 #include "../fcache.h"
-#ifdef CLIENT_INTERFACE
-#    include "instrument.h"
-#endif
+#include "instrument.h"
 #include "disassemble.h"
 #include <sys/time.h> /* ITIMER_VIRTUAL */
 
@@ -145,7 +143,7 @@ pcprofile_thread_init(dcontext_t *dcontext, bool shared_itimer, void *parent_inf
     for (i = 0; i < DR_WHERE_LAST; i++)
         info->where[i] = 0;
     info->file = open_log_file("pcsamples", NULL, 0);
-    /* FIXME PR 596808: we can easily fill up the initial special heap unit,
+    /* XXX PR 596808: we can easily fill up the initial special heap unit,
      * and creating a new one acquires global locks and can deadlock:
      * we should allocate many units up front or something
      */
@@ -161,7 +159,6 @@ pcprofile_thread_init(dcontext_t *dcontext, bool shared_itimer, void *parent_inf
 void
 pcprofile_thread_exit(dcontext_t *dcontext)
 {
-    int size;
     thread_pc_info_t *info = (thread_pc_info_t *)dcontext->pcprofile_field;
     /* don't want any alarms while holding lock for printing results
      * (see notes under pcprofile_cache_flush below)
@@ -169,7 +166,7 @@ pcprofile_thread_exit(dcontext_t *dcontext)
     set_itimer_callback(dcontext, ITIMER_VIRTUAL, 0, NULL, NULL);
 
     pcprofile_results(info);
-    size = HASHTABLE_SIZE(HASH_BITS) * sizeof(pc_profile_entry_t *);
+    DEBUG_DECLARE(int size = HASHTABLE_SIZE(HASH_BITS) * sizeof(pc_profile_entry_t *);)
     pcprofile_reset(info); /* special heap so no fast path */
 #ifdef DEBUG
     /* for non-debug we do fast exit path and don't free local heap */
@@ -191,7 +188,7 @@ void
 pcprofile_fork_init(dcontext_t *dcontext)
 {
     /* itimers are not inherited across fork */
-    /* FIXME: hmmm...I guess a forked child will just start from scratch?
+    /* XXX: hmmm...I guess a forked child will just start from scratch?
      */
     thread_pc_info_t *info = (thread_pc_info_t *)dcontext->pcprofile_field;
     info->thread_shared = false;
@@ -395,11 +392,11 @@ pcprofile_reset(thread_pc_info_t *info)
 }
 
 /* Print the profile results
- * FIXME: It would be nice to print counts integrated with fragment listings
+ * XXX: It would be nice to print counts integrated with fragment listings
  * That would require re-ordering *_exit() sequence (fragments are deleted first)
  * Instead of doing that, can use a script to combine these tag+offsets with
  * previously printed fragments
- * FIXME: this routine uses floating point ops, if ever called not at thread exit
+ * XXX: this routine uses floating point ops, if ever called not at thread exit
  * must preserve fp state around the whole routine!
  */
 static void
@@ -413,7 +410,6 @@ pcprofile_results(thread_pc_info_t *info)
 
     print_file(info->file, "DynamoRIO library: " PFX "-" PFX "\n",
                get_dynamorio_dll_start(), get_dynamorio_dll_end());
-#ifdef CLIENT_INTERFACE
     {
         app_pc client_start, client_end;
         if (get_client_bounds(0, &client_start, &client_end)) {
@@ -421,7 +417,6 @@ pcprofile_results(thread_pc_info_t *info)
                        client_end);
         }
     }
-#endif
     print_file(info->file, "ITIMER distribution (%d):\n", total);
     if (info->where[DR_WHERE_APP] > 0) {
         print_file(info->file, "  %5.1f%% of time in APPLICATION (%d)\n",
@@ -504,7 +499,7 @@ pcprofile_results(thread_pc_info_t *info)
                            e->counter, type, e->tag, e->offset);
 #endif
 #if USE_SYMTAB
-                /* FIXME: this only works for fragments whose tags are app pc's! */
+                /* XXX: this only works for fragments whose tags are app pc's! */
                 if (valid_symtab) {
                     print_file(info->file, "\tin app = %s\n",
                                symtab_lookup_pc((void *)(e->tag + e->offset)));
@@ -535,12 +530,8 @@ pcprofile_results(thread_pc_info_t *info)
                                e->pc, e->counter,
                                (comment == NULL) ? "<UNKNOWN>" : comment);
                 }
-#if defined(INTERNAL) || defined(DEBUG) || defined(CLIENT_INTERFACE)
                 disassemble_with_info(GLOBAL_DCONTEXT, e->pc, info->file,
                                       false /*show pc*/, false /*show bytes*/);
-#else
-                print_file(info->file, "\n");
-#endif
             } else {
 #if USE_SYMTAB
                 if (valid_symtab) {
@@ -556,10 +547,12 @@ pcprofile_results(thread_pc_info_t *info)
                     print_file(info->file, " dispatch\n");
                 } else if (e->whereami == DR_WHERE_MONITOR) {
                     print_file(info->file, " monitor\n");
-                } else if (e->whereami == DR_WHERE_SIGNAL_HANDLER) {
-                    print_file(info->file, " signal handler\n");
                 } else if (e->whereami == DR_WHERE_SYSCALL_HANDLER) {
                     print_file(info->file, " syscall handler\n");
+                } else if (e->whereami == DR_WHERE_SIGNAL_HANDLER) {
+                    print_file(info->file, " signal handler\n");
+                } else if (e->whereami == DR_WHERE_TRAMPOLINE) {
+                    print_file(info->file, " trampoline\n");
                 } else if (e->whereami == DR_WHERE_CONTEXT_SWITCH) {
                     print_file(info->file, " context switch\n");
                 } else if (e->whereami == DR_WHERE_IBL) {

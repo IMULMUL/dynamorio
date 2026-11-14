@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2013-2016 Google, Inc.  All rights reserved.
+ * Copyright (c) 2013-2026 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -53,6 +53,7 @@
 #include <stdlib.h>
 #include <fcntl.h>
 #include "dr_frontend.h"
+#include "drlibc.h"
 
 extern bool
 module_get_platform(file_t f, dr_platform_t *platform, dr_platform_t *alt_platform);
@@ -69,20 +70,21 @@ module_get_platform(file_t f, dr_platform_t *platform, dr_platform_t *alt_platfo
 /* Semi-compatibility with the Windows CRT _access function.
  */
 drfront_status_t
-drfront_access(const char *fname, drfront_access_mode_t mode, OUT bool *ret)
+drfront_access(const char *fname, drfront_access_mode_t mode, DR_PARAM_OUT bool *ret)
 {
     int r;
-    struct stat st;
+    struct stat64 st;
     uid_t euid;
 
     if (ret == NULL)
         return DRFRONT_ERROR_INVALID_PARAMETER;
 
-    r = stat(fname, &st);
+    /* Use the raw syscall to avoid glibc 2.33 deps (i#5474). */
+    r = dr_stat_syscall(fname, &st);
 
-    if (r == -1) {
+    if (r < 0) {
         *ret = false;
-        if (errno == EACCES || errno == ENOENT || errno == ENOTDIR)
+        if (r == -EACCES || r == -ENOENT || r == -ENOTDIR)
             return DRFRONT_SUCCESS;
         return DRFRONT_ERROR;
     } else if (mode == DRFRONT_EXIST) {
@@ -99,7 +101,7 @@ drfront_access(const char *fname, drfront_access_mode_t mode, OUT bool *ret)
          * and +x access to any file with at least one +x bit set.  This is
          * usually true but not always.
          */
-        if (TEST(DRFRONT_EXEC, mode)) {
+        if (TESTANY(DRFRONT_EXEC, mode)) {
             *ret = TESTANY((DRFRONT_EXEC << 6) | (DRFRONT_EXEC << 3) | DRFRONT_EXEC,
                            st.st_mode);
         } else
@@ -112,7 +114,7 @@ drfront_access(const char *fname, drfront_access_mode_t mode, OUT bool *ret)
         *ret = TESTALL(mode, st.st_mode);
     }
 
-    if (*ret && S_ISDIR(st.st_mode) && TEST(DRFRONT_WRITE, mode)) {
+    if (*ret && S_ISDIR(st.st_mode) && TESTANY(DRFRONT_WRITE, mode)) {
         /* We use an actual write try, to avoid failing on a read-only filesystem
          * (DrMi#1857).
          */
@@ -126,17 +128,19 @@ drfront_access(const char *fname, drfront_access_mode_t mode, OUT bool *ret)
  * Resolves symlinks, which is needed to get the right config filename (i#1062).
  */
 drfront_status_t
-drfront_searchenv(const char *fname, const char *env_var, OUT char *full_path,
-                  const size_t full_path_size, OUT bool *ret)
+drfront_searchenv(const char *fname, const char *env_var, DR_PARAM_OUT char *full_path,
+                  const size_t full_path_size, DR_PARAM_OUT bool *ret)
 {
     const char *paths = getenv(env_var);
     const char *cur;
     const char *next;
     const char *end;
-    char tmp[full_path_size];
+    char tmp[PATH_MAX];
     char realpath_buf[PATH_MAX]; /* realpath hardcodes its buffer length */
     drfront_status_t status_check = DRFRONT_ERROR;
     bool access_ret = false;
+    int r;
+    struct stat64 st;
 
     if (ret == NULL)
         return DRFRONT_ERROR_INVALID_PARAMETER;
@@ -166,15 +170,22 @@ drfront_searchenv(const char *fname, const char *env_var, OUT char *full_path,
         NULL_TERMINATE_BUFFER(tmp);
         /* realpath checks for existence too. */
         if (realpath(tmp, realpath_buf) != NULL) {
-            status_check = drfront_access(realpath_buf, DRFRONT_EXIST, &access_ret);
+            status_check = drfront_access(realpath_buf, DRFRONT_EXEC, &access_ret);
             if (status_check != DRFRONT_SUCCESS) {
                 *ret = false;
                 return status_check;
             } else if (access_ret == true) {
-                *ret = true;
-                snprintf(full_path, full_path_size, "%s", realpath_buf);
-                full_path[full_path_size - 1] = '\0';
-                return DRFRONT_SUCCESS;
+                // XXX: An other option to prevent calling stat() twice
+                // could be a new variant DRFRONT_NOTDIR for drfront_access_mode_t
+                // that drfront_access() then takes into account.
+                /* Use the raw syscall to avoid glibc 2.33 deps (i#5474). */
+                r = dr_stat_syscall(realpath_buf, &st);
+                if (r == 0 && !S_ISDIR(st.st_mode)) {
+                    *ret = true;
+                    snprintf(full_path, full_path_size, "%s", realpath_buf);
+                    full_path[full_path_size - 1] = '\0';
+                    return DRFRONT_SUCCESS;
+                }
             }
         }
         cur = next + 1;
@@ -188,7 +199,8 @@ drfront_searchenv(const char *fname, const char *env_var, OUT char *full_path,
  * No conversion on UNIX, just copy the data.
  */
 drfront_status_t
-drfront_tchar_to_char(const char *wstr, OUT char *buf, size_t buflen /*# elements*/)
+drfront_tchar_to_char(const char *wstr, DR_PARAM_OUT char *buf,
+                      size_t buflen /*# elements*/)
 {
     strncpy(buf, wstr, buflen);
     buf[buflen - 1] = '\0';
@@ -197,7 +209,7 @@ drfront_tchar_to_char(const char *wstr, OUT char *buf, size_t buflen /*# element
 
 /* includes the terminating null */
 drfront_status_t
-drfront_tchar_to_char_size_needed(const char *wstr, OUT size_t *needed)
+drfront_tchar_to_char_size_needed(const char *wstr, DR_PARAM_OUT size_t *needed)
 {
     if (needed == NULL)
         return DRFRONT_ERROR_INVALID_PARAMETER;
@@ -209,7 +221,8 @@ drfront_tchar_to_char_size_needed(const char *wstr, OUT size_t *needed)
  * No conversion on UNIX, just copy the data.
  */
 drfront_status_t
-drfront_char_to_tchar(const char *str, OUT char *wbuf, size_t wbuflen /*# elements*/)
+drfront_char_to_tchar(const char *str, DR_PARAM_OUT char *wbuf,
+                      size_t wbuflen /*# elements*/)
 {
     strncpy(wbuf, str, wbuflen);
     wbuf[wbuflen - 1] = '\0';
@@ -217,7 +230,8 @@ drfront_char_to_tchar(const char *str, OUT char *wbuf, size_t wbuflen /*# elemen
 }
 
 drfront_status_t
-drfront_is_64bit_app(const char *exe, OUT bool *is_64, OUT bool *also_32)
+drfront_is_64bit_app(const char *exe, DR_PARAM_OUT bool *is_64,
+                     DR_PARAM_OUT bool *also_32)
 {
     FILE *target_file;
     drfront_status_t res = DRFRONT_ERROR;
@@ -244,7 +258,7 @@ drfront_is_64bit_app(const char *exe, OUT bool *is_64, OUT bool *also_32)
 
 /* This function is only relevant on Windows, so we return false. */
 drfront_status_t
-drfront_is_graphical_app(const char *exe, OUT bool *is_graphical)
+drfront_is_graphical_app(const char *exe, DR_PARAM_OUT bool *is_graphical)
 {
     if (is_graphical == NULL)
         return DRFRONT_ERROR_INVALID_PARAMETER;
@@ -253,7 +267,8 @@ drfront_is_graphical_app(const char *exe, OUT bool *is_graphical)
 }
 
 drfront_status_t
-drfront_get_env_var(const char *name, OUT char *buf, size_t buflen /*# elements*/)
+drfront_get_env_var(const char *name, DR_PARAM_OUT char *buf,
+                    size_t buflen /*# elements*/)
 {
     const char *tmp_buf = getenv(name);
     size_t len_var = 0;
@@ -276,7 +291,8 @@ drfront_get_env_var(const char *name, OUT char *buf, size_t buflen /*# elements*
  * which is inconsistent with Windows GetFullPathName().
  */
 drfront_status_t
-drfront_get_absolute_path(const char *rel, OUT char *buf, size_t buflen /*# elements*/)
+drfront_get_absolute_path(const char *rel, DR_PARAM_OUT char *buf,
+                          size_t buflen /*# elements*/)
 {
     size_t len = 0;
     char *err = NULL;
@@ -302,7 +318,8 @@ drfront_get_absolute_path(const char *rel, OUT char *buf, size_t buflen /*# elem
 }
 
 drfront_status_t
-drfront_get_app_full_path(const char *app, OUT char *buf, size_t buflen /*# elements*/)
+drfront_get_app_full_path(const char *app, DR_PARAM_OUT char *buf,
+                          size_t buflen /*# elements*/)
 {
     bool res = false;
     drfront_status_t status_check = DRFRONT_ERROR;
@@ -323,14 +340,15 @@ drfront_get_app_full_path(const char *app, OUT char *buf, size_t buflen /*# elem
 }
 
 drfront_status_t
-drfront_dir_exists(const char *path, OUT bool *is_dir)
+drfront_dir_exists(const char *path, DR_PARAM_OUT bool *is_dir)
 {
-    struct stat st_buf;
+    struct stat64 st_buf;
     if (is_dir == NULL)
         return DRFRONT_ERROR_INVALID_PARAMETER;
 
     /* check if path is a file or directory */
-    if (stat(path, &st_buf) != 0) {
+    /* Use the raw syscall to avoid glibc 2.33 deps (i#5474). */
+    if (dr_stat_syscall(path, &st_buf) != 0) {
         *is_dir = false;
         return DRFRONT_ERROR_INVALID_PATH;
     } else {
@@ -343,7 +361,7 @@ drfront_dir_exists(const char *path, OUT bool *is_dir)
 }
 
 drfront_status_t
-drfront_dir_try_writable(const char *path, OUT bool *is_writable)
+drfront_dir_try_writable(const char *path, DR_PARAM_OUT bool *is_writable)
 {
     /* It would be convenient to use O_TMPFILE but not all filesystems support it */
     int fd;

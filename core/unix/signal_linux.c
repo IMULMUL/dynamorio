@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2018 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2026 Google, Inc.  All rights reserved.
  * Copyright (c) 2000-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -380,6 +380,10 @@ handle_post_extended_syscall_sigmasks(dcontext_t *dcontext, bool success)
 {
     thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
     ASSERT(info->pre_syscall_app_sigprocmask_valid);
+    /* We restore the mask here *before* we make it back to dispatch for
+     * receive_pending_signal().  We rely on sigpending_t.unblocked_at_receipt
+     * to deliver the signal ignoring the now-restored mask.
+     */
     info->pre_syscall_app_sigprocmask_valid = false;
     signal_set_mask(dcontext, &info->pre_syscall_app_sigprocmask);
 }
@@ -409,7 +413,7 @@ handle_pre_signalfd(dcontext_t *dcontext, int fd, kernel_sigset_t *mask, size_t 
         if (pipe == NULL)
             return -EINVAL;
     } else {
-        /* FIXME i#1189: currently we do not properly handle two signalfds with
+        /* XXX i#1189: currently we do not properly handle two signalfds with
          * different but overlapping signal masks, as we do not monitor the
          * read/poll syscalls and thus cannot provide a set of pipes that
          * matches the two signal sets.  For now we err on the side of sending
@@ -441,13 +445,13 @@ handle_pre_signalfd(dcontext_t *dcontext, int fd, kernel_sigset_t *mask, size_t 
         /* Keep our write fd in the private fd space */
         pipe->write_fd = fd_priv_dup(fds[1]);
         os_close(fds[1]);
-        if (TEST(SFD_CLOEXEC, flags))
+        if (TESTANY(SFD_CLOEXEC, flags))
             fd_mark_close_on_exec(pipe->write_fd);
         fd_table_add(pipe->write_fd, 0 /*keep across fork*/);
 
         /* We need an un-closable copy of the read fd in case we need to dup it */
         pipe->read_fd = fd_priv_dup(fds[0]);
-        if (TEST(SFD_CLOEXEC, flags))
+        if (TESTANY(SFD_CLOEXEC, flags))
             fd_mark_close_on_exec(pipe->read_fd);
         fd_table_add(pipe->read_fd, 0 /*keep across fork*/);
 

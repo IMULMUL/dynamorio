@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2019 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2003-2008 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -32,11 +32,17 @@
  */
 
 /* Adapted from suite/tests/pthreads/ptsig.c, with extra cases added.
- * This is a test of signal corner cases.  It partners with trace_invariants.cpp,
+ * This is a test of signal corner cases.  It partners with invariant_checker.cpp,
  * passing annotations to indicate places to check.
  */
 
 #ifndef ASM_CODE_ONLY /* C code */
+
+/* Enable asserts in release build testing too.
+ * XXX: We should remove NDEBUG from suite/tests/CMakeLists-created binaries;
+ * we already do this for clients/drcachesim/CMakeLists-created binaries.
+ */
+#    undef NDEBUG
 
 #    include "tools.h"
 #    include <stdio.h>
@@ -57,7 +63,7 @@
 
 /* asm routines */
 void
-signal_handler_asm();
+signal_handler_asm(int sig, siginfo_t *siginfo, ucontext_t *ucxt);
 void
 test_signal_midbb(void);
 void
@@ -190,11 +196,14 @@ GLOBAL_LABEL(FUNCNAME:)
 #define FUNCNAME test_signal_midbb
         DECLARE_FUNC(FUNCNAME)
 GLOBAL_LABEL(FUNCNAME:)
-        /* prefetcht2's address is the instr count until a signal */
-        prefetcht2 [3]
+        /* prefetcht2's address is the instr count until a signal not counting
+         * the faulting instr because the faulting instr is removed from the
+         * trace.
+         */
+        prefetcht2 [2]
         nop
         nop
-        ud2a
+        ud2
         nop
         nop
         nop
@@ -205,11 +214,14 @@ GLOBAL_LABEL(FUNCNAME:)
 #define FUNCNAME test_signal_startbb
         DECLARE_FUNC(FUNCNAME)
 GLOBAL_LABEL(FUNCNAME:)
-        /* prefetcht2's address is the instr count until a signal */
-        prefetcht2 [2]
+        /* prefetcht2's address is the instr count until a signal not counting
+         * the faulting instr because the faulting instr is removed from the
+         * trace.
+         */
+        prefetcht2 [1]
         jmp      new_bb
     new_bb:
-        ud2a
+        ud2
         ret
         END_FUNC(FUNCNAME)
 #undef FUNCNAME
@@ -221,10 +233,15 @@ GLOBAL_LABEL(FUNCNAME:)
          * XXX i#3958: Today the 2nd movs memref is incorrectly included *before*
          * the fault.
          */
-        /* prefetcht2's address is the instr count until a signal */
-        prefetcht2 [5]
-        /* prefetcht1's address is the memref count until a signal */
-        prefetcht1 [3]
+        /* prefetcht2's address is the instr count until a signal not counting
+         * the faulting instr because the faulting instr is removed from the
+         * trace.
+         */
+        prefetcht2 [4]
+        /* prefetcht1's address is the memref count until a signal not counting
+         * the faulting memref because the faulting memref is removed from the trace.
+         */
+        prefetcht1 [1]
         mov      REG_XSI, HEX(42)
         mov      REG_XDI, REG_XSP
         push     REG_XAX

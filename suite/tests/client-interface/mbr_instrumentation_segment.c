@@ -52,13 +52,13 @@ int
 arch_prctl(int code, unsigned long addr);
 
 static int
-test_func()
+test_func(void)
 {
     return (42);
 }
 
 int
-main()
+main(int argc, const char *argv[])
 {
 #ifdef __i386__
     void *seg = mmap(NULL, getpagesize(), PROT_WRITE | PROT_READ,
@@ -87,7 +87,7 @@ main()
         syscall(SYS_set_thread_area, &u_info);
     }
 
-    /* FIXME i#1833: the following code with gs doesn't run properly with DynamoRIO
+    /* XXX i#1833: the following code with gs doesn't run properly with DynamoRIO
      * when it will, enable the following code for gs segment test.
      */
 #    if ENABLE_ONCE_1833_IS_FIXED
@@ -109,8 +109,8 @@ main()
                      : "m"(val)
                      : "eax");
 #else
-    void (*funcs[10])();
-    void *old_fs;
+    void (*funcs[10])(void);
+    void *old_fs, *old_gs;
 
     funcs[0x10 / sizeof(void *)] = (void *)&test_func;
 
@@ -121,18 +121,12 @@ main()
                      "call    *%fs:(%rax)\n");
     arch_prctl(ARCH_SET_FS, (unsigned long)old_fs);
 
-    /* FIXME i#1833: Actually only fs is test because gs is used by DynamoRIO
-     * and made it segfault, fs have to be restored because it's used by the kernel
-     * (for example to store the canary).
-     * When the segfault is fixed enable the following code to add
-     * the test for gs.
-     */
-#    if ENABLE_ONCE_1833_IS_FIXED
+    arch_prctl(ARCH_GET_GS, (unsigned long)&old_gs);
     arch_prctl(ARCH_SET_GS, (unsigned long)funcs);
     __asm__ volatile("call    *%gs:0x10\n"
                      "mov     $0x10, %rax\n"
                      "call    *%gs:(%rax)\n");
-#    endif
+    arch_prctl(ARCH_SET_GS, (unsigned long)old_gs);
 
 #endif
     return 0;

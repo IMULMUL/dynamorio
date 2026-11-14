@@ -1,5 +1,5 @@
 /* ******************************************************************************
- * Copyright (c) 2011-2019 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2024 Google, Inc.  All rights reserved.
  * Copyright (c) 2010 Massachusetts Institute of Technology  All rights reserved.
  * ******************************************************************************/
 
@@ -132,7 +132,7 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
         DR_ASSERT(false);
     client_id = id;
     mutex = dr_mutex_create();
-    dr_register_exit_event(event_exit);
+    drmgr_register_exit_event(event_exit);
     if (!drmgr_register_thread_init_event(event_thread_init) ||
         !drmgr_register_thread_exit_event(event_thread_exit) ||
         !drmgr_register_bb_instrumentation_event(NULL /*analysis func*/, event_bb_insert,
@@ -158,7 +158,7 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
 }
 
 static void
-event_exit()
+event_exit(void)
 {
 #ifdef SHOW_RESULTS
     char msg[512];
@@ -249,6 +249,21 @@ event_bb_insert(void *drcontext, void *tag, instrlist_t *bb, instr_t *instr,
 {
     if (instr_get_app_pc(instr) == NULL || !instr_is_app(instr))
         return DR_EMIT_DEFAULT;
+
+    /* We intentionally do not expand REP-prefixed string instructions here.
+     * instrace is a simple instruction tracer: it is concerned only with
+     * instruction fetches, not with per-iteration memory accesses.
+     *
+     * Expanding REP would emit multiple consecutive instances of the same
+     * instruction (one per iteration), which is often confusing in instrace
+     * output and differs from tools like perf that also count only a single
+     * instance.
+     *
+     * Users who want to observe per-iteration behavior of REP instructions
+     * should use emulation-aware samples such as memtrace, which consume the
+     * emulation metadata via drmgr_orig_app_instr_for_fetch() /
+     * drmgr_orig_app_instr_for_operands().
+     */
     instrument_instr(drcontext, bb, instr);
     return DR_EMIT_DEFAULT;
 }
@@ -337,10 +352,7 @@ instrument_instr(void *drcontext, instrlist_t *ilist, instr_t *where)
     opnd_t opnd1, opnd2;
     reg_id_t reg1, reg2;
     drvector_t allowed;
-    per_thread_t *data;
     app_pc pc;
-
-    data = drmgr_get_tls_field(drcontext, tls_index);
 
     /* Steal two scratch registers.
      * reg2 must be ECX or RCX for jecxz.
@@ -364,7 +376,6 @@ instrument_instr(void *drcontext, instrlist_t *ilist, instr_t *where)
      *    clean_call();
      */
     drmgr_insert_read_tls_field(drcontext, tls_index, ilist, where, reg2);
-    /* Load data->buf_ptr into reg2 */
     opnd1 = opnd_create_reg(reg2);
     opnd2 = OPND_CREATE_MEMPTR(reg2, offsetof(per_thread_t, buf_ptr));
     instr = INSTR_CREATE_mov_ld(drcontext, opnd1, opnd2);
@@ -392,7 +403,6 @@ instrument_instr(void *drcontext, instrlist_t *ilist, instr_t *where)
     instr = INSTR_CREATE_lea(drcontext, opnd1, opnd2);
     instrlist_meta_preinsert(ilist, where, instr);
 
-    /* Update the data->buf_ptr */
     drmgr_insert_read_tls_field(drcontext, tls_index, ilist, where, reg1);
     opnd1 = OPND_CREATE_MEMPTR(reg1, offsetof(per_thread_t, buf_ptr));
     opnd2 = opnd_create_reg(reg2);

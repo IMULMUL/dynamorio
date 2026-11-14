@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2016-2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2016-2026 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -34,14 +34,22 @@
  */
 
 #ifndef _HISTOGRAM_H_
-#define _HISTOGRAM_H_ 1
+#define _HISTOGRAM_H_
+
+#include <stddef.h>
+#include <stdint.h>
 
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 
 #include "analysis_tool.h"
 #include "memref.h"
+#include "trace_entry.h"
+
+namespace dynamorio {
+namespace drmemtrace {
 
 class histogram_t : public analysis_tool_t {
 public:
@@ -66,6 +74,17 @@ public:
     std::string
     parallel_shard_error(void *shard_data) override;
 
+    // This is public, with output parameters, for test use.
+    virtual bool
+    reduce_results(uint64_t *unique_icache_lines = nullptr,
+                   uint64_t *unique_dcache_lines = nullptr);
+
+    virtual std::optional<std::unordered_map<addr_t, uint64_t>>
+    get_icache_counts();
+
+    virtual std::optional<std::unordered_map<addr_t, uint64_t>>
+    get_dcache_counts();
+
 protected:
     struct shard_data_t {
         std::unordered_map<addr_t, uint64_t> icache_map;
@@ -73,15 +92,29 @@ protected:
         std::string error;
     };
 
+    static bool
+    cmp(const std::pair<addr_t, uint64_t> &l, const std::pair<addr_t, uint64_t> &r);
+
+    static inline addr_t
+    back_align(addr_t addr, addr_t align)
+    {
+        return addr & ~(align - 1);
+    }
+
     unsigned int knob_line_size_;
     unsigned int knob_report_top_; /* most accessed lines */
-    size_t line_size_bits_;
     static const std::string TOOL_NAME;
-    std::unordered_map<memref_tid_t, shard_data_t *> shard_map_;
+    std::unordered_map<int, shard_data_t *> shard_map_;
     // This mutex is only needed in parallel_shard_init.  In all other accesses to
     // shard_map (process_memref, print_results) we are single-threaded.
     std::mutex shard_map_mutex_;
     shard_data_t serial_shard_;
+    // The combined data from all the shards.
+    shard_data_t reduced_;
+    bool results_are_reduced_ = false;
 };
+
+} // namespace drmemtrace
+} // namespace dynamorio
 
 #endif /* _HISTOGRAM_H_ */

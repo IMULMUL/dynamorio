@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2000-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -125,7 +125,7 @@ enum {
  *   (pusha,shld,shrd,cmpxchg,cmpxhchg8b,rep outs,rep cmps, rep scas)
  * => no separate immed field
  *
- * FIXMEs:
+ * XXXs:
  * lea = computes addr, doesn't touch mem!  how encode?
  * in & out, ins & outs: are I/O ports in memory?!?
  * Should we model fp stack changes?!?
@@ -362,7 +362,7 @@ struct _decode_info_t {
     bool evex_encoded;
     byte evex_aaa; /* aaa bits for opmask */
     /* for instr_t* target encoding */
-    ptr_int_t cur_note;
+    ptr_int_t cur_offs;
     bool has_instr_opnds;
     dr_tuple_type_t tuple_type;
     opnd_size_t input_size;
@@ -370,6 +370,9 @@ struct _decode_info_t {
 
 /* N.B.: if you change the type enum, change the string names for
  * them, kept in encode.c
+ *
+ * The TYPE_x enums are listed in 'Appendix A Opcode Map (Intel SDM Volume 2)'
+ * specifically A.2.1 Codes for Addressing Method
  */
 
 /* operand types have 2 parts, type and size */
@@ -474,6 +477,11 @@ enum {
     TYPE_T_MODRM,                /* modrm.rm selects bnd0-bnd3 register or 8 bytes
                                   * memory in 32-bit mode, or 16 bytes memory in 64-bit
                                   * mode.
+                                  */
+    TYPE_G_ES_VAR_REG_SIZE,      /* modrm.reg selects register (like TYPE_G)
+                                  * containing an offset from ES, but (unlike TYPE_G)
+                                  * treated as a memory operand, with size controlled
+                                  * by PREFIX_ADDR.
                                   */
     /* when adding new types, update type_names[] in encode.c */
     TYPE_BEYOND_LAST_ENUM,

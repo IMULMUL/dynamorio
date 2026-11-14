@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2016-2018 Google, Inc.  All rights reserved.
+ * Copyright (c) 2016-2026 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -34,6 +34,7 @@
  * a "burst" of execution in the middle of the application.  It then detaches.
  */
 
+#include "test_helpers.h"
 /* We deliberately do not include configure.h here to simulate what an
  * actual app will look like.  configure_DynamoRIO_static sets DR_APP_EXPORTS
  * for us.
@@ -52,10 +53,17 @@
 #endif
 #include "../../../suite/tests/condvar.h"
 
+namespace dynamorio {
+namespace drmemtrace {
+
 static const int num_threads = 8;
+static const int num_idle_threads = 40;
 static const int burst_owner = 4;
 static bool finished[num_threads];
+static void *burst_owner_starting;
 static void *burst_owner_finished;
+static void *idle_thread_started[num_idle_threads];
+static void *idle_should_exit;
 
 bool
 my_setenv(const char *var, const char *value)
@@ -83,10 +91,12 @@ unsigned int __stdcall
 #else
 void *
 #endif
-    thread_func(void *arg)
+thread_func(void *arg)
 {
     unsigned int idx = (unsigned int)(uintptr_t)arg;
-    static const int reattach_iters = 4;
+    // We need the other threads to do enough work to be still executing
+    // code at detach time to stress state restore events.
+    int reattach_iters = (idx == burst_owner) ? 4 : 32;
     static const int outer_iters = 2048;
     /* We trace a 4-iter burst of execution. */
     static const int iter_start = outer_iters / 3;
@@ -98,10 +108,15 @@ void *
 #    define ALT_STACK_SIZE (SIGSTKSZ * 2)
     sigstack.ss_sp = (char *)malloc(ALT_STACK_SIZE);
     sigstack.ss_size = ALT_STACK_SIZE;
-    sigstack.ss_flags = SS_ONSTACK;
+    sigstack.ss_flags = 0;
     int res = sigaltstack(&sigstack, NULL);
     assert(res == 0);
 #endif
+
+    if (idx != burst_owner)
+        wait_cond_var(burst_owner_starting);
+    else
+        signal_cond_var(burst_owner_starting);
 
     /* We use an outer loop to test re-attaching (i#2157). */
     for (int j = 0; j < reattach_iters; ++j) {
@@ -151,24 +166,73 @@ void *
     return 0;
 }
 
+#ifdef WINDOWS
+unsigned int __stdcall
+#else
+void *
+#endif
+idle_thread_func(void *arg)
+{
+    unsigned int idx = (unsigned int)(uintptr_t)arg;
+    signal_cond_var(idle_thread_started[idx]);
+    wait_cond_var(idle_should_exit);
+    return 0;
+}
+
 int
-main(int argc, const char *argv[])
+test_main(int argc, const char *argv[])
 {
 #ifdef UNIX
     pthread_t thread[num_threads];
+    pthread_t idle_thread[num_idle_threads];
 #else
     uintptr_t thread[num_threads];
+    uintptr_t idle_thread[num_idle_threads];
 #endif
 
-    /* While the start/stop thread only runs 4 iters, the other threads end up
-     * running more and their trace files get up to 65MB or more, with the
-     * merged result several GB's: too much for a test.  We thus cap each thread.
-     */
-    if (!my_setenv("DYNAMORIO_OPTIONS",
-                   "-stderr_mask 0xc -client_lib ';;"
-                   "-offline -max_trace_size 256K'"))
+    // While the start/stop thread only runs 4 iters, the other threads end up
+    // running more and their trace files get up to 65MB or more, with the
+    // merged result several GB's: too much for a test.  We thus cap each thread.
+    // We set -disable_traces to help stress state recreation
+    // in drbbdup with prefixes on every block.
+    std::string dr_ops("-stderr_mask 0xc -disable_traces ");
+    std::string tracer_ops("-offline -align_endpoints -max_trace_size 256K ");
+    /* Support passing in extra DR and tracer options. */
+    bool next_dr = false;
+    for (int i = 1; i < argc; ++i) {
+        std::string arg(argv[i]);
+        if (next_dr) {
+            dr_ops += arg + " ";
+            next_dr = false;
+        } else if (arg == "-dr") {
+            next_dr = true;
+        } else {
+            tracer_ops += arg + " ";
+        }
+    }
+    std::string ops = dr_ops + " -client_lib ';;" + tracer_ops + "'";
+    if (!my_setenv("DYNAMORIO_OPTIONS", ops.c_str()))
         std::cerr << "failed to set env var!\n";
 
+    // Create some threads that do nothing to test -align_endpoints omitting them.
+    // On Linux, DR's attach wakes these up and the auto-restart SYS_futex runs
+    // one syscall instruction which depending on end-of-attach timing may be
+    // emitted and so the thread will show up.  But with enough threads we can be
+    // pretty sure very few of them will be in the trace.
+    idle_should_exit = create_cond_var();
+    for (uint i = 0; i < num_idle_threads; i++) {
+        idle_thread_started[i] = create_cond_var();
+#ifdef UNIX
+        pthread_create(&idle_thread[i], NULL, idle_thread_func, (void *)(uintptr_t)i);
+#else
+        idle_thread[i] =
+            _beginthreadex(NULL, 0, idle_thread_func, (void *)(uintptr_t)i, 0, NULL);
+#endif
+        wait_cond_var(idle_thread_started[i]);
+    }
+
+    // Create the main thread pool.
+    burst_owner_starting = create_cond_var();
     burst_owner_finished = create_cond_var();
     for (uint i = 0; i < num_threads; i++) {
 #ifdef UNIX
@@ -188,7 +252,22 @@ main(int argc, const char *argv[])
         if (!finished[i])
             std::cerr << "thread " << i << " failed to finish\n";
     }
+    // Exit the idle threads.
+    signal_cond_var(idle_should_exit);
+    for (uint i = 0; i < num_idle_threads; i++) {
+#ifdef UNIX
+        pthread_join(idle_thread[i], NULL);
+#else
+        WaitForSingleObject((HANDLE)idle_thread[i], INFINITE);
+#endif
+        destroy_cond_var(idle_thread_started[i]);
+    }
     std::cerr << "all done\n";
+    destroy_cond_var(burst_owner_starting);
     destroy_cond_var(burst_owner_finished);
+    destroy_cond_var(idle_should_exit);
     return 0;
 }
+
+} // namespace drmemtrace
+} // namespace dynamorio

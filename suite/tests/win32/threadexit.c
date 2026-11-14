@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2014-2017 Google, Inc.  All rights reserved.
+ * Copyright (c) 2014-2026 Google, Inc.  All rights reserved.
  * Copyright (c) 2005-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -121,7 +121,8 @@ sort()
 #endif
 }
 
-unsigned int __stdcall executor(void *arg)
+unsigned int __stdcall
+executor(void *arg)
 {
     int w;
     sort(); /* do some work */
@@ -144,8 +145,9 @@ main()
     int round;
     int t;
 
-    GET_NTDLL(NtTerminateProcess,
-              (IN HANDLE ProcessHandle OPTIONAL, IN NTSTATUS ExitStatus));
+    GET_NTDLL(
+        NtTerminateProcess,
+        (DR_PARAM_IN HANDLE ProcessHandle OPTIONAL, DR_PARAM_IN NTSTATUS ExitStatus));
 
     INIT();
 

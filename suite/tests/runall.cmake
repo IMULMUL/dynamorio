@@ -1,5 +1,5 @@
 # **********************************************************
-# Copyright (c) 2018-2020 Google, Inc.    All rights reserved.
+# Copyright (c) 2018-2025 Google, Inc.    All rights reserved.
 # Copyright (c) 2009-2010 VMware, Inc.    All rights reserved.
 # **********************************************************
 
@@ -31,17 +31,25 @@
 
 # For testing apps that need to be running while another action is taken
 # in a separate process.
-# FIXME i#120: add in all the runall/runalltest.sh tests
+# XXX i#120: add in all the runall/runalltest.sh tests
 
 # input:
+# * precmd = pre processing command to run
 # * cmd = command to run in background that uses run_in_bg, which will
 #     print the pid to stdout.
 #     should have intra-arg space=@@ and inter-arg space=@ and ;=!
+# * postcmd = post processing command to run
+# * postcmdN (for N=2+) = additional post processing commands to run
 # * toolbindir
 # * out = file where output of background process will be sent
 # * pidfile = file where the pid of the background process will be written
-# * nudge = arguments to nudgeunix or drconfig
+# * nudge = arguments to drnudgeunix or drconfig
 # * clear = dir to clear ahead of time
+
+cmake_minimum_required(VERSION 3.14)
+
+get_filename_component(current_directory_path "${CMAKE_CURRENT_LIST_FILE}" PATH)
+include(${current_directory_path}/process_cmdline.cmake NO_POLICY_SCOPE)
 
 # intra-arg space=@@ and inter-arg space=@
 string(REGEX REPLACE "@@" " " cmd "${cmd}")
@@ -65,6 +73,9 @@ if (pidfile)
 endif ()
 file(REMOVE ${out})
 
+# Run the pre processig command.
+process_cmdline(precmd ON tomatch)
+
 # Run the target in the background.
 execute_process(COMMAND ${cmd}
   RESULT_VARIABLE cmd_result
@@ -80,7 +91,7 @@ if (UNIX)
   if (NOT SLEEP)
     message(FATAL_ERROR "cannot find 'sleep'")
   endif ()
-  set(nudge_cmd nudgeunix)
+  set(nudge_cmd drnudgeunix)
 else (UNIX)
   # We use "ping" on Windows to "sleep" :)
   find_program(PING "ping")
@@ -89,6 +100,12 @@ else (UNIX)
   endif ()
   set(nudge_cmd drconfig)
 endif (UNIX)
+
+if (UNIX)
+  set(detach_cmd drconfig)
+else ()
+  set(detach_cmd drconfig.exe)
+endif()
 
 if (UNIX)
   set(MAX_ITERS 50000)
@@ -103,9 +120,33 @@ function (do_sleep ms)
   else ()
     # XXX: ping's units are secs.  For now we always do 1 sec.
     # We could try to use cygwin bash or perl.
-    execute_process(COMMAND ${PING} 127.0.0.1 -n 1 OUTPUT_QUIET)
+    execute_process(COMMAND ${PING} 127.0.0.1 -n 2 OUTPUT_QUIET)
   endif ()
 endfunction (do_sleep)
+
+function (wait_to_attach pid)
+  set(status_file "/proc/${pid}/status")
+  # Is attach_state still running?
+  if (NOT EXISTS "${status_file}")
+    message(FATAL_ERROR "attach_state process ${pid} not running.\n")
+  endif()
+  # Wait until attach_state has set status to "att_test_loop".
+  set(iters 0)
+  while (EXISTS "${status_file}")
+    execute_process(COMMAND "grep" ^Name ${status_file}
+                    COMMAND "cut" -f 2
+                    COMMAND tr -d $'\n' OUTPUT_VARIABLE name)
+    if ("${name}" STREQUAL "att_test_loop")
+      return()
+    endif ()
+    do_sleep(0.1)
+    math(EXPR iters "${iters}+1")
+    if (${iters} GREATER ${MAX_ITERS})
+      message(FATAL_ERROR "Timed out waiting for attach_state (${pid}) to be ready.")
+    endif ()
+  endwhile ()
+  message(FATAL_ERROR "attach_state (${pid}) ended without being ready for attach.")
+endfunction (wait_to_attach)
 
 function (kill_background_process force)
   if (UNIX)
@@ -153,6 +194,16 @@ if (pidfile)
     endif ()
   endwhile ()
   file(READ "${pidfile}" pid)
+  set(iters 0)
+  while ("${pid}" STREQUAL "")
+    do_sleep(0.1)
+    math(EXPR iters "${iters}+1")
+    if (${iters} GREATER ${MAX_ITERS})
+      kill_background_process(ON)
+      message(FATAL_ERROR "Timed out waiting for ${pidfile} content")
+    endif ()
+    file(READ "${pidfile}" pid)
+  endwhile ()
   string(REGEX REPLACE "\n" "" pid ${pid})
 endif ()
 
@@ -185,8 +236,45 @@ if ("${nudge}" MATCHES "<use-persisted>")
   if (NOT "${maps}" MATCHES "\\.dpc\n")
     set(fail_msg "no .dpc files found in ${maps}: not using pcaches!")
   endif ()
+elseif ("${nudge}" MATCHES "<attach>")
+  if ("${wait}" STREQUAL "wait")
+    wait_to_attach(${pid})
+  endif ()
+  set(nudge_cmd run_in_bg)
+  string(REGEX REPLACE "<attach>"
+    "${toolbindir}/drrun@-attach@${pid}@-takeover_sleep@-takeovers@1000"
+    nudge "${nudge}")
+  string(REGEX REPLACE "@" ";" nudge "${nudge}")
+  execute_process(COMMAND "${toolbindir}/${nudge_cmd}" ${nudge}
+   RESULT_VARIABLE nudge_result
+   ERROR_VARIABLE nudge_err
+   OUTPUT_VARIABLE nudge_out
+   )
+  # combine out and err
+  set(nudge_err "${nudge_out}${nudge_err}")
+  if (nudge_result)
+    kill_background_process(ON)
+    message(FATAL_ERROR "*** ${nudge_cmd} failed (${nudge_result}): ${nudge_err}***\n")
+  endif (nudge_result)
+elseif ("${nudge}" MATCHES "<detach>")
+  set(nudge_cmd run_in_bg)
+  string(REGEX REPLACE "<detach>"
+    "${toolbindir}/drrun@-attach@${pid}@-takeover_sleep@-takeovers@1000"
+    nudge "${nudge}")
+  string(REGEX REPLACE "@" ";" nudge "${nudge}")
+  execute_process(COMMAND "${toolbindir}/${nudge_cmd}" ${nudge}
+    RESULT_VARIABLE nudge_result
+    ERROR_VARIABLE nudge_err
+    OUTPUT_VARIABLE nudge_out
+    )
+  # Combine out and err.
+  set(nudge_err "${nudge_out}${nudge_err}")
+  if (nudge_result)
+    kill_background_process(ON)
+    message(FATAL_ERROR "*** ${nudge_cmd} failed (${nudge_result}): ${nudge_err}***\n")
+  endif (nudge_result)
 else ()
-  # nudgeunix and drconfig have different syntax:
+  # drnudgeunix and drconfig have different syntax:
   if (WIN32)
     # XXX i#120: expand beyond -client.
     string(REGEX REPLACE "-client" "-nudge_timeout;30000;-nudge_pid;${pid}"
@@ -223,14 +311,50 @@ if ("${orig_nudge}" MATCHES "-client")
       message(FATAL_ERROR "Timed out waiting for more output")
     endif ()
   endwhile()
+elseif ("${orig_nudge}" MATCHES "<attach>" OR "${orig_nudge}" MATCHES "<detach>")
+  # Wait until thread init.
+  set(iters 0)
+  while (NOT "${output}" MATCHES "thread init\n")
+    do_sleep(0.1)
+    file(READ "${out}" output)
+    math(EXPR iters "${iters}+1")
+    if (${iters} GREATER ${MAX_ITERS})
+      kill_background_process(ON)
+      message(FATAL_ERROR "Timed out waiting for thread init")
+    endif ()
+  endwhile()
 else ()
   # for reset or other DR tests there won't be further output
   # so we have to guess how long to wait.
-  # FIXME: should we instead turn on stderr_mask?
+  # XXX: should we instead turn on stderr_mask?
   do_sleep(0.5)
 endif ()
 
-kill_background_process(OFF)
+if ("${orig_nudge}" MATCHES "<detach>")
+  execute_process(COMMAND "${toolbindir}/${detach_cmd}" "-detach" ${pid}
+    RESULT_VARIABLE detach_result
+    ERROR_VARIABLE  detach_err
+    OUTPUT_VARIABLE detach_out)
+  set(detach_err "${detach_out}${detach_err}")
+  if (detach_result)
+    message(FATAL_ERROR "*** detach failed (${detach_result}): ${detach_err}***\n")
+  endif (detach_result)
+  # Wait until detach.
+  set(iters 0)
+  while (NOT "${output}" MATCHES "detach\n")
+    do_sleep(0.1)
+    file(READ "${out}" output)
+    math(EXPR iters "${iters}+1")
+    if (${iters} GREATER ${MAX_ITERS})
+      kill_background_process(ON)
+      message(FATAL_ERROR "Timed out waiting for detach")
+    endif ()
+  endwhile()
+endif ()
+
+if (NOT "${nokill}" STREQUAL "nokill")
+  kill_background_process(OFF)
+endif ()
 
 if (NOT "${fail_msg}" STREQUAL "")
   message(FATAL_ERROR "${fail_msg}")
@@ -252,15 +376,25 @@ while (NOT "${output}" MATCHES "\ndone\n")
   endif ()
 endwhile()
 
+# Run post processing commands.
+if (NOT "${postcmd}" STREQUAL "")
+  process_cmdline(postcmd ON tomatch)
+  set(num 2)
+  while (NOT "${postcmd${num}}" STREQUAL "")
+    process_cmdline(postcmd${num} ON tomatch)
+    math(EXPR num "${num} + 1")
+  endwhile ()
+endif()
+
 # message() adds a newline so removing any trailing newline
 string(REGEX REPLACE "[ \n]+$" "" output "${output}")
+string(CONCAT output ${output} ${tomatch})
 message("${output}")
 
+# Sometimes infloop keeps running: XXX: figure out why.
 if (UNIX)
-  # sometimes infloop keeps running: FIXME: figure out why
   execute_process(COMMAND "${KILL}" -9 ${pid} ERROR_QUIET OUTPUT_QUIET)
   # we can't run pkill b/c there are other tests running infloop (i#1341)
 else ()
-  # We could run "${toolbindir}/DRkill.exe" -pid ${pid} but we shouldn't need to
-  # as the app itself has a timeout.
+  execute_process(COMMAND "${toolbindir}/DRkill.exe" -pid ${pid} ERROR_QUIET OUTPUT_QUIET)
 endif ()

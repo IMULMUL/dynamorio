@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2022 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -33,34 +33,27 @@
 /* Tests the drwrap extension */
 
 #include "dr_api.h"
+#include "client_tools.h"
 #include "drwrap.h"
 #include "drmgr.h"
 #include <string.h> /* memset */
-
-#define CHECK(x, msg)                        \
-    do {                                     \
-        if (!(x)) {                          \
-            dr_fprintf(STDERR, "%s\n", msg); \
-            dr_abort();                      \
-        }                                    \
-    } while (0);
 
 #define DRWRAP_NATIVE_PARAM 0xdeadbeef
 
 static void
 event_exit(void);
 static void
-wrap_pre(void *wrapcxt, OUT void **user_data);
+wrap_pre(void *wrapcxt, DR_PARAM_OUT void **user_data);
 static void
 wrap_post(void *wrapcxt, void *user_data);
 static void
 wrap_post_might_miss(void *wrapcxt, void *user_data);
 static void
-wrap_unwindtest_pre(void *wrapcxt, OUT void **user_data);
+wrap_unwindtest_pre(void *wrapcxt, DR_PARAM_OUT void **user_data);
 static void
 wrap_unwindtest_post(void *wrapcxt, void *user_data);
 static void
-wrap_unwindtest_seh_pre(void *wrapcxt, OUT void **user_data);
+wrap_unwindtest_seh_pre(void *wrapcxt, DR_PARAM_OUT void **user_data);
 static void
 wrap_unwindtest_seh_post(void *wrapcxt, void *user_data);
 static int
@@ -76,6 +69,9 @@ static ptr_uint_t repeat_xsp;
 #ifdef ARM
 static ptr_uint_t repeat_link;
 #endif
+static void *mutex_lock;
+static void *rw_lock;
+static void *recur_lock;
 
 static int tls_idx;
 
@@ -108,7 +104,7 @@ static app_pc addr_tailcall_test2;
 static app_pc addr_tailcall_tail;
 
 static void
-wrap_addr(INOUT app_pc *addr, const char *name, const module_data_t *mod,
+wrap_addr(DR_PARAM_OUT app_pc *addr, const char *name, const module_data_t *mod,
           void (*pre_cb)(void *, void **), void (*post_cb)(void *, void *), uint flags)
 {
     bool ok;
@@ -135,7 +131,8 @@ unwrap_addr(app_pc addr, const char *name, const module_data_t *mod,
 }
 
 static void
-wrap_unwindtest_addr(OUT app_pc *addr, const char *name, const module_data_t *mod)
+wrap_unwindtest_addr(DR_PARAM_OUT app_pc *addr, const char *name,
+                     const module_data_t *mod)
 {
     bool ok;
     *addr = (app_pc)dr_get_proc_address(mod->handle, name);
@@ -341,16 +338,25 @@ dr_init(client_id_t id)
 {
     drmgr_init();
     drwrap_init();
-    dr_register_exit_event(event_exit);
+    drmgr_register_exit_event(event_exit);
     drmgr_register_module_load_event(module_load_event);
     drmgr_register_module_unload_event(module_unload_event);
     tls_idx = drmgr_register_tls_field();
     CHECK(tls_idx > -1, "unable to reserve TLS field");
+    mutex_lock = dr_mutex_create();
+    dr_mutex_mark_as_app(mutex_lock);
+    rw_lock = dr_rwlock_create();
+    dr_rwlock_mark_as_app(rw_lock);
+    recur_lock = dr_recurlock_create();
+    dr_recurlock_mark_as_app(recur_lock);
 }
 
 static void
 event_exit(void)
 {
+    dr_mutex_destroy(mutex_lock);
+    dr_rwlock_destroy(rw_lock);
+    dr_recurlock_destroy(recur_lock);
     drwrap_stats_t stats = {
         sizeof(stats),
     };
@@ -373,6 +379,16 @@ replacewith(int *x)
 static int
 on_clean_stack(int i, int j, int k, int l, int m, int n, int o, int p)
 {
+    /* Test lock/unlock of marked-app lock. */
+    dr_mutex_lock(mutex_lock);
+    dr_mutex_unlock(mutex_lock);
+    dr_rwlock_read_lock(rw_lock);
+    dr_rwlock_read_unlock(rw_lock);
+    dr_rwlock_write_lock(rw_lock);
+    dr_rwlock_write_unlock(rw_lock);
+    dr_recurlock_lock(recur_lock);
+    dr_recurlock_unlock(recur_lock);
+
     return i + j + k + l + m + n + o + p;
 }
 
@@ -414,7 +430,7 @@ replace_callsite(int *x)
 }
 
 static void
-wrap_pre(void *wrapcxt, OUT void **user_data)
+wrap_pre(void *wrapcxt, DR_PARAM_OUT void **user_data)
 {
     bool ok;
     CHECK(wrapcxt != NULL && user_data != NULL, "invalid arg");
@@ -557,7 +573,7 @@ wrap_post_might_miss(void *wrapcxt, void *user_data)
 }
 
 static void
-wrap_unwindtest_pre(void *wrapcxt, OUT void **user_data)
+wrap_unwindtest_pre(void *wrapcxt, DR_PARAM_OUT void **user_data)
 {
     if (drwrap_get_func(wrapcxt) != addr_longdone) {
         void *drcontext = dr_get_current_drcontext();
@@ -587,7 +603,7 @@ wrap_unwindtest_post(void *wrapcxt, void *user_data)
 }
 
 static void
-wrap_unwindtest_seh_pre(void *wrapcxt, OUT void **user_data)
+wrap_unwindtest_seh_pre(void *wrapcxt, DR_PARAM_OUT void **user_data)
 {
     wrap_unwindtest_pre(wrapcxt, user_data);
 }

@@ -2,9 +2,8 @@ Hello, world!
 ---- <application exited with code 0> ----
 Basic counts tool results:
 Total counts:
-     .* total \(fetched\) instructions
-     .* total unique \(fetched\) instructions
-     .* total non-fetched instructions
+     .* total instructions
+     .* total unique instructions
 #if defined(X86) && !defined(X64)
            0 total prefetches
 #else
@@ -15,17 +14,11 @@ Total counts:
      .* total icache flushes
      .* total dcache flushes
            1 total threads
-     .* total scheduling markers
-     .* total transfer markers
-     .* total function id markers
-     .* total function return address markers
-     .* total function argument markers
-     .* total function return value markers
-     .* total other markers
+     .* total timestamp \+ cpuid markers
+.*
 Thread .* counts:
-     .* \(fetched\) instructions
-     .* unique \(fetched\) instructions
-     .* non-fetched instructions
+     .* instructions
+     .* unique instructions
 #if defined(X86) && !defined(X64)
            0 prefetches
 #else
@@ -35,10 +28,5 @@ Thread .* counts:
      .* data stores
      .* icache flushes
      .* dcache flushes
-     .* scheduling markers
-     .* transfer markers
-     .* function id markers
-     .* function return address markers
-     .* function argument markers
-     .* function return value markers
-     .* other markers
+     .* timestamp \+ cpuid markers
+.*

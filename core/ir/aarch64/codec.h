@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2016 ARM Limited. All rights reserved.
+ * Copyright (c) 2016-2021 ARM Limited. All rights reserved.
  * **********************************************************/
 
 /*
@@ -31,15 +31,55 @@
  */
 
 #ifndef CODEC_H
-#define CODEC_H 1
+#define CODEC_H
 
 #include "decode_private.h"
 
-#define ENCFAIL (uint)0 /* a value that is not a valid instruction */
+#define ENCFAIL (uint)0xFFFFFFFF /* a value that is not a valid instruction */
+
+typedef enum {
+    BYTE_REG = 0,
+    HALF_REG = 1,
+    SINGLE_REG = 2,
+    DOUBLE_REG = 3,
+    QUAD_REG = 4,
+    Z_REG = 5,
+    NOT_A_REG = 255
+} aarch64_reg_offset;
 
 byte *
 decode_common(dcontext_t *dcontext, byte *pc, byte *orig_pc, instr_t *instr);
 uint
 encode_common(byte *pc, instr_t *i, decode_info_t *di);
+uint
+isa_feature_common(byte *pc, instr_t *i, decode_info_t *di);
+
+#define MASK(size) ((1ULL << (size)) - 1ULL)
+
+#define BITS(_enc, bitmax, bitmin) \
+    ((((uint32)(_enc)) >> (bitmin)) & (uint32)MASK((bitmax) - (bitmin) + 1))
+
+#define RETURN_FALSE                                               \
+    do {                                                           \
+        CLIENT_ASSERT(false, "Unexpected state in AArch64 codec"); \
+        return false;                                              \
+    } while (0);
+
+// Frustratingly vera++ fails if RETURN_FALSE is referenced inside this macro
+#define IF_RETURN_FALSE(condition)                                 \
+    if (condition) {                                               \
+        CLIENT_ASSERT(false, "Unexpected state in AArch64 codec"); \
+        return false;                                              \
+    }
+
+#define EXCLUDE_ELEMENT(elsz)                                                \
+    do {                                                                     \
+        if (!opnd_is_element_vector_reg(opnd))                               \
+            return false;                                                    \
+                                                                             \
+        const aarch64_reg_offset size = get_vector_element_reg_offset(opnd); \
+        if (size == NOT_A_REG || size == elsz)                               \
+            return false;                                                    \
+    } while (0);
 
 #endif /* CODEC_H */

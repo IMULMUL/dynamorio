@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2008-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -37,7 +37,7 @@
  */
 
 #ifndef _OS_PRIVATE_H_
-#define _OS_PRIVATE_H_ 1
+#define _OS_PRIVATE_H_
 
 #include <signal.h> /* for stack_t */
 #include "include/siginfo.h"
@@ -49,6 +49,10 @@
 #include "tls.h"
 #include "memquery.h"
 #include "../drlibc/drlibc_unix.h"
+
+#if defined(ANDROID)
+#    include <android/api-level.h>
+#endif
 
 /* for inline asm */
 #ifdef DR_HOST_X86
@@ -71,6 +75,8 @@
 #    define ASM_R1 "x1"
 #    define ASM_R2 "x2"
 #    define ASM_R3 "x3"
+#    define ASM_R4 "x4"
+#    define ASM_R30 "x30"
 #    define ASM_XSP "sp"
 #    define ASM_INDJMP "br"
 #elif defined(DR_HOST_ARM)
@@ -78,14 +84,26 @@
 #    define ASM_R1 "r1"
 #    define ASM_R2 "r2"
 #    define ASM_R3 "r3"
+#    define ASM_R4 "r4"
 #    define ASM_XSP "sp"
 #    define ASM_INDJMP "bx"
+#elif defined(DR_HOST_RISCV64)
+#    define ASM_R0 "a0"
+#    define ASM_R1 "a1"
+#    define ASM_R2 "a2"
+#    define ASM_R3 "a3"
+#    define ASM_R4 "a4"
+#    define ASM_XSP "sp"
+#    define ASM_INDJMP "jr"
 #endif /* X86/ARM */
 
 #define MACHINE_TLS_IS_DR_TLS IF_X86_ELSE(INTERNAL_OPTION(mangle_app_seg), true)
 
-/* PR 212090: the signal we use to suspend threads */
-#define SUSPEND_SIGNAL SIGUSR2
+/* The signal we use to suspend threads.
+ * It may equal NUDGESIG_SIGNUM.
+ */
+extern int suspend_signum;
+#define SUSPEND_SIGNAL suspend_signum
 
 #ifdef MACOS
 /* While there is no clone system call, we use the same clone flags to share
@@ -111,6 +129,10 @@
      CLONE_SETTLS | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID)
 
 #define SYSCALL_PARAM_CLONE_STACK 1
+
+#define SYSCALL_PARAM_CLONE3_CLONE_ARGS 0
+#define SYSCALL_PARAM_CLONE3_CLONE_ARGS_SIZE 1
+#define CLONE3_FLAGS_4_BYTE_MASK 0x00000000ffffffffUL
 
 struct _os_local_state_t;
 
@@ -205,11 +227,6 @@ os_get_priv_tls_base(dcontext_t *dcontext, reg_id_t seg);
 void
 os_tls_thread_exit(local_state_t *local_state);
 
-#ifdef AARCHXX
-bool
-os_set_app_tls_base(dcontext_t *dcontext, reg_id_t reg, void *base);
-#endif
-
 #ifdef MACOS
 /* xref i#1404: we should expose these via the dr_get_os_version() API */
 #    define MACOS_VERSION_MOJAVE 18
@@ -265,6 +282,9 @@ os_walk_address_space(memquery_iter_t *iter, bool add_modules);
 bool
 is_sigreturn_syscall_number(int sysnum);
 
+bool
+is_sigqueue_supported(void);
+
 /* in signal.c */
 struct _kernel_sigaction_t;
 typedef struct _kernel_sigaction_t kernel_sigaction_t;
@@ -305,11 +325,11 @@ signal_reinstate_handlers(dcontext_t *dcontext, bool ignore_alarm);
 void
 signal_reinstate_alarm_handlers(dcontext_t *dcontext);
 void
-handle_clone(dcontext_t *dcontext, uint flags);
+handle_clone(dcontext_t *dcontext, uint64 flags);
 /* If returns false to skip the syscall, the result is in "result". */
 bool
 handle_sigaction(dcontext_t *dcontext, int sig, const kernel_sigaction_t *act,
-                 prev_sigaction_t *oact, size_t sigsetsize, OUT uint *result);
+                 prev_sigaction_t *oact, size_t sigsetsize, DR_PARAM_OUT uint *result);
 /* Returns the desired app return value (caller will negate if nec) */
 uint
 handle_post_sigaction(dcontext_t *dcontext, bool success, int sig,
@@ -319,7 +339,7 @@ handle_post_sigaction(dcontext_t *dcontext, bool success, int sig,
 /* If returns false to skip the syscall, the result is in "result". */
 bool
 handle_old_sigaction(dcontext_t *dcontext, int sig, const old_sigaction_t *act,
-                     old_sigaction_t *oact, OUT uint *result);
+                     old_sigaction_t *oact, DR_PARAM_OUT uint *result);
 /* Returns the desired app return value (caller will negate if nec) */
 uint
 handle_post_old_sigaction(dcontext_t *dcontext, bool success, int sig,
@@ -342,12 +362,12 @@ handle_post_extended_syscall_sigmasks(dcontext_t *dcontext, bool success);
 
 bool
 handle_sigaltstack(dcontext_t *dcontext, const stack_t *stack, stack_t *old_stack,
-                   reg_t cur_xsp, OUT uint *result);
+                   reg_t cur_xsp, DR_PARAM_OUT uint *result);
 
 bool
 handle_sigprocmask(dcontext_t *dcontext, int how, kernel_sigset_t *set,
-                   kernel_sigset_t *oset, size_t sigsetsize);
-void
+                   kernel_sigset_t *oset, size_t sigsetsize, uint *error_code);
+int
 handle_post_sigprocmask(dcontext_t *dcontext, int how, kernel_sigset_t *set,
                         kernel_sigset_t *oset, size_t sigsetsize);
 void
@@ -390,6 +410,9 @@ os_terminate_via_signal(dcontext_t *dcontext, terminate_flags_t flags, int sig);
 
 bool
 thread_signal(process_id_t pid, thread_id_t tid, int signum);
+
+bool
+thread_signal_queue(process_id_t pid, thread_id_t tid, int signum, void *value);
 
 void
 start_itimer(dcontext_t *dcontext);
@@ -440,20 +463,23 @@ os_request_live_coredump(const char *msg);
 
 /* in loader.c */
 void *
-privload_tls_init(void *app_tp);
+privload_tls_init(void *app_tp, bool use_safe_read);
 void
 privload_tls_exit(void *dr_tp);
 #ifdef ANDROID
+#    if __ANDROID_API__ < 26
 bool
-get_kernel_args(int *argc OUT, char ***argv OUT, char ***envp OUT);
+get_kernel_args(int *argc DR_PARAM_OUT, char ***argv DR_PARAM_OUT,
+                char ***envp DR_PARAM_OUT);
+#    endif
 void
 init_android_version(void);
 #endif
 
 /* in nudgesig.c */
 bool
-create_nudge_signal_payload(kernel_siginfo_t *info OUT, uint action_mask,
-                            client_id_t client_id, uint64 client_arg);
+create_nudge_signal_payload(kernel_siginfo_t *info DR_PARAM_OUT, uint action_mask,
+                            uint flags, client_id_t client_id, uint64 client_arg);
 
 #ifdef X86
 /* In x86.asm */

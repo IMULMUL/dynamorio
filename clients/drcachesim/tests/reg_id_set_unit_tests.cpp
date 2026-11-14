@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2020-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -35,8 +35,12 @@
  * (fewer executables reduces the limited-resource CI time).
  */
 
+#include "test_helpers.h"
 #include <assert.h>
 #include "tracer/instru.h"
+
+namespace dynamorio {
+namespace drmemtrace {
 
 void
 reg_id_set_unit_tests()
@@ -87,3 +91,6 @@ reg_id_set_unit_tests()
     find_res = set.find(DR_REG_START_GPR + 3);
     assert(find_res == set.end());
 }
+
+} // namespace drmemtrace
+} // namespace dynamorio

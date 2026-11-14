@@ -62,12 +62,12 @@ is_protection_enabled()
 }
 
 DWORD
-enable_protection_ex(BOOL inject, DWORD flags, const WCHAR *blacklist,
-                     const WCHAR *whitelist, DWORD *list_error,
+enable_protection_ex(BOOL inject, DWORD flags, const WCHAR *blocklist,
+                     const WCHAR *allowlist, DWORD *list_error,
                      const WCHAR *custom_preinject_name, WCHAR *current_list,
                      SIZE_T maxchars)
 {
-    return set_autoinjection_ex(inject, flags, blacklist, whitelist, list_error,
+    return set_autoinjection_ex(inject, flags, blocklist, allowlist, list_error,
                                 custom_preinject_name, current_list, maxchars);
 }
 
@@ -182,7 +182,7 @@ main()
     set_debuglevel(DL_INFO);
     set_abortlevel(DL_WARN);
 
-    /* FIXME: wrapper testing (but may not be necessary...) */
+    /* XXX: wrapper testing (but may not be necessary...) */
 
     DO_ASSERT(get_eventlog_monitor_thread_handle() == NULL);
     CHECKED_OPERATION(clear_policy());

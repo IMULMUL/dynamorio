@@ -1,5 +1,5 @@
 # **********************************************************
-# Copyright (c) 2010-2020 Google, Inc.    All rights reserved.
+# Copyright (c) 2010-2025 Google, Inc.    All rights reserved.
 # Copyright (c) 2009-2010 VMware, Inc.    All rights reserved.
 # **********************************************************
 
@@ -40,17 +40,19 @@ function (add_gen_events_deps target)
   endif ()
 endfunction (add_gen_events_deps)
 
-# FIXME i#60: add rules from old Makefile for building unit tests
+# XXX i#60: add rules from old Makefile for building unit tests
 # the tests had been broken for a while
 
 # We avoid core/ to avoid conflicts between core/hashtable.h and drcontainers
 # hashtable.h.  An alternative would be to rename core/hashtable.h.
 include_directories(BEFORE
+  ${PROJECT_SOURCE_DIR}/core/include
   ${PROJECT_SOURCE_DIR}/core/lib
   ${PROJECT_SOURCE_DIR}/core/win32
   ${PROJECT_SOURCE_DIR}/core/arch
   ${PROJECT_SOURCE_DIR}/core/arch/${ARCH_NAME}
   ${PROJECT_BINARY_DIR} # for events.h
+  ${PROJECT_SOURCE_DIR}/core/drlibc # drlibc.h
   )
 
 if (WIN32)
@@ -85,7 +87,7 @@ set(ROOT_SRCS
 
 # drfrontendlib doesn't want NOT_DYNAMORIO_CORE, so we set that individually
 # on all the other targets.  They all want this:
-add_definitions(-DNOT_DYNAMORIO_CORE_PROPER)
+add_definitions(-DNOT_DYNAMORIO_CORE_PROPER -DDYNAMORIO_INTERNAL)
 
 if (WIN32)
   add_definitions(-D_CRT_SECURE_NO_WARNINGS -DUNICODE -D_UNICODE)
@@ -95,7 +97,7 @@ if (WIN32)
     add_definitions(-DHOT_PATCHING_INTERFACE)
   endif (NOT HOT_PATCHING_INTERFACE)
 
-  # FIXME i#98: fix the underlying cause of these warnings and remove these exceptions
+  # XXX i#98: fix the underlying cause of these warnings and remove these exceptions
   set(nowarn "/wd4996 /wd4047 /wd4024 /wd4133 /wd4127 /wd4100 /wd4292 /wd4127 /wd4100")
   set(libutil_cflags "/wd4996 /wd4047 /wd4024 /wd4133 /wd4127 /wd4100 /wd4292 /wd4127 /wd4100")
   set(libutil_ldflags "/nodefaultlib:libc.lib")
@@ -105,7 +107,7 @@ if (WIN32)
     set(libutil_ldflags "${libutil_ldflags} /debug")
   endif (DEBUG)
 
-  add_library(policy_static ${BASE_SRCS} ${ROOT_SRCS} ${CORE_SRCS})
+  add_library(policy_static STATIC ${BASE_SRCS} ${ROOT_SRCS} ${CORE_SRCS})
   set_target_properties(policy_static PROPERTIES
     COMPILE_FLAGS "${libutil_cflags}" COMPILE_DEFINITIONS "NOT_DYNAMORIO_CORE")
   set_target_properties(policy_static PROPERTIES
@@ -181,6 +183,8 @@ if (WIN32)
   endif (MFAPI_ENABLED)
 endif ()
 
+DR_export_header(${PROJECT_SOURCE_DIR}/core/lib/dr_config.h dr_config.h)
+
 install_exported_target(drconfiglib ${INSTALL_LIB_BASE})
 DR_export_target(drconfiglib)
 # drinject.exe and company need a copy in the bin dir (i#1737 would eliminate this)
@@ -212,3 +216,4 @@ endif ()
 add_static_lib_debug_info(drfrontendlib "${INSTALL_BIN}")
 DR_export_target(drfrontendlib)
 install_exported_target(drfrontendlib ${INSTALL_BIN})
+DR_export_header(${CMAKE_CURRENT_SOURCE_DIR}/dr_frontend.h dr_frontend.h)

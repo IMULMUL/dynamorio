@@ -1,5 +1,5 @@
 # **********************************************************
-# Copyright (c) 2012-2017 Google, Inc.    All rights reserved.
+# Copyright (c) 2012-2026 Google, Inc.    All rights reserved.
 # **********************************************************
 #
 # Redistribution and use in source and binary forms, with or without
@@ -90,6 +90,11 @@ function (check_if_linker_is_gnu_gold var_out)
   _DR_check_if_linker_is_gnu_gold(is_gold)
   set(${var_out} ${is_gold} PARENT_SCOPE)
 endfunction (check_if_linker_is_gnu_gold)
+
+function (check_if_linker_is_llvm_lld var_out)
+  _DR_check_if_linker_is_llvm_lld(is_lld)
+  set(${var_out} ${is_lld} PARENT_SCOPE)
+endfunction (check_if_linker_is_llvm_lld)
 
 # disable known warnings
 function (disable_compiler_warnings)
@@ -235,6 +240,25 @@ function (check_avx512_processor_and_compiler_support out)
   set(${out} ${proc_found_avx512} PARENT_SCOPE)
 endfunction (check_avx512_processor_and_compiler_support)
 
+# Check if the building machine support Intel PT.
+# This function only checks if PT-related tests need to be built. PT-capable
+# binaries can be built on any system. When building an export module, please
+# do not use it to check if PT-related libraries need to be built.
+function(check_intel_pt_support out)
+  if (NOT LINUX OR NOT X86 OR NOT X64)
+    message(STATUS "Intel PT not supported on this platform.")
+    set(${out} 0 PARENT_SCOPE)
+  else ()
+    if (EXISTS "/sys/devices/intel_pt/type")
+      message(STATUS "Intel PT is available.")
+      set(${out} 1 PARENT_SCOPE)
+    else ()
+      message(STATUS "Intel PT not found.")
+      set(${out} 0 PARENT_SCOPE)
+    endif()
+  endif ()
+endfunction(check_intel_pt_support)
+
 if (UNIX)
   # We always use a script for our own library bounds (PR 361594).
   # We could build this at configure time instead of build time as
@@ -242,21 +266,16 @@ if (UNIX)
   # XXX: this is duplicated in DynamoRIOConfig.cmake
 
   function (set_preferred_base_start_and_end target base set_bounds)
-    if (ANDROID)
-      # i#1863: Android's loader doesn't support a non-zero base.
-      # Turning off SET_PREFERRED_BASE is not sufficient as we get
-      # a 0x10000 base.
-      set(base 0)
-    endif ()
     if (APPLE)
       set(ldflags "-image_base ${base}")
-    elseif (NOT LINKER_IS_GNU_GOLD)
+    elseif (NOT LINKER_IS_GNU_GOLD AND NOT LINKER_IS_LLVM_LLD)
       set(ld_script ${CMAKE_CURRENT_BINARY_DIR}/${target}.ldscript)
       set_directory_properties(PROPERTIES
         ADDITIONAL_MAKE_CLEAN_FILES "${ld_script}")
       set(ldflags "-Wl,${ld_script_option},\"${ld_script}\"")
-      add_custom_command(TARGET ${target}
-        PRE_LINK
+      add_custom_target(${target}_ldscript DEPENDS ${ld_script})
+      add_dependencies(${target} ${target}_ldscript)
+      add_custom_command(OUTPUT ${ld_script}
         COMMAND ${CMAKE_COMMAND}
         # script does not inherit any vars so we must pass them all in
         # to work around i#84 be sure to put a space after -D for 1st arg at least
@@ -274,9 +293,13 @@ if (UNIX)
     else ()
       set(ldflags "")
       if (SET_PREFERRED_BASE)
-        # FIXME: This should be -Ttext-segment for bfd, but most golds want -Ttext.
-        # See http://sourceware.org/ml/binutils/2013-02/msg00194.html
-        set(ldflags "-Wl,-Ttext=${base}")
+        if (LINKER_IS_LLVM_LLD)
+          set(ldflags "-Wl,--image-base=${base}")
+        else ()
+          # XXX: This should be -Ttext-segment for bfd, but most golds want -Ttext.
+          # See http://sourceware.org/ml/binutils/2013-02/msg00194.html
+          set(ldflags "-Wl,-Ttext=${base}")
+        endif ()
       endif ()
       if (set_bounds)
         # Add our start and end symbols for library bounds.
@@ -294,3 +317,129 @@ if (UNIX)
   endfunction (set_preferred_base_start_and_end)
 
 endif (UNIX)
+
+function (check_sve_processor_and_compiler_support out vl_out)
+  include(CheckCSourceRuns)
+  set(sve_prog "#include <stdint.h>
+                #include <stdio.h>
+                int main() {
+                    uint64_t vl = 0;
+                    asm(\"rdvl %[dest], 1\" : [dest] \"=r\" (vl) : :);
+                    printf(\"%lu\", vl * 8);
+                    return 0;
+                 }")
+  set(CMAKE_REQUIRED_FLAGS ${CFLAGS_SVE})
+  if (CMAKE_CROSSCOMPILING)
+    # If we are cross-compiling check_c_source_runs() can't run the executable on the
+    # host to find out whether the target processor supports SVE, so we assume it
+    # doesn't.
+    set(proc_found_sve_EXITCODE 1 CACHE STRING
+        "Set to 0 if target processor/emulator supports SVE to enable SVE tests"
+        FORCE)
+  else ()
+    file(WRITE "${PROJECT_BINARY_DIR}/sve_check.c" "${sve_prog}\n")
+    try_run(proc_found_sve_EXITCODE proc_found_sve_COMPILED
+        ${PROJECT_BINARY_DIR}
+        ${PROJECT_BINARY_DIR}/sve_check.c
+        CMAKE_FLAGS -DCOMPILE_DEFINITIONS:STRING=${CFLAGS_SVE}
+        RUN_OUTPUT_VARIABLE sve_vl
+    )
+    if (NOT proc_found_sve_COMPILED)
+      set(proc_found_sve_EXITCODE 1)
+    endif()
+  endif ()
+  if (${proc_found_sve_EXITCODE} EQUAL 0)
+    message(STATUS "Compiler and processor support SVE (VL=${sve_vl}).")
+    set(${out} 1 PARENT_SCOPE)
+    set(${vl_out} ${sve_vl} PARENT_SCOPE)
+  else ()
+    message(STATUS "WARNING: Compiler or processor do not support SVE. "
+                   "Skipping tests")
+    set(${out} 0 PARENT_SCOPE)
+  endif ()
+endfunction (check_sve_processor_and_compiler_support)
+
+function (check_feature_processor_and_compiler_support
+          feat_name c_flags test_prog out)
+  include(CheckCSourceRuns)
+  set(CMAKE_REQUIRED_FLAGS ${c_flags})
+  if (CMAKE_CROSSCOMPILING)
+    # If we are cross-compiling check_c_source_runs() can't run the executable on the
+    # host to find out whether the target processor supports the feature, so we assume it
+    # doesn't.
+    set(proc_found_${feat_name}_EXITCODE 1 CACHE STRING
+        "Set to 0 if target processor/emulator supports ${feat_name} to enable ${feat_name} tests"
+        FORCE)
+  else ()
+    check_c_source_runs("${test_prog}" proc_found_${feat_name})
+  endif ()
+  if (proc_found_${feat_name})
+    message(STATUS "Compiler and processor support ${feat_name}.")
+  else ()
+    message(STATUS "WARNING: Compiler or processor do not support ${feat_name}. "
+                   "Skipping tests")
+  endif ()
+  set(${out} ${proc_found_${feat_name}} PARENT_SCOPE)
+endfunction (check_feature_processor_and_compiler_support)
+
+macro (check_sve2_processor_and_compiler_support out)
+  check_feature_processor_and_compiler_support(sve2
+    ${CFLAGS_SVE2}
+    "int main() {
+        asm(\"histcnt z0.d, p0/z, z0.d, z0.d\");
+        return 0;
+    }"
+    ${out}
+  )
+endmacro (check_sve2_processor_and_compiler_support)
+
+macro (check_pauth_processor_and_compiler_support out)
+  set(CMAKE_REQUIRED_INCLUDES "${PROJECT_SOURCE_DIR}/suite/tests/client-interface")
+
+  check_feature_processor_and_compiler_support(pauth
+    ${CFLAGS_PAUTH}
+    # Use the paciza instruction to verify that the compiler and CPU support
+    # the PAuth feature. (The code will SIGILL if the CPU does not support it.)
+    # Then read the Instruction Set Attribute Registers to verify that the OS
+    # supports PAuth. This emulates the way DynamoRIO checks for feature support.
+    "#include \"check_for_pauth.c\"
+    int main()
+    {
+        void *addr = 0;
+        asm(\"paciza %[ptr]\" : [ptr] \"+r\" (addr) : :);
+
+        if (pauth_indicated_by_isa_registers())
+            return 0;
+        else
+            return 1;
+    }"
+    ${out}
+  )
+endmacro (check_pauth_processor_and_compiler_support)
+
+function (get_processor_vendor out)
+  set(cpu_vendor "<unknown>")
+  if (APPLE)
+    find_program(SYSCTL NAMES sysctl PATHS /usr/sbin)
+    if (SYSCTL)
+      execute_process(COMMAND ${SYSCTL} -n machdep.cpu.vendor
+        OUTPUT_VARIABLE cpu_vendor OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_VARIABLE err)
+      if ("${cpu_vendor}" STREQUAL "")
+        execute_process(COMMAND ${SYSCTL} -n machdep.cpu.brand_string
+          OUTPUT_VARIABLE cpu_vendor OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_VARIABLE err)
+      endif ()
+    endif ()
+  elseif (WIN32)
+    get_filename_component(cpu_vendor
+      "[HKEY_LOCAL_MACHINE\\Hardware\\Description\\System\\CentralProcessor\\0;VendorIdentifier]"
+      NAME)
+  elseif (EXISTS "/proc/cpuinfo")
+    set (regex ".*vendor_id[ \t]*:[ \t]+([a-zA-Z0-9_-]+).*")
+    file(READ "/proc/cpuinfo" contents)
+    if (contents MATCHES ${regex})
+      string(REGEX REPLACE ${regex} "\\1" cpu_vendor "${contents}")
+    endif ()
+  endif ()
+  message(STATUS "Processor vendor is ${cpu_vendor}")
+  set(${out} ${cpu_vendor} PARENT_SCOPE)
+endfunction ()

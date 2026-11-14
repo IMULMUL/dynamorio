@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2026 Google, Inc.  All rights reserved.
  * Copyright (c) 2003-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -42,6 +42,7 @@
 #define _WIN32_WINNT 0x0600
 
 #define _GNU_SOURCE 1 /* for REG_RIP, etc. */
+#include "dr_project_wide_defines.h"
 #include "configure.h"
 #include "drlibc.h"
 #include <stdarg.h>
@@ -53,7 +54,62 @@
 #    include <sys/mman.h>
 #    include <stdlib.h> /* abort */
 #    include <errno.h>
+#    ifdef MUSL
+#        pragma push_macro("REG_R8")
+#        pragma push_macro("REG_R9")
+#        pragma push_macro("REG_R10")
+#        pragma push_macro("REG_R11")
+#        pragma push_macro("REG_R12")
+#        pragma push_macro("REG_R13")
+#        pragma push_macro("REG_R14")
+#        pragma push_macro("REG_R15")
+#        pragma push_macro("REG_RDI")
+#        pragma push_macro("REG_RSI")
+#        pragma push_macro("REG_RBP")
+#        pragma push_macro("REG_RBX")
+#        pragma push_macro("REG_RDX")
+#        pragma push_macro("REG_RAX")
+#        pragma push_macro("REG_RCX")
+#        pragma push_macro("REG_RSP")
+#        pragma push_macro("REG_CR2")
+#        undef REG_R8
+#        undef REG_R9
+#        undef REG_R10
+#        undef REG_R11
+#        undef REG_R12
+#        undef REG_R13
+#        undef REG_R14
+#        undef REG_R15
+#        undef REG_RDI
+#        undef REG_RSI
+#        undef REG_RBP
+#        undef REG_RBX
+#        undef REG_RDX
+#        undef REG_RAX
+#        undef REG_RCX
+#        undef REG_RSP
+#        undef REG_CR2
+#    endif
 #    include <signal.h>
+#    ifdef MUSL
+#        pragma pop_macro("REG_R8")
+#        pragma pop_macro("REG_R9")
+#        pragma pop_macro("REG_R10")
+#        pragma pop_macro("REG_R11")
+#        pragma pop_macro("REG_R12")
+#        pragma pop_macro("REG_R13")
+#        pragma pop_macro("REG_R14")
+#        pragma pop_macro("REG_R15")
+#        pragma pop_macro("REG_RDI")
+#        pragma pop_macro("REG_RSI")
+#        pragma pop_macro("REG_RBP")
+#        pragma pop_macro("REG_RBX")
+#        pragma pop_macro("REG_RDX")
+#        pragma pop_macro("REG_RAX")
+#        pragma pop_macro("REG_RCX")
+#        pragma pop_macro("REG_RSP")
+#        pragma pop_macro("REG_CR2")
+#    endif
 #    ifdef MACOS
 #        define _XOPEN_SOURCE \
             700 /* required to get POSIX, etc. defines out of ucontext.h */
@@ -73,6 +129,7 @@
 #else
 #    include <windows.h>
 #    include <process.h> /* _beginthreadex */
+#    include <stdlib.h>  /* _set_error_mode */
 #    if defined(DEBUG) && !defined(NO_DBG_CRT)
 #        include <crtdbg.h>
 #    endif
@@ -88,10 +145,13 @@
 #undef PFX
 #define PFX "0x" PFMT
 
-#if defined(AARCH64) && SIGSTKSZ < 16384
+#ifdef LINUX
+#    include <linux/version.h>
+#    if defined(AARCH64) && LINUX_VERSION_CODE < KERNEL_VERSION(4, 3, 0)
 /* SIGSTKSZ was incorrectly defined in Linux releases before 4.3. */
-#    undef SIGSTKSZ
-#    define SIGSTKSZ 16384
+#        undef SIGSTKSZ
+#        define SIGSTKSZ 16384
+#    endif
 #endif
 
 #ifdef __cplusplus
@@ -101,13 +161,6 @@ extern "C" {
 /* Get the defines for "true" and "false" w/o messing up clang-format. */
 #define DR_DO_NOT_DEFINE_bool
 #include "c_defines.h"
-
-/* check if all bits in mask are set in var */
-#define TESTALL(mask, var) (((mask) & (var)) == (mask))
-/* check if any bit in mask is set in var */
-#define TESTANY(mask, var) (((mask) & (var)) != 0)
-/* check if a single bit is set in var */
-#define TEST TESTANY
 
 #ifdef USE_DYNAMO
 /* to avoid non-api tests depending on dr_api headers we rely on test
@@ -206,7 +259,7 @@ page_size(void)
     }
     return size;
 #else
-    /* FIXME i#1680: On Windows determine page size using system call. */
+    /* XXX i#1680: On Windows determine page size using system call. */
     return 4096;
 #endif
 }
@@ -232,16 +285,8 @@ page_size(void)
 #else /* UNIX */
 #    define EXPORT __attribute__((visibility("default")))
 #    define IMPORT extern
-#    define NOINLINE __attribute__((noinline))
+#    define NOINLINE __attribute__((__noinline__))
 #endif
-
-/* convenience macros for secure string buffer operations */
-#define BUFFER_SIZE_BYTES(buf) sizeof(buf)
-#define BUFFER_SIZE_ELEMENTS(buf) (BUFFER_SIZE_BYTES(buf) / sizeof(buf[0]))
-#define BUFFER_LAST_ELEMENT(buf) buf[BUFFER_SIZE_ELEMENTS(buf) - 1]
-#define NULL_TERMINATE_BUFFER(buf) BUFFER_LAST_ELEMENT(buf) = 0
-#define BUFFER_ROOM_LEFT_W(wbuf) (BUFFER_SIZE_ELEMENTS(wbuf) - wcslen(wbuf) - 1)
-#define BUFFER_ROOM_LEFT(abuf) (BUFFER_SIZE_ELEMENTS(abuf) - strlen(abuf) - 1)
 
 #define PUSHF_MASK 0x00fcffff
 
@@ -260,11 +305,6 @@ typedef enum {
     COPY_CROSS_PAGE,
 } Copy_Mode;
 
-#define ALIGN_BACKWARD(x, alignment) (((ptr_uint_t)x) & (~((ptr_uint_t)(alignment)-1)))
-#define ALIGN_FORWARD(x, alignment) \
-    ((((ptr_uint_t)x) + (((ptr_uint_t)alignment) - 1)) & (~(((ptr_uint_t)alignment) - 1)))
-#define ALIGNED(x, alignment) ((((ptr_uint_t)x) & ((alignment)-1)) == 0)
-
 #ifdef UNIX
 #    ifndef MAP_ANONYMOUS
 #        define MAP_ANONYMOUS MAP_ANON /* MAP_ANON on Mac */
@@ -274,7 +314,7 @@ typedef enum {
 #if VERBOSE
 #    define VERBOSE_PRINT print
 #else
-/* FIXME: varargs for windows...for now since we don't care about efficiency we do this:
+/* XXX: varargs for windows...for now since we don't care about efficiency we do this:
  */
 static inline void
 VERBOSE_PRINT(const char *fmt, ...)
@@ -297,6 +337,23 @@ typedef void (*handler_3_t)(int, siginfo_t *, ucontext_t *);
 /* set up signal_handler as the handler for signal "sig" */
 void
 intercept_signal(int sig, handler_3_t handler, bool sigstack);
+
+void
+set_check_signal_mask(sigset_t *mask, sigset_t *returned_mask);
+
+#    ifdef AARCH64
+void
+dump_ucontext(ucontext_t *ucxt, bool is_sve, int vl);
+
+/* Representation of quadwords as 2 doubles. */
+typedef union {
+    __uint128_t as_128;
+    struct {
+        uint64 lo;
+        uint64 hi;
+    } as_2x64;
+} reinterpret128_2x64_t;
+#    endif
 #endif
 
 /* for cross-plaform siglongjmp */
@@ -325,17 +382,22 @@ intercept_signal(int sig, handler_3_t handler, bool sigstack);
 #    define NOP_NOP_NOP asm("nop\n nop\n nop\n")
 #    ifdef X86
 #        ifdef MACOS
-#            define NOP_NOP_CALL(tgt) asm("nop\n nop\n call _" #            tgt)
+#            define NOP_NOP_CALL(tgt) asm("nop\n nop\n call _" #tgt)
 #        else
-#            define NOP_NOP_CALL(tgt) asm("nop\n nop\n call " #            tgt)
+#            define NOP_NOP_CALL(tgt) asm("nop\n nop\n call " #tgt)
 #        endif
 #    elif defined(AARCHXX)
 /* Make sure to mark LR/X30 as clobbered to avoid functions like
  * client-interface/call-retarget.c:main() being interpreted as a leaf
  * function that does not need the link register preserved.
  */
-#        define NOP_NOP_CALL(tgt) \
-            asm("nop\n nop\n bl " #tgt : : : IF_ARM_ELSE("lr", "x30"))
+#        ifdef MACOS
+#            define NOP_NOP_CALL(tgt) \
+                asm("nop\n nop\n bl _" #tgt : : : IF_ARM_ELSE("lr", "x30"))
+#        else
+#            define NOP_NOP_CALL(tgt) \
+                asm("nop\n nop\n bl " #tgt : : : IF_ARM_ELSE("lr", "x30"))
+#        endif
 #    endif
 #endif
 
@@ -353,6 +415,8 @@ print(const char *fmt, ...);
 /* in tools_asm.asm */
 int
 code_self_mod(int iters);
+void
+icache_sync(void *addr);
 /* these don't need asm, but must be adjacent to code_self_mod and in order */
 int
 code_inc(int foo);
@@ -561,9 +625,9 @@ static int
 NTFlush(char *buf, size_t len)
 {
     NTSTATUS status;
-    GET_NTDLL(
-        NtFlushInstructionCache,
-        (IN HANDLE ProcessHandle, IN PVOID BaseAddress OPTIONAL, IN SIZE_T FlushSize));
+    GET_NTDLL(NtFlushInstructionCache,
+              (DR_PARAM_IN HANDLE ProcessHandle, DR_PARAM_IN PVOID BaseAddress OPTIONAL,
+               DR_PARAM_IN SIZE_T FlushSize));
     status = NtFlushInstructionCache(GetCurrentProcess(), buf, len);
     if (!NT_SUCCESS(status)) {
         print("Error using NTFlush method\n");
@@ -626,9 +690,11 @@ get_process_mem_stats(HANDLE h, VM_COUNTERS *info)
     ULONG len = 0;
     /* could share w/ other process info routines... */
     GET_NTDLL(NtQueryInformationProcess,
-              (IN HANDLE ProcessHandle, IN PROCESSINFOCLASS ProcessInformationClass,
-               OUT PVOID ProcessInformation, IN ULONG ProcessInformationLength,
-               OUT PULONG ReturnLength OPTIONAL));
+              (DR_PARAM_IN HANDLE ProcessHandle,
+               DR_PARAM_IN PROCESSINFOCLASS ProcessInformationClass,
+               DR_PARAM_OUT PVOID ProcessInformation,
+               DR_PARAM_IN ULONG ProcessInformationLength,
+               DR_PARAM_OUT PULONG ReturnLength OPTIONAL));
     i = NtQueryInformationProcess((HANDLE)h, ProcessVmCounters, info, sizeof(VM_COUNTERS),
                                   &len);
     if (i != 0) {
@@ -792,7 +858,7 @@ get_drmarker_field(uint offset)
         + (uint)landing_pad + 5;             /* relative */
 #    endif
     drmarker = (byte *)ALIGN_BACKWARD((ptr_uint_t)drmarker, PAGE_SIZE);
-    /* FIXME: check magic fields */
+    /* XXX: check magic fields */
     field = *((byte **)(drmarker + offset));
     return field;
 }
@@ -832,5 +898,36 @@ my_setenv(const char *var, const char *value)
     return SetEnvironmentVariable(var, value) == TRUE;
 #endif
 }
+
+static inline bool
+my_getenv(const char *var, char *dest, size_t size)
+{
+#ifdef UNIX
+    const char *value = getenv(var);
+    if (value == NULL)
+        return false;
+    strncpy(dest, value, size);
+    dest[size - 1] = 0;
+    return true;
+#else
+    unsigned int ret = GetEnvironmentVariable(var, dest, (DWORD)size);
+    if (ret == 0) {
+        fprintf(stderr, "Env variable %s returned 0 (not found?)\n", var);
+    } else if (ret > size) {
+        fprintf(stderr, "Env variable %s needs %u bytes of space!\n", var, ret);
+    }
+    return ret > 0 && ret <= size;
+#endif
+}
+
+/* Repeatedly call "run", upto "tries" times, starting with the
+ * initial value for "param" and adjusting it according to whether
+ * "run" sets *adjust to a positive, negative or zero value. If
+ * "stop_on_hit" is true then stop when "run" returns true. Returns
+ * the number of times that "run" returned true.
+ */
+int
+adaptive_retry(bool (*run)(int *adjust, unsigned long long param, void *arg), int tries,
+               unsigned long long param, void *arg, bool stop_on_hit);
 
 #endif /* TOOLS_H */

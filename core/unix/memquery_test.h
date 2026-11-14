@@ -1,5 +1,5 @@
 /* *******************************************************************************
- * Copyright (c) 2019 Google, Inc.  All rights reserved.
+ * Copyright (c) 2019-2026 Google, Inc.  All rights reserved.
  * *******************************************************************************/
 
 /*
@@ -76,7 +76,7 @@ run_single_memquery_test(const memquery_library_bounds_test *test);
  * unit_tests.c
  */
 void
-unit_test_memquery()
+unit_test_memquery(void)
 {
 #    ifndef X64
     /* Instead of putting effort into generating test cases which work under both
@@ -142,10 +142,12 @@ module_is_header_test(app_pc base, size_t size)
 
 static bool
 module_walk_program_headers_test(app_pc base, size_t view_size, bool at_map,
-                                 bool dyn_reloc, OUT app_pc *out_base /* relative pc */,
-                                 OUT app_pc *out_first_end /* relative pc */,
-                                 OUT app_pc *out_max_end /* relative pc */,
-                                 OUT char **out_soname, OUT os_module_data_t *out_data)
+                                 bool dyn_reloc,
+                                 DR_PARAM_OUT app_pc *out_base /* relative pc */,
+                                 DR_PARAM_OUT app_pc *out_first_end /* relative pc */,
+                                 DR_PARAM_OUT app_pc *out_max_end /* relative pc */,
+                                 DR_PARAM_OUT char **out_soname,
+                                 DR_PARAM_OUT os_module_data_t *out_data)
 {
     ASSERT(cur_bounds);
     if (out_first_end != NULL || out_soname != NULL || out_data != NULL ||
@@ -284,7 +286,7 @@ record_memquery_library_bounds_by_iterator(const char *name, app_pc *start /*IN/
         app_pc mod_base = 0, mod_end = 0;
         bool is_header = false;
 
-        if (TEST(MEMPROT_READ, iter.prot) &&
+        if (TESTANY(MEMPROT_READ, iter.prot) &&
 #    ifdef X64
             /* We have observed segfaults reading data from very high addresses,
              * even though their mappings are listed as readable.

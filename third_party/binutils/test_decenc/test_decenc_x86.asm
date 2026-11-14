@@ -298,18 +298,12 @@ GLOBAL_LABEL(FUNCNAME:)
 
         /* arch_13.s */
 
-        /* clac, CPL 0 instruction. */
-        /* RAW(0f) RAW(01) RAW(ca) */
-        /* stac, CPL 0 instruction. */
-        /* RAW(0f) RAW(01) RAW(cb) */
         RAW(66) RAW(0f) RAW(38) RAW(f6) RAW(ca)
         RAW(f3) RAW(0f) RAW(38) RAW(f6) RAW(ca)
         RAW(0f) RAW(c7) RAW(f8)
         /* FIXME i3577: clzero, AMD only. */
         /* RAW(0f) RAW(01) RAW(fc) */
         RAW(0f) RAW(c7) RAW(21)
-        /* xsaves, CPL 0 instruction. */
-        /* RAW(0f) RAW(c7) RAW(29) */
         RAW(66) RAW(0f) RAW(ae) RAW(39)
         /* monitorx, AMD only. */
         RAW(0f) RAW(01) RAW(fa)
@@ -377,8 +371,7 @@ GLOBAL_LABEL(FUNCNAME:)
 
         RAW(c4) RAW(e2) RAW(79) RAW(dc) RAW(11)
         RAW(c4) RAW(e3) RAW(49) RAW(44) RAW(d4) RAW(08)
-        /* FIXME i#3578: Support AVX instruction vgf2p8mulb. */
-        /* RAW(c4) RAW(e2) RAW(69) RAW(cf) RAW(d9) */
+        RAW(c4) RAW(e2) RAW(69) RAW(cf) RAW(d9)
         END_OF_SUBTEST_MARKER
 
         /* att_regs.s */
@@ -1671,19 +1664,18 @@ GLOBAL_LABEL(FUNCNAME:)
         RAW(c5) RAW(cc) RAW(c2) RAW(11) RAW(1e)
         RAW(c5) RAW(cc) RAW(c2) RAW(d4) RAW(1f)
         RAW(c5) RAW(cc) RAW(c2) RAW(11) RAW(1f)
-        /* FIXME i#3578: Support vgf2p8mulb AVX instruction. */
-        /* RAW(c4) RAW(e2) RAW(55) RAW(cf) RAW(f4) */
-        /* RAW(c4) RAW(e2) RAW(55) RAW(cf) RAW(31) */
-        /* RAW(c4) RAW(e2) RAW(55) RAW(cf) RAW(b4) RAW(f4) RAW(c0) */
-        /* RAW(1d) RAW(fe) RAW(ff) */
-        /* RAW(c4) RAW(e2) RAW(55) RAW(cf) RAW(b2) RAW(e0) RAW(0f) */
-        /* RAW(00) RAW(00) */
-        /* RAW(c4) RAW(e2) RAW(55) RAW(cf) RAW(b2) RAW(00) RAW(10) */
-        /* RAW(00) RAW(00) */
-        /* RAW(c4) RAW(e2) RAW(55) RAW(cf) RAW(b2) RAW(00) RAW(f0) */
-        /* RAW(ff) RAW(ff) */
-        /* RAW(c4) RAW(e2) RAW(55) RAW(cf) RAW(b2) RAW(e0) RAW(ef) */
-        /* RAW(ff) RAW(ff) */
+        RAW(c4) RAW(e2) RAW(55) RAW(cf) RAW(f4)
+        RAW(c4) RAW(e2) RAW(55) RAW(cf) RAW(31)
+        RAW(c4) RAW(e2) RAW(55) RAW(cf) RAW(b4) RAW(f4) RAW(c0)
+        RAW(1d) RAW(fe) RAW(ff)
+        RAW(c4) RAW(e2) RAW(55) RAW(cf) RAW(b2) RAW(e0) RAW(0f)
+        RAW(00) RAW(00)
+        RAW(c4) RAW(e2) RAW(55) RAW(cf) RAW(b2) RAW(00) RAW(10)
+        RAW(00) RAW(00)
+        RAW(c4) RAW(e2) RAW(55) RAW(cf) RAW(b2) RAW(00) RAW(f0)
+        RAW(ff) RAW(ff)
+        RAW(c4) RAW(e2) RAW(55) RAW(cf) RAW(b2) RAW(e0) RAW(ef)
+        RAW(ff) RAW(ff)
         RAW(c5) RAW(ff) RAW(e6) RAW(e4)
         RAW(c5) RAW(ff) RAW(e6) RAW(21)
         RAW(c5) RAW(fd) RAW(5a) RAW(e4)
@@ -1760,33 +1752,32 @@ GLOBAL_LABEL(FUNCNAME:)
         RAW(c5) RAW(cd) RAW(c6) RAW(11) RAW(07)
         RAW(c5) RAW(cc) RAW(c6) RAW(d4) RAW(07)
         RAW(c5) RAW(cc) RAW(c6) RAW(11) RAW(07)
-        /* FIXME i#3578: Support vgf2p8affineqb AVX (or AVX-512) instruction. */
-        /* RAW(c4) RAW(e3) RAW(d5) RAW(ce) RAW(f4) RAW(ab) */
-        /* RAW(c4) RAW(e3) RAW(d5) RAW(ce) RAW(f4) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d5) RAW(ce) RAW(31) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d5) RAW(ce) RAW(b4) RAW(f4) RAW(c0) */
-        /* RAW(1d) RAW(fe) RAW(ff) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d5) RAW(ce) RAW(b2) RAW(e0) RAW(0f) */
-        /* RAW(00) RAW(00) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d5) RAW(ce) RAW(b2) RAW(00) RAW(10) */
-        /* RAW(00) RAW(00) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d5) RAW(ce) RAW(b2) RAW(00) RAW(f0) */
-        /* RAW(ff) RAW(ff) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d5) RAW(ce) RAW(b2) RAW(e0) RAW(ef) */
-        /* RAW(ff) RAW(ff) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d5) RAW(cf) RAW(f4) RAW(ab) */
-        /* RAW(c4) RAW(e3) RAW(d5) RAW(cf) RAW(f4) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d5) RAW(cf) RAW(31) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d5) RAW(cf) RAW(b4) RAW(f4) RAW(c0) */
-        /* RAW(1d) RAW(fe) RAW(ff) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d5) RAW(cf) RAW(b2) RAW(e0) RAW(0f) */
-        /* RAW(00) RAW(00) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d5) RAW(cf) RAW(b2) RAW(00) RAW(10) */
-        /* RAW(00) RAW(00) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d5) RAW(cf) RAW(b2) RAW(00) RAW(f0) */
-        /* RAW(ff) RAW(ff) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d5) RAW(cf) RAW(b2) RAW(e0) RAW(ef) */
-        /* RAW(ff) RAW(ff) RAW(7b) */
+        RAW(c4) RAW(e3) RAW(d5) RAW(ce) RAW(f4) RAW(ab)
+        RAW(c4) RAW(e3) RAW(d5) RAW(ce) RAW(f4) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d5) RAW(ce) RAW(31) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d5) RAW(ce) RAW(b4) RAW(f4) RAW(c0)
+        RAW(1d) RAW(fe) RAW(ff) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d5) RAW(ce) RAW(b2) RAW(e0) RAW(0f)
+        RAW(00) RAW(00) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d5) RAW(ce) RAW(b2) RAW(00) RAW(10)
+        RAW(00) RAW(00) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d5) RAW(ce) RAW(b2) RAW(00) RAW(f0)
+        RAW(ff) RAW(ff) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d5) RAW(ce) RAW(b2) RAW(e0) RAW(ef)
+        RAW(ff) RAW(ff) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d5) RAW(cf) RAW(f4) RAW(ab)
+        RAW(c4) RAW(e3) RAW(d5) RAW(cf) RAW(f4) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d5) RAW(cf) RAW(31) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d5) RAW(cf) RAW(b4) RAW(f4) RAW(c0)
+        RAW(1d) RAW(fe) RAW(ff) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d5) RAW(cf) RAW(b2) RAW(e0) RAW(0f)
+        RAW(00) RAW(00) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d5) RAW(cf) RAW(b2) RAW(00) RAW(10)
+        RAW(00) RAW(00) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d5) RAW(cf) RAW(b2) RAW(00) RAW(f0)
+        RAW(ff) RAW(ff) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d5) RAW(cf) RAW(b2) RAW(e0) RAW(ef)
+        RAW(ff) RAW(ff) RAW(7b)
         RAW(c4) RAW(e3) RAW(6d) RAW(4b) RAW(fe) RAW(40)
         RAW(c4) RAW(e3) RAW(6d) RAW(4b) RAW(39) RAW(40)
         RAW(c4) RAW(e3) RAW(6d) RAW(4a) RAW(fe) RAW(40)
@@ -2241,19 +2232,18 @@ GLOBAL_LABEL(FUNCNAME:)
         RAW(c5) RAW(c8) RAW(c2) RAW(39) RAW(1e)
         RAW(c5) RAW(c8) RAW(c2) RAW(d4) RAW(1f)
         RAW(c5) RAW(c8) RAW(c2) RAW(39) RAW(1f)
-        /* FIXME i#3578: Support vgf2p8mulb AVX instruction. */
-        /* RAW(c4) RAW(e2) RAW(51) RAW(cf) RAW(f4) */
-        /* RAW(c4) RAW(e2) RAW(51) RAW(cf) RAW(31) */
-        /* RAW(c4) RAW(e2) RAW(51) RAW(cf) RAW(b4) RAW(f4) RAW(c0) */
-        /* RAW(1d) RAW(fe) RAW(ff) */
-        /* RAW(c4) RAW(e2) RAW(51) RAW(cf) RAW(b2) RAW(f0) RAW(07) */
-        /* RAW(00) RAW(00) */
-        /* RAW(c4) RAW(e2) RAW(51) RAW(cf) RAW(b2) RAW(00) RAW(08) */
-        /* RAW(00) RAW(00) */
-        /* RAW(c4) RAW(e2) RAW(51) RAW(cf) RAW(b2) RAW(00) RAW(f8) */
-        /* RAW(ff) RAW(ff) */
-        /* RAW(c4) RAW(e2) RAW(51) RAW(cf) RAW(b2) RAW(f0) RAW(f7) */
-        /* RAW(ff) RAW(ff) */
+        RAW(c4) RAW(e2) RAW(51) RAW(cf) RAW(f4)
+        RAW(c4) RAW(e2) RAW(51) RAW(cf) RAW(31)
+        RAW(c4) RAW(e2) RAW(51) RAW(cf) RAW(b4) RAW(f4) RAW(c0)
+        RAW(1d) RAW(fe) RAW(ff)
+        RAW(c4) RAW(e2) RAW(51) RAW(cf) RAW(b2) RAW(f0) RAW(07)
+        RAW(00) RAW(00)
+        RAW(c4) RAW(e2) RAW(51) RAW(cf) RAW(b2) RAW(00) RAW(08)
+        RAW(00) RAW(00)
+        RAW(c4) RAW(e2) RAW(51) RAW(cf) RAW(b2) RAW(00) RAW(f8)
+        RAW(ff) RAW(ff)
+        RAW(c4) RAW(e2) RAW(51) RAW(cf) RAW(b2) RAW(f0) RAW(f7)
+        RAW(ff) RAW(ff)
         RAW(c4) RAW(e2) RAW(59) RAW(2c) RAW(31)
         RAW(c4) RAW(e2) RAW(59) RAW(2d) RAW(31)
         RAW(c4) RAW(e3) RAW(79) RAW(df) RAW(f4) RAW(07)
@@ -2306,33 +2296,32 @@ GLOBAL_LABEL(FUNCNAME:)
         RAW(c5) RAW(c9) RAW(c6) RAW(11) RAW(07)
         RAW(c5) RAW(c8) RAW(c6) RAW(d4) RAW(07)
         RAW(c5) RAW(c8) RAW(c6) RAW(11) RAW(07)
-        /* FIXME i#3578: Support vgf2p8affineqb AVX (or AVX-512) instruction. */
-        /* RAW(c4) RAW(e3) RAW(d1) RAW(ce) RAW(f4) RAW(ab) */
-        /* RAW(c4) RAW(e3) RAW(d1) RAW(ce) RAW(f4) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d1) RAW(ce) RAW(31) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d1) RAW(ce) RAW(b4) RAW(f4) RAW(c0) */
-        /* RAW(1d) RAW(fe) RAW(ff) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d1) RAW(ce) RAW(b2) RAW(f0) RAW(07) */
-        /* RAW(00) RAW(00) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d1) RAW(ce) RAW(b2) RAW(00) RAW(08) */
-        /* RAW(00) RAW(00) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d1) RAW(ce) RAW(b2) RAW(00) RAW(f8) */
-        /* RAW(ff) RAW(ff) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d1) RAW(ce) RAW(b2) RAW(f0) RAW(f7) */
-        /* RAW(ff) RAW(ff) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d1) RAW(cf) RAW(f4) RAW(ab) */
-        /* RAW(c4) RAW(e3) RAW(d1) RAW(cf) RAW(f4) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d1) RAW(cf) RAW(31) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d1) RAW(cf) RAW(b4) RAW(f4) RAW(c0) */
-        /* RAW(1d) RAW(fe) RAW(ff) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d1) RAW(cf) RAW(b2) RAW(f0) RAW(07) */
-        /* RAW(00) RAW(00) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d1) RAW(cf) RAW(b2) RAW(00) RAW(08) */
-        /* RAW(00) RAW(00) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d1) RAW(cf) RAW(b2) RAW(00) RAW(f8) */
-        /* RAW(ff) RAW(ff) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d1) RAW(cf) RAW(b2) RAW(f0) RAW(f7) */
-        /* RAW(ff) RAW(ff) RAW(7b) */
+        RAW(c4) RAW(e3) RAW(d1) RAW(ce) RAW(f4) RAW(ab)
+        RAW(c4) RAW(e3) RAW(d1) RAW(ce) RAW(f4) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d1) RAW(ce) RAW(31) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d1) RAW(ce) RAW(b4) RAW(f4) RAW(c0)
+        RAW(1d) RAW(fe) RAW(ff) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d1) RAW(ce) RAW(b2) RAW(f0) RAW(07)
+        RAW(00) RAW(00) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d1) RAW(ce) RAW(b2) RAW(00) RAW(08)
+        RAW(00) RAW(00) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d1) RAW(ce) RAW(b2) RAW(00) RAW(f8)
+        RAW(ff) RAW(ff) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d1) RAW(ce) RAW(b2) RAW(f0) RAW(f7)
+        RAW(ff) RAW(ff) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d1) RAW(cf) RAW(f4) RAW(ab)
+        RAW(c4) RAW(e3) RAW(d1) RAW(cf) RAW(f4) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d1) RAW(cf) RAW(31) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d1) RAW(cf) RAW(b4) RAW(f4) RAW(c0)
+        RAW(1d) RAW(fe) RAW(ff) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d1) RAW(cf) RAW(b2) RAW(f0) RAW(07)
+        RAW(00) RAW(00) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d1) RAW(cf) RAW(b2) RAW(00) RAW(08)
+        RAW(00) RAW(00) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d1) RAW(cf) RAW(b2) RAW(00) RAW(f8)
+        RAW(ff) RAW(ff) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d1) RAW(cf) RAW(b2) RAW(f0) RAW(f7)
+        RAW(ff) RAW(ff) RAW(7b)
         RAW(c4) RAW(e3) RAW(69) RAW(4b) RAW(fe) RAW(40)
         RAW(c4) RAW(e3) RAW(69) RAW(4b) RAW(39) RAW(40)
         RAW(c4) RAW(e3) RAW(69) RAW(4a) RAW(fe) RAW(40)
@@ -3366,20 +3355,19 @@ GLOBAL_LABEL(FUNCNAME:)
         RAW(c5) RAW(cc) RAW(c2) RAW(d4) RAW(1f)
         RAW(c5) RAW(cc) RAW(c2) RAW(11) RAW(1f)
         RAW(c5) RAW(cc) RAW(c2) RAW(11) RAW(1f)
-        /* FIXME i#3578: Support vgf2p8mulb AVX instruction. */
-        /* RAW(c4) RAW(e2) RAW(55) RAW(cf) RAW(f4) */
-        /* RAW(c4) RAW(e2) RAW(55) RAW(cf) RAW(31) */
-        /* RAW(c4) RAW(e2) RAW(55) RAW(cf) RAW(31) */
-        /* RAW(c4) RAW(e2) RAW(55) RAW(cf) RAW(b4) RAW(f4) RAW(c0) */
-        /* RAW(1d) RAW(fe) RAW(ff) */
-        /* RAW(c4) RAW(e2) RAW(55) RAW(cf) RAW(b2) RAW(e0) RAW(0f) */
-        /* RAW(00) RAW(00) */
-        /* RAW(c4) RAW(e2) RAW(55) RAW(cf) RAW(b2) RAW(00) RAW(10) */
-        /* RAW(00) RAW(00) */
-        /* RAW(c4) RAW(e2) RAW(55) RAW(cf) RAW(b2) RAW(00) RAW(f0) */
-        /* RAW(ff) RAW(ff) */
-        /* RAW(c4) RAW(e2) RAW(55) RAW(cf) RAW(b2) RAW(e0) RAW(ef) */
-        /* RAW(ff) RAW(ff) */
+        RAW(c4) RAW(e2) RAW(55) RAW(cf) RAW(f4)
+        RAW(c4) RAW(e2) RAW(55) RAW(cf) RAW(31)
+        RAW(c4) RAW(e2) RAW(55) RAW(cf) RAW(31)
+        RAW(c4) RAW(e2) RAW(55) RAW(cf) RAW(b4) RAW(f4) RAW(c0)
+        RAW(1d) RAW(fe) RAW(ff)
+        RAW(c4) RAW(e2) RAW(55) RAW(cf) RAW(b2) RAW(e0) RAW(0f)
+        RAW(00) RAW(00)
+        RAW(c4) RAW(e2) RAW(55) RAW(cf) RAW(b2) RAW(00) RAW(10)
+        RAW(00) RAW(00)
+        RAW(c4) RAW(e2) RAW(55) RAW(cf) RAW(b2) RAW(00) RAW(f0)
+        RAW(ff) RAW(ff)
+        RAW(c4) RAW(e2) RAW(55) RAW(cf) RAW(b2) RAW(e0) RAW(ef)
+        RAW(ff) RAW(ff)
         RAW(c5) RAW(ff) RAW(e6) RAW(e4)
         RAW(c5) RAW(ff) RAW(e6) RAW(21)
         RAW(c5) RAW(fd) RAW(5a) RAW(e4)
@@ -3493,35 +3481,34 @@ GLOBAL_LABEL(FUNCNAME:)
         RAW(c5) RAW(cc) RAW(c6) RAW(d4) RAW(07)
         RAW(c5) RAW(cc) RAW(c6) RAW(11) RAW(07)
         RAW(c5) RAW(cc) RAW(c6) RAW(11) RAW(07)
-        /* FIXME i#3578: Support vgf2p8affineqb AVX (or AVX-512) instruction. */
-        /* RAW(c4) RAW(e3) RAW(d5) RAW(ce) RAW(f4) RAW(ab) */
-        /* RAW(c4) RAW(e3) RAW(d5) RAW(ce) RAW(f4) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d5) RAW(ce) RAW(31) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d5) RAW(ce) RAW(31) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d5) RAW(ce) RAW(b4) RAW(f4) RAW(c0) */
-        /* RAW(1d) RAW(fe) RAW(ff) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d5) RAW(ce) RAW(b2) RAW(e0) RAW(0f) */
-        /* RAW(00) RAW(00) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d5) RAW(ce) RAW(b2) RAW(00) RAW(10) */
-        /* RAW(00) RAW(00) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d5) RAW(ce) RAW(b2) RAW(00) RAW(f0) */
-        /* RAW(ff) RAW(ff) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d5) RAW(ce) RAW(b2) RAW(e0) RAW(ef) */
-        /* RAW(ff) RAW(ff) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d5) RAW(cf) RAW(f4) RAW(ab) */
-        /* RAW(c4) RAW(e3) RAW(d5) RAW(cf) RAW(f4) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d5) RAW(cf) RAW(31) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d5) RAW(cf) RAW(31) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d5) RAW(cf) RAW(b4) RAW(f4) RAW(c0) */
-        /* RAW(1d) RAW(fe) RAW(ff) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d5) RAW(cf) RAW(b2) RAW(e0) RAW(0f) */
-        /* RAW(00) RAW(00) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d5) RAW(cf) RAW(b2) RAW(00) RAW(10) */
-        /* RAW(00) RAW(00) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d5) RAW(cf) RAW(b2) RAW(00) RAW(f0) */
-        /* RAW(ff) RAW(ff) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d5) RAW(cf) RAW(b2) RAW(e0) RAW(ef) */
-        /* RAW(ff) RAW(ff) RAW(7b) */
+        RAW(c4) RAW(e3) RAW(d5) RAW(ce) RAW(f4) RAW(ab)
+        RAW(c4) RAW(e3) RAW(d5) RAW(ce) RAW(f4) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d5) RAW(ce) RAW(31) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d5) RAW(ce) RAW(31) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d5) RAW(ce) RAW(b4) RAW(f4) RAW(c0)
+        RAW(1d) RAW(fe) RAW(ff) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d5) RAW(ce) RAW(b2) RAW(e0) RAW(0f)
+        RAW(00) RAW(00) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d5) RAW(ce) RAW(b2) RAW(00) RAW(10)
+        RAW(00) RAW(00) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d5) RAW(ce) RAW(b2) RAW(00) RAW(f0)
+        RAW(ff) RAW(ff) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d5) RAW(ce) RAW(b2) RAW(e0) RAW(ef)
+        RAW(ff) RAW(ff) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d5) RAW(cf) RAW(f4) RAW(ab)
+        RAW(c4) RAW(e3) RAW(d5) RAW(cf) RAW(f4) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d5) RAW(cf) RAW(31) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d5) RAW(cf) RAW(31) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d5) RAW(cf) RAW(b4) RAW(f4) RAW(c0)
+        RAW(1d) RAW(fe) RAW(ff) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d5) RAW(cf) RAW(b2) RAW(e0) RAW(0f)
+        RAW(00) RAW(00) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d5) RAW(cf) RAW(b2) RAW(00) RAW(10)
+        RAW(00) RAW(00) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d5) RAW(cf) RAW(b2) RAW(00) RAW(f0)
+        RAW(ff) RAW(ff) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d5) RAW(cf) RAW(b2) RAW(e0) RAW(ef)
+        RAW(ff) RAW(ff) RAW(7b)
         RAW(c4) RAW(e3) RAW(6d) RAW(4b) RAW(fe) RAW(40)
         RAW(c4) RAW(e3) RAW(6d) RAW(4b) RAW(39) RAW(40)
         RAW(c4) RAW(e3) RAW(6d) RAW(4b) RAW(39) RAW(40)
@@ -4203,20 +4190,19 @@ GLOBAL_LABEL(FUNCNAME:)
         RAW(c5) RAW(c8) RAW(c2) RAW(d4) RAW(1f)
         RAW(c5) RAW(c8) RAW(c2) RAW(39) RAW(1f)
         RAW(c5) RAW(c8) RAW(c2) RAW(39) RAW(1f)
-        /* FIXME i#3578: Support vgf2p8mulb AVX instruction. */
-        /* RAW(c4) RAW(e2) RAW(51) RAW(cf) RAW(f4) */
-        /* RAW(c4) RAW(e2) RAW(51) RAW(cf) RAW(31) */
-        /* RAW(c4) RAW(e2) RAW(51) RAW(cf) RAW(31) */
-        /* RAW(c4) RAW(e2) RAW(51) RAW(cf) RAW(b4) RAW(f4) RAW(c0) */
-        /* RAW(1d) RAW(fe) RAW(ff) */
-        /* RAW(c4) RAW(e2) RAW(51) RAW(cf) RAW(b2) RAW(f0) RAW(07) */
-        /* RAW(00) RAW(00) */
-        /* RAW(c4) RAW(e2) RAW(51) RAW(cf) RAW(b2) RAW(00) RAW(08) */
-        /* RAW(00) RAW(00) */
-        /* RAW(c4) RAW(e2) RAW(51) RAW(cf) RAW(b2) RAW(00) RAW(f8) */
-        /* RAW(ff) RAW(ff) */
-        /* RAW(c4) RAW(e2) RAW(51) RAW(cf) RAW(b2) RAW(f0) RAW(f7) */
-        /* RAW(ff) RAW(ff) */
+        RAW(c4) RAW(e2) RAW(51) RAW(cf) RAW(f4)
+        RAW(c4) RAW(e2) RAW(51) RAW(cf) RAW(31)
+        RAW(c4) RAW(e2) RAW(51) RAW(cf) RAW(31)
+        RAW(c4) RAW(e2) RAW(51) RAW(cf) RAW(b4) RAW(f4) RAW(c0)
+        RAW(1d) RAW(fe) RAW(ff)
+        RAW(c4) RAW(e2) RAW(51) RAW(cf) RAW(b2) RAW(f0) RAW(07)
+        RAW(00) RAW(00)
+        RAW(c4) RAW(e2) RAW(51) RAW(cf) RAW(b2) RAW(00) RAW(08)
+        RAW(00) RAW(00)
+        RAW(c4) RAW(e2) RAW(51) RAW(cf) RAW(b2) RAW(00) RAW(f8)
+        RAW(ff) RAW(ff)
+        RAW(c4) RAW(e2) RAW(51) RAW(cf) RAW(b2) RAW(f0) RAW(f7)
+        RAW(ff) RAW(ff)
         RAW(c4) RAW(e2) RAW(59) RAW(2c) RAW(31)
         RAW(c4) RAW(e2) RAW(59) RAW(2c) RAW(31)
         RAW(c4) RAW(e2) RAW(59) RAW(2d) RAW(31)
@@ -4297,35 +4283,34 @@ GLOBAL_LABEL(FUNCNAME:)
         RAW(c5) RAW(c8) RAW(c6) RAW(d4) RAW(07)
         RAW(c5) RAW(c8) RAW(c6) RAW(11) RAW(07)
         RAW(c5) RAW(c8) RAW(c6) RAW(11) RAW(07)
-        /* FIXME i#3578: Support vgf2p8affineqb AVX (or AVX-512) instruction. */
-        /* RAW(c4) RAW(e3) RAW(d1) RAW(ce) RAW(f4) RAW(ab) */
-        /* RAW(c4) RAW(e3) RAW(d1) RAW(ce) RAW(f4) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d1) RAW(ce) RAW(31) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d1) RAW(ce) RAW(31) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d1) RAW(ce) RAW(b4) RAW(f4) RAW(c0) */
-        /* RAW(1d) RAW(fe) RAW(ff) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d1) RAW(ce) RAW(b2) RAW(f0) RAW(07) */
-        /* RAW(00) RAW(00) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d1) RAW(ce) RAW(b2) RAW(00) RAW(08) */
-        /* RAW(00) RAW(00) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d1) RAW(ce) RAW(b2) RAW(00) RAW(f8) */
-        /* RAW(ff) RAW(ff) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d1) RAW(ce) RAW(b2) RAW(f0) RAW(f7) */
-        /* RAW(ff) RAW(ff) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d1) RAW(cf) RAW(f4) RAW(ab) */
-        /* RAW(c4) RAW(e3) RAW(d1) RAW(cf) RAW(f4) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d1) RAW(cf) RAW(31) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d1) RAW(cf) RAW(31) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d1) RAW(cf) RAW(b4) RAW(f4) RAW(c0) */
-        /* RAW(1d) RAW(fe) RAW(ff) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d1) RAW(cf) RAW(b2) RAW(f0) RAW(07) */
-        /* RAW(00) RAW(00) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d1) RAW(cf) RAW(b2) RAW(00) RAW(08) */
-        /* RAW(00) RAW(00) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d1) RAW(cf) RAW(b2) RAW(00) RAW(f8) */
-        /* RAW(ff) RAW(ff) RAW(7b) */
-        /* RAW(c4) RAW(e3) RAW(d1) RAW(cf) RAW(b2) RAW(f0) RAW(f7) */
-        /* RAW(ff) RAW(ff) RAW(7b) */
+        RAW(c4) RAW(e3) RAW(d1) RAW(ce) RAW(f4) RAW(ab)
+        RAW(c4) RAW(e3) RAW(d1) RAW(ce) RAW(f4) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d1) RAW(ce) RAW(31) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d1) RAW(ce) RAW(31) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d1) RAW(ce) RAW(b4) RAW(f4) RAW(c0)
+        RAW(1d) RAW(fe) RAW(ff) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d1) RAW(ce) RAW(b2) RAW(f0) RAW(07)
+        RAW(00) RAW(00) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d1) RAW(ce) RAW(b2) RAW(00) RAW(08)
+        RAW(00) RAW(00) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d1) RAW(ce) RAW(b2) RAW(00) RAW(f8)
+        RAW(ff) RAW(ff) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d1) RAW(ce) RAW(b2) RAW(f0) RAW(f7)
+        RAW(ff) RAW(ff) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d1) RAW(cf) RAW(f4) RAW(ab)
+        RAW(c4) RAW(e3) RAW(d1) RAW(cf) RAW(f4) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d1) RAW(cf) RAW(31) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d1) RAW(cf) RAW(31) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d1) RAW(cf) RAW(b4) RAW(f4) RAW(c0)
+        RAW(1d) RAW(fe) RAW(ff) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d1) RAW(cf) RAW(b2) RAW(f0) RAW(07)
+        RAW(00) RAW(00) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d1) RAW(cf) RAW(b2) RAW(00) RAW(08)
+        RAW(00) RAW(00) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d1) RAW(cf) RAW(b2) RAW(00) RAW(f8)
+        RAW(ff) RAW(ff) RAW(7b)
+        RAW(c4) RAW(e3) RAW(d1) RAW(cf) RAW(b2) RAW(f0) RAW(f7)
+        RAW(ff) RAW(ff) RAW(7b)
         RAW(c4) RAW(e3) RAW(69) RAW(4b) RAW(fe) RAW(40)
         RAW(c4) RAW(e3) RAW(69) RAW(4b) RAW(39) RAW(40)
         RAW(c4) RAW(e3) RAW(69) RAW(4b) RAW(39) RAW(40)
@@ -66187,6 +66172,48 @@ GLOBAL_LABEL(FUNCNAME:)
         RAW(f4)
         END_OF_SUBTEST_MARKER
 
+        /* cet.s */
+
+        RAW(f3) RAW(0f) RAW(ae) RAW(e9)
+        RAW(f3) RAW(0f) RAW(1e) RAW(c9)
+        RAW(f3) RAW(0f) RAW(01) RAW(ea)
+        RAW(f3) RAW(0f) RAW(01) RAW(29)
+        RAW(0f) RAW(38) RAW(f6) RAW(04) RAW(02)
+        RAW(66) RAW(0f) RAW(38) RAW(f5) RAW(14) RAW(2f)
+        RAW(f3) RAW(0f) RAW(01) RAW(e8)
+        RAW(f3) RAW(0f) RAW(ae) RAW(34) RAW(04)
+        RAW(f3) RAW(0f) RAW(1e) RAW(fa)
+        RAW(f3) RAW(0f) RAW(1e) RAW(fb)
+        RAW(f3) RAW(0f) RAW(ae) RAW(e9)
+        RAW(f3) RAW(0f) RAW(1e) RAW(c9)
+        RAW(f3) RAW(0f) RAW(01) RAW(ea)
+        RAW(f3) RAW(0f) RAW(01) RAW(6c) RAW(01) RAW(90)
+        RAW(0f) RAW(38) RAW(f6) RAW(02)
+        RAW(0f) RAW(38) RAW(f6) RAW(10)
+        RAW(66) RAW(0f) RAW(38) RAW(f5) RAW(14) RAW(2f)
+        RAW(66) RAW(0f) RAW(38) RAW(f5) RAW(3c) RAW(0e)
+        RAW(f3) RAW(0f) RAW(01) RAW(e8)
+        RAW(f3) RAW(0f) RAW(ae) RAW(34) RAW(44)
+        RAW(f3) RAW(0f) RAW(1e) RAW(fa)
+        RAW(f3) RAW(0f) RAW(1e) RAW(fb)
+        RAW(f3) RAW(0f) RAW(ae) RAW(e9)
+        RAW(f3) RAW(0f) RAW(1e) RAW(c9)
+        RAW(f3) RAW(0f) RAW(01) RAW(ea)
+        RAW(67) RAW(f3) RAW(0f) RAW(01) RAW(6c) RAW(01)
+        RAW(90)
+        RAW(67) RAW(0f) RAW(38) RAW(f6) RAW(02)
+        RAW(67) RAW(0f) RAW(38) RAW(f6) RAW(10)
+        RAW(67) RAW(66) RAW(0f) RAW(38) RAW(f5) RAW(14)
+        RAW(2f)
+        RAW(67) RAW(66) RAW(0f) RAW(38) RAW(f5) RAW(3c)
+        RAW(0e)
+        RAW(f3) RAW(0f) RAW(01) RAW(e8)
+        RAW(67) RAW(f3) RAW(0f) RAW(ae) RAW(34)
+        RAW(44)
+        RAW(f3) RAW(0f) RAW(1e) RAW(fa)
+        RAW(f3) RAW(0f) RAW(1e) RAW(fb)
+        END_OF_SUBTEST_MARKER
+
         /* cldemote.s */
 
         RAW(0f) RAW(1c) RAW(01)
@@ -73686,7 +73713,6 @@ GLOBAL_LABEL(FUNCNAME:)
         RAW(66) RAW(2e) RAW(0f) RAW(1f) RAW(84) RAW(00) RAW(00)
         RAW(00) RAW(00) RAW(00)
         RAW(0f) RAW(19) RAW(ff)
-        RAW(0f) RAW(1c) RAW(ff)
         RAW(0f) RAW(1d) RAW(ff)
         RAW(0f) RAW(1e) RAW(ff)
         RAW(0f) RAW(1f) RAW(ff)
@@ -80584,6 +80610,7 @@ GLOBAL_LABEL(FUNCNAME:)
         RAW(62) RAW(f2) RAW(5f) RAW(48) RAW(53) RAW(8a) RAW(e0)
         RAW(ef) RAW(ff) RAW(ff)
         END_OF_SUBTEST_MARKER
+#endif /* DISABLED_UNTIL_BUG_1312_IS_FIXED */
 
         /* avx512_vpopcntdq.s */
         RAW(62) RAW(f2) RAW(7d) RAW(48) RAW(55) RAW(f5)
@@ -80841,8 +80868,6 @@ GLOBAL_LABEL(FUNCNAME:)
         RAW(62) RAW(f2) RAW(fd) RAW(3f) RAW(55) RAW(72) RAW(7f)
         RAW(62) RAW(f2) RAW(fd) RAW(3f) RAW(55) RAW(32)
         END_OF_SUBTEST_MARKER
-
-#endif /* DISABLED_UNTIL_BUG_1312_IS_FIXED */
 
         /* avx512bw_opts.s */
         RAW(62) RAW(f1) RAW(7f) RAW(48) RAW(6f) RAW(f5)
@@ -95179,7 +95204,6 @@ GLOBAL_LABEL(FUNCNAME:)
         RAW(62) RAW(f2) RAW(fe) RAW(28) RAW(38) RAW(f5)
         END_OF_SUBTEST_MARKER
 
-#ifdef DISABLED_UNTIL_BUG_1312_IS_FIXED
         /* avx512er_rcig.s */
         RAW(62) RAW(f2) RAW(7d) RAW(18) RAW(c8) RAW(f5)
         RAW(62) RAW(f2) RAW(fd) RAW(18) RAW(c8) RAW(f5)
@@ -95534,6 +95558,7 @@ GLOBAL_LABEL(FUNCNAME:)
         RAW(fb) RAW(ff) RAW(ff)
         END_OF_SUBTEST_MARKER
 
+#ifdef DISABLED_UNTIL_BUG_1312_IS_FIXED
 /* These are not valid instructions */
         /* avx512f_nondef.s */
         RAW(62) RAW(f3) RAW(d5) RAW(1f) RAW(0b) RAW(f4) RAW(7b)
@@ -115249,7 +115274,6 @@ GLOBAL_LABEL(FUNCNAME:)
         RAW(87) RAW(34) RAW(12)
         END_OF_SUBTEST_MARKER
 
-#ifdef DISABLED_UNTIL_BUG_1312_IS_FIXED
         /* avx512f_gfni.s */
         RAW(62) RAW(f3) RAW(d5) RAW(48) RAW(ce) RAW(f4) RAW(ab)
         RAW(62) RAW(f3) RAW(d5) RAW(4f) RAW(ce) RAW(f4) RAW(ab)
@@ -115370,7 +115394,6 @@ GLOBAL_LABEL(FUNCNAME:)
         RAW(c0) RAW(1d) RAW(fe) RAW(ff)
         RAW(62) RAW(f2) RAW(55) RAW(48) RAW(dd) RAW(72) RAW(7f)
         END_OF_SUBTEST_MARKER
-#endif /* DISABLED_UNTIL_BUG_1312_IS_FIXED */
 
         /* avx512f_vl_opts.s */
         RAW(62) RAW(f1) RAW(fd) RAW(0f) RAW(28) RAW(f5)
@@ -132397,7 +132420,6 @@ GLOBAL_LABEL(FUNCNAME:)
         RAW(fb) RAW(ff) RAW(ff)
         END_OF_SUBTEST_MARKER
 
-#ifdef DISABLED_UNTIL_BUG_1312_IS_FIXED
         /* avx512f_vpclmulqdq_wig.s */
         RAW(62) RAW(f3) RAW(75) RAW(48) RAW(44) RAW(f2) RAW(ab)
         RAW(62) RAW(f3) RAW(75) RAW(48) RAW(44) RAW(b4) RAW(f4)
@@ -132423,7 +132445,6 @@ GLOBAL_LABEL(FUNCNAME:)
         RAW(62) RAW(f3) RAW(6d) RAW(48) RAW(44) RAW(52) RAW(7f)
         RAW(7b)
         END_OF_SUBTEST_MARKER
-#endif /* DISABLED_UNTIL_BUG_1312_IS_FIXED */
 
         /* avx512ifma.s */
         RAW(62) RAW(f2) RAW(d5) RAW(48) RAW(b4) RAW(f4)
@@ -132949,8 +132970,6 @@ GLOBAL_LABEL(FUNCNAME:)
         RAW(62) RAW(f2) RAW(55) RAW(48) RAW(7d) RAW(72) RAW(80)
         RAW(62) RAW(f2) RAW(55) RAW(48) RAW(7d) RAW(b2) RAW(c0)
         RAW(df) RAW(ff) RAW(ff)
-#ifdef DISABLED_UNTIL_BUG_1312_IS_FIXED
-/* The following tests are disabled (xref i#1312). */
         RAW(62) RAW(f2) RAW(d5) RAW(48) RAW(83) RAW(f4)
         RAW(62) RAW(f2) RAW(d5) RAW(4f) RAW(83) RAW(f4)
         RAW(62) RAW(f2) RAW(d5) RAW(cf) RAW(83) RAW(f4)
@@ -132970,7 +132989,6 @@ GLOBAL_LABEL(FUNCNAME:)
         RAW(62) RAW(f2) RAW(d5) RAW(58) RAW(83) RAW(72) RAW(80)
         RAW(62) RAW(f2) RAW(d5) RAW(58) RAW(83) RAW(b2) RAW(f8)
         RAW(fb) RAW(ff) RAW(ff)
-#endif /* DISABLED_UNTIL_BUG_1312_IS_FIXED */
         RAW(62) RAW(f2) RAW(55) RAW(48) RAW(8d) RAW(f4)
         RAW(62) RAW(f2) RAW(55) RAW(4f) RAW(8d) RAW(f4)
         RAW(62) RAW(f2) RAW(55) RAW(cf) RAW(8d) RAW(f4)
@@ -133007,8 +133025,6 @@ GLOBAL_LABEL(FUNCNAME:)
         RAW(62) RAW(f2) RAW(55) RAW(48) RAW(7d) RAW(72) RAW(80)
         RAW(62) RAW(f2) RAW(55) RAW(48) RAW(7d) RAW(b2) RAW(c0)
         RAW(df) RAW(ff) RAW(ff)
-#ifdef DISABLED_UNTIL_BUG_1312_IS_FIXED
-/* The following tests are disabled (xref i#1312). */
         RAW(62) RAW(f2) RAW(d5) RAW(48) RAW(83) RAW(f4)
         RAW(62) RAW(f2) RAW(d5) RAW(4f) RAW(83) RAW(f4)
         RAW(62) RAW(f2) RAW(d5) RAW(cf) RAW(83) RAW(f4)
@@ -133881,10 +133897,7 @@ GLOBAL_LABEL(FUNCNAME:)
         RAW(62) RAW(f2) RAW(d5) RAW(3f) RAW(83) RAW(b2) RAW(f8)
         RAW(fb) RAW(ff) RAW(ff)
         END_OF_SUBTEST_MARKER
-#endif
 
-#ifdef DISABLED_UNTIL_BUG_1312_IS_FIXED
-/* The following tests are disabled (xref i#1312). */
         /* avx512vl_gfni.s */
         RAW(62) RAW(f3) RAW(d5) RAW(0f) RAW(ce) RAW(f4) RAW(ab)
         RAW(62) RAW(f3) RAW(d5) RAW(8f) RAW(ce) RAW(f4) RAW(ab)
@@ -134418,19 +134431,15 @@ GLOBAL_LABEL(FUNCNAME:)
         RAW(62) RAW(f2) RAW(65) RAW(29) RAW(51) RAW(52) RAW(7f)
         RAW(62) RAW(f2) RAW(65) RAW(39) RAW(51) RAW(52) RAW(7f)
         END_OF_SUBTEST_MARKER
-#endif
 
         /* evex_lig_2.s */
         RAW(62) RAW(f1) RAW(7d) RAW(08) RAW(7e) RAW(21)
         RAW(62) RAW(f1) RAW(7d) RAW(08) RAW(7e) RAW(e1)
         RAW(62) RAW(f1) RAW(7d) RAW(08) RAW(6e) RAW(21)
         RAW(62) RAW(f1) RAW(7d) RAW(08) RAW(6e) RAW(e1)
-#ifdef DISABLED_UNTIL_BUG_4564_IS_FIXED
-/* The following tests are disabled (xref i#4564). */
         RAW(62) RAW(f1) RAW(fd) RAW(08) RAW(d6) RAW(21)
         RAW(62) RAW(f1) RAW(fe) RAW(08) RAW(7e) RAW(21)
         RAW(62) RAW(f1) RAW(fe) RAW(08) RAW(7e) RAW(f4)
-#endif
         RAW(62) RAW(f3) RAW(7d) RAW(08) RAW(17) RAW(c0) RAW(00)
         RAW(62) RAW(f3) RAW(7d) RAW(08) RAW(17) RAW(00) RAW(00)
         RAW(62) RAW(f3) RAW(7d) RAW(08) RAW(14) RAW(c0) RAW(00)
@@ -139139,8 +139148,6 @@ GLOBAL_LABEL(FUNCNAME:)
         END_OF_SUBTEST_MARKER
 #endif
 
-#ifdef DISABLED_UNTIL_BUG_1312_IS_FIXED
-/* The following tests are disabled (xref i#1312). */
         /* gfni.s */
         RAW(66) RAW(0f) RAW(38) RAW(cf) RAW(ec)
         RAW(66) RAW(0f) RAW(38) RAW(cf) RAW(ac) RAW(f4) RAW(c0)
@@ -139173,7 +139180,6 @@ GLOBAL_LABEL(FUNCNAME:)
         RAW(66) RAW(0f) RAW(3a) RAW(cf) RAW(aa) RAW(f0) RAW(07)
         RAW(00) RAW(00) RAW(7b)
         END_OF_SUBTEST_MARKER
-#endif
 
         /* optimize_1.s */
         RAW(62) RAW(f1) RAW(f5) RAW(4f) RAW(55) RAW(e9)
@@ -139488,12 +139494,9 @@ GLOBAL_LABEL(FUNCNAME:)
         RAW(c5) RAW(fa) RAW(7e) RAW(f8)
         RAW(c5) RAW(fa) RAW(7e) RAW(f8)
         RAW(c5) RAW(f9) RAW(d6) RAW(c7)
-#ifdef DISABLED_UNTIL_BUG_4564_IS_FIXED
-/* The following tests are disabled (xref i#4564). */
         RAW(62) RAW(f1) RAW(fe) RAW(08) RAW(7e) RAW(f8)
         RAW(62) RAW(f1) RAW(fe) RAW(08) RAW(7e) RAW(f8)
         RAW(62) RAW(f1) RAW(fd) RAW(08) RAW(d6) RAW(c7)
-#endif
         RAW(66) RAW(0f) RAW(c5) RAW(f8) RAW(00)
         RAW(66) RAW(0f) RAW(c5) RAW(f8) RAW(00)
         RAW(66) RAW(0f) RAW(3a) RAW(15) RAW(c7) RAW(00)
@@ -139592,6 +139595,35 @@ GLOBAL_LABEL(FUNCNAME:)
         RAW(7b) RAW(00) RAW(00) RAW(00)
         END_OF_SUBTEST_MARKER
 
+        /* xsaves.s CPL 0 instruction */
+        RAW(0f) RAW(c7) RAW(28)
+        RAW(0f) RAW(c7) RAW(69) RAW(37)
+        RAW(0f) RAW(c7) RAW(2c) RAW(71)
+        RAW(0f) RAW(c7) RAW(ac) RAW(f4) RAW(c0) RAW(1d) RAW(fe)
+        RAW(ff)
+        END_OF_SUBTEST_MARKER
+
+        /* xrstors.s */
+        RAW(0f) RAW(c7) RAW(18)
+        RAW(0f) RAW(c7) RAW(1b)
+        RAW(0f) RAW(c7) RAW(59) RAW(37)
+        RAW(0f) RAW(c7) RAW(1c) RAW(71)
+        RAW(0f) RAW(c7) RAW(9c) RAW(f0) RAW(23)
+        RAW(01) RAW(00) RAW(00)
+
+        END_OF_SUBTEST_MARKER
+
+        /* TODO i#5505: Move the following back under
+         * arch_13.s in a separate PR to keep the huge
+         * diff isolated from PR #6484.
+         */
+        /* clac, CPL 0 instruction. */
+        RAW(0f) RAW(01) RAW(ca)
+        /* stac, CPL 0 instruction. */
+        RAW(0f) RAW(01) RAW(cb)
+
+        END_OF_SUBTEST_MARKER
+
 #ifdef DISABLED_UNTIL_BUG_3577_IS_FIXED
         /* The following tests are disabled (xref i#3577). */
 
@@ -139632,6 +139664,7 @@ GLOBAL_LABEL(FUNCNAME:)
         RAW(f3) RAW(0f) RAW(a6) RAW(d0)
         RAW(f3) RAW(0f) RAW(a6) RAW(d0)
         END_OF_SUBTEST_MARKER
+#endif /* DISABLED_UNTIL_BUG_3578_IS_FIXED */
 
         /* ptwrite.s */
         RAW(f3) RAW(0f) RAW(ae) RAW(e1)
@@ -139643,7 +139676,6 @@ GLOBAL_LABEL(FUNCNAME:)
         RAW(f3) RAW(0f) RAW(ae) RAW(21)
         END_OF_SUBTEST_MARKER
 
-#endif /* DISABLED_UNTIL_BUG_3578_IS_FIXED */
 #ifdef DISABLED_UNTIL_BUG_3581_IS_FIXED
         /* The following tests are disabled (xref i#3581). */
 
@@ -139870,6 +139902,39 @@ GLOBAL_LABEL(FUNCNAME:)
         RAW(0f) RAW(38) RAW(cd) RAW(24) RAW(58)
 
 #endif /* DISABLED_UNTIL_BUG_3581_IS_FIXED */
+
+        /* movdir.s */
+        RAW(0f) RAW(38) RAW(f9) RAW(01)
+        RAW(66) RAW(0f) RAW(38) RAW(f9) RAW(01)
+        RAW(67) RAW(66) RAW(0f) RAW(38) RAW(f8) RAW(04)
+        RAW(67) RAW(66) RAW(0f) RAW(38) RAW(f8) RAW(0e) RAW(00) RAW(00)
+        RAW(67) RAW(66) RAW(0f) RAW(38) RAW(f8) RAW(0e) RAW(34) RAW(12)
+        RAW(0f) RAW(38) RAW(f9) RAW(01)
+        RAW(0f) RAW(38) RAW(f9) RAW(01)
+        RAW(66) RAW(0f) RAW(38) RAW(f9) RAW(01)
+        RAW(67) RAW(66) RAW(0f) RAW(38) RAW(f8) RAW(04)
+        RAW(67) RAW(66) RAW(0f) RAW(38) RAW(f8) RAW(0e) RAW(00) RAW(00)
+        RAW(67) RAW(66) RAW(0f) RAW(38) RAW(f8) RAW(0e) RAW(34) RAW(12)
+        END_OF_SUBTEST_MARKER
+
+        /* enqcmd.s */
+        RAW(f2) RAW(0f) RAW(38) RAW(f8) RAW(01)
+        RAW(67) RAW(f2) RAW(0f) RAW(38) RAW(f8) RAW(04)
+        RAW(f3) RAW(0f) RAW(38) RAW(f8) RAW(01)
+        RAW(67) RAW(f3) RAW(0f) RAW(38) RAW(f8) RAW(04)
+        RAW(67) RAW(f2) RAW(0f) RAW(38) RAW(f8) RAW(0e) RAW(00) RAW(00)
+        RAW(67) RAW(f2) RAW(0f) RAW(38) RAW(f8) RAW(0e) RAW(34) RAW(12)
+        RAW(67) RAW(f3) RAW(0f) RAW(38) RAW(f8) RAW(0e) RAW(00) RAW(00)
+        RAW(67) RAW(f3) RAW(0f) RAW(38) RAW(f8) RAW(0e) RAW(34) RAW(12)
+        RAW(f2) RAW(0f) RAW(38) RAW(f8) RAW(01)
+        RAW(67) RAW(f2) RAW(0f) RAW(38) RAW(f8) RAW(04)
+        RAW(f3) RAW(0f) RAW(38) RAW(f8) RAW(01)
+        RAW(67) RAW(f3) RAW(0f) RAW(38) RAW(f8) RAW(04)
+        RAW(67) RAW(f2) RAW(0f) RAW(38) RAW(f8) RAW(0e) RAW(00) RAW(00)
+        RAW(67) RAW(f2) RAW(0f) RAW(38) RAW(f8) RAW(0e) RAW(34) RAW(12)
+        RAW(67) RAW(f3) RAW(0f) RAW(38) RAW(f8) RAW(0e) RAW(00) RAW(00)
+        RAW(67) RAW(f3) RAW(0f) RAW(38) RAW(f8) RAW(0e) RAW(34) RAW(12)
+        END_OF_SUBTEST_MARKER
 
         END_OF_FUNCTION_MARKER
 END_FUNC(FUNCNAME)

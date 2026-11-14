@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2019 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2026 Google, Inc.  All rights reserved.
  * Copyright (c) 2000-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -50,6 +50,8 @@
 #endif
 
 #include "arch.h"
+#include "arch_exports.h"
+#include "proc.h"
 
 /* We have to dynamically size kernel_xstate_t to account for kernel changes
  * over time.
@@ -57,6 +59,9 @@
 static size_t xstate_size;
 static bool xstate_has_extra_fields;
 
+/* We use this early enough during init that we assume there is no confusion
+ * with NUDGESIG_SIGNUM or SUSPEND_SIGNAL as DR's main handler is not set up yet.
+ */
 #define XSTATE_QUERY_SIG SIGILL
 
 /**** floating point support ********************************************/
@@ -127,7 +132,7 @@ twd_fxsr_to_i387(struct i387_fxsave_struct *fxsave)
     uint ret = 0xffff0000;
     int i;
     for (i = 0; i < 8; i++) {
-        if (TEST(0x1, twd)) {
+        if (TESTANY(0x1, twd)) {
             st = (kernel_fpxreg_t *)&fxsave->st_space[i * 4];
 
             switch (st->exponent & 0x7fff) {
@@ -143,7 +148,7 @@ twd_fxsr_to_i387(struct i387_fxsave_struct *fxsave)
                 }
                 break;
             default:
-                if (TEST(0x8000, st->significand[3])) {
+                if (TESTANY(0x8000, st->significand[3])) {
                     tag = 0; /* Valid */
                 } else {
                     tag = 2; /* Special */
@@ -190,9 +195,8 @@ save_xmm(dcontext_t *dcontext, sigframe_rt_t *frame)
     /* The app's xmm registers may be saved away in priv_mcontext_t, in which
      * case we need to copy those values instead of using what was in
      * the physical xmm registers.
-     * Because of this, we can't just execute "xsave".  We still need to
-     * execute xgetbv though.  Xsave is very expensive so not worth doing
-     * when xgetbv is all we need, so we avoid it unless there are extra fields.
+     * Because of this, we can't just execute "xsave".  We update the state
+     * component bits along with the register values below.
      */
     int i;
     sigcontext_t *sc = get_sigcontext_from_rt_frame(frame);
@@ -226,7 +230,7 @@ save_xmm(dcontext_t *dcontext, sigframe_rt_t *frame)
                      : "eax", "edx", "rcx", "memory");
 #else
 #    if DISABLED_ISSUE_3256
-        /* FIXME i#3256: DR's kernel_fpstate_t includes the fsave 112 bytes at the
+        /* XXX i#3256: DR's kernel_fpstate_t includes the fsave 112 bytes at the
          * top.  We need to skip them to reach the xsave area at the _fxsr_env field.
          * However, that requires aligning that instead of the kernel_fpstate_t start
          * itself in sigpending_t and the frame we make on the app stack.  An
@@ -238,7 +242,7 @@ save_xmm(dcontext_t *dcontext, sigframe_rt_t *frame)
         ASSERT(ALIGNED(xsave_start, AVX_ALIGNMENT));
         /* We only enable the x87 state component. The rest of the user state components
          * gets copied below from priv_mcontext_t.
-         * FIXME i#1312: it is unclear if and how the components are arranged in
+         * XXX i#1312: it is unclear if and how the components are arranged in
          * 32-bit mode by the kernel. In fact, if we enable more state components here
          * than this, we get a crash in linux.sigcontext. This needs clarification about
          * what the kernel does for 32-bit with the extended xsave area.
@@ -257,12 +261,15 @@ save_xmm(dcontext_t *dcontext, sigframe_rt_t *frame)
 #endif
     }
     if (YMM_ENABLED()) {
-        /* all ymm regs are in our mcontext.  the only other thing
-         * in xstate is the xgetbv.
+        /* i#7996: XCR0 can enable components not allocated in this signal frame
+         * (e.g., AMX tile data).  Preserve the existing component bits and mark
+         * only the state we write: x87 in save_fpstate() and SIMD below.
          */
-        uint bv_high, bv_low;
-        dr_xgetbv(&bv_high, &bv_low);
-        xstate->xstate_hdr.xstate_bv = (((uint64)bv_high) << 32) | bv_low;
+        xstate->xstate_hdr.xstate_bv |= XCR0_FP | XCR0_SSE | XCR0_AVX;
+#ifdef X64
+        if (ZMM_ENABLED())
+            xstate->xstate_hdr.xstate_bv |= XCR0_OPMASK | XCR0_ZMM_HI256 | XCR0_HI16_ZMM;
+#endif
     }
     for (i = 0; i < proc_num_simd_sse_avx_saved(); i++) {
         /* we assume no padding */
@@ -298,7 +305,7 @@ save_xmm(dcontext_t *dcontext, sigframe_rt_t *frame)
                    ZMM_REG_SIZE);
         }
 #else
-        /* FIXME i#1312: it is unclear if and how the components are arranged in
+        /* XXX i#1312: it is unclear if and how the components are arranged in
          * 32-bit mode by the kernel.
          */
 #endif
@@ -358,7 +365,7 @@ save_fpstate(dcontext_t *dcontext, sigframe_rt_t *frame)
         convert_fxsave_to_fpstate(sc->fpstate, &temp->fxsave);
 #endif
     } else {
-        /* FIXME NYI: need to convert to fxsave format for sc->fpstate */
+        /* TODO NYI: need to convert to fxsave format for sc->fpstate */
         IF_X64(ASSERT_NOT_IMPLEMENTED(false));
         /* this is "unlazy_fpu" */
         asm volatile("fnsave %0 ; fwait" : "=m"(temp->fsave));
@@ -442,7 +449,7 @@ dump_fpstate(dcontext_t *dcontext, kernel_fpstate_t *fp)
              * is obtained via cpuid, which is the xstate size of 64-bit arch.
              */
             ASSERT(fp->sw_reserved.extended_size >= sizeof(*xstate));
-            ASSERT(TEST(XCR0_AVX, fp->sw_reserved.xstate_bv));
+            ASSERT(TESTANY(XCR0_AVX, fp->sw_reserved.xstate_bv));
             LOG(THREAD, LOG_ASYNCH, 1, "\txstate_bv = 0x" HEX64_FORMAT_STRING "\n",
                 xstate->xstate_hdr.xstate_bv);
             for (i = 0; i < proc_num_simd_sse_avx_registers(); i++) {
@@ -523,7 +530,7 @@ sigcontext_to_mcontext_simd(priv_mcontext_t *mc, sig_full_cxt_t *sc_full)
                  * is obtained via cpuid, which is the xstate size of 64-bit arch.
                  */
                 ASSERT(sc->fpstate->sw_reserved.extended_size >= sizeof(*xstate));
-                ASSERT(TEST(XCR0_AVX, sc->fpstate->sw_reserved.xstate_bv));
+                ASSERT(TESTANY(XCR0_AVX, sc->fpstate->sw_reserved.xstate_bv));
                 for (i = 0; i < proc_num_simd_sse_avx_registers(); i++) {
                     memcpy(&mc->simd[i].u32[4], &xstate->ymmh.ymmh_space[i * 4],
                            YMMH_REG_SIZE);
@@ -537,9 +544,9 @@ sigcontext_to_mcontext_simd(priv_mcontext_t *mc, sig_full_cxt_t *sc_full)
                 /* The following three XCR0 bits should have been checked already
                  * in ZMM_ENABLED().
                  */
-                ASSERT(TEST(XCR0_ZMM_HI256, sc->fpstate->sw_reserved.xstate_bv));
-                ASSERT(TEST(XCR0_HI16_ZMM, sc->fpstate->sw_reserved.xstate_bv));
-                ASSERT(TEST(XCR0_OPMASK, sc->fpstate->sw_reserved.xstate_bv));
+                ASSERT(TESTANY(XCR0_ZMM_HI256, sc->fpstate->sw_reserved.xstate_bv));
+                ASSERT(TESTANY(XCR0_HI16_ZMM, sc->fpstate->sw_reserved.xstate_bv));
+                ASSERT(TESTANY(XCR0_OPMASK, sc->fpstate->sw_reserved.xstate_bv));
                 for (i = 0; i < proc_num_simd_sse_avx_registers(); i++) {
                     memcpy(&mc->simd[i].u32[8],
                            (byte *)xstate + proc_xstate_area_zmm_hi256_offs() +
@@ -552,7 +559,7 @@ sigcontext_to_mcontext_simd(priv_mcontext_t *mc, sig_full_cxt_t *sc_full)
                                i * ZMM_REG_SIZE,
                            ZMM_REG_SIZE);
                 }
-                ASSERT(TEST(XCR0_OPMASK, sc->fpstate->sw_reserved.xstate_bv));
+                ASSERT(TESTANY(XCR0_OPMASK, sc->fpstate->sw_reserved.xstate_bv));
                 for (i = 0; i < proc_num_opmask_registers(); i++) {
                     memcpy(&mc->opmask[i],
                            (byte *)xstate + proc_xstate_area_kmask_offs() +
@@ -562,7 +569,7 @@ sigcontext_to_mcontext_simd(priv_mcontext_t *mc, sig_full_cxt_t *sc_full)
             }
         }
 #else
-        /* FIXME i#1312: it is unclear if and how the components are arranged in
+        /* XXX i#1312: it is unclear if and how the components are arranged in
          * 32-bit mode by the kernel.
          */
 #endif
@@ -586,11 +593,26 @@ mcontext_to_sigcontext_simd(sig_full_cxt_t *sc_full, priv_mcontext_t *mc)
                  * is obtained via cpuid, which is the xstate size of 64-bit arch.
                  */
                 ASSERT(sc->fpstate->sw_reserved.extended_size >= sizeof(*xstate));
-                ASSERT(TEST(XCR0_AVX, sc->fpstate->sw_reserved.xstate_bv));
+                ASSERT(TESTANY(XCR0_AVX, sc->fpstate->sw_reserved.xstate_bv));
                 for (i = 0; i < proc_num_simd_sse_avx_registers(); i++) {
                     memcpy(&xstate->ymmh.ymmh_space[i * 4], &mc->simd[i].u32[4],
                            YMMH_REG_SIZE);
                 }
+                /* XXX: We've observed the kernel leaving out the AVX flag in signal
+                 * contexts for DR's suspend signals, even when app threads have used AVX
+                 * (github.com/DynamoRIO/dynamorio/pull/5791#issuecomment-1358789851).
+                 * Mark the SIMD components we copy from mc so sigreturn restores them
+                 * on detach.  We still do not understand the kernel's local laziness.
+                 * i#7996: XCR0 can also include components absent from this frame, so
+                 * preserve unrelated state bits instead of replacing the whole bitmap.
+                 */
+                xstate->xstate_hdr.xstate_bv |= XCR0_SSE | XCR0_AVX;
+#ifdef X64
+                if (ZMM_ENABLED()) {
+                    xstate->xstate_hdr.xstate_bv |=
+                        XCR0_OPMASK | XCR0_ZMM_HI256 | XCR0_HI16_ZMM;
+                }
+#endif
             }
         }
 #ifdef X64
@@ -600,9 +622,9 @@ mcontext_to_sigcontext_simd(sig_full_cxt_t *sc_full, priv_mcontext_t *mc)
                 /* The following three XCR0 bits should have been checked already
                  * in ZMM_ENABLED().
                  */
-                ASSERT(TEST(XCR0_ZMM_HI256, sc->fpstate->sw_reserved.xstate_bv));
-                ASSERT(TEST(XCR0_HI16_ZMM, sc->fpstate->sw_reserved.xstate_bv));
-                ASSERT(TEST(XCR0_OPMASK, sc->fpstate->sw_reserved.xstate_bv));
+                ASSERT(TESTANY(XCR0_ZMM_HI256, sc->fpstate->sw_reserved.xstate_bv));
+                ASSERT(TESTANY(XCR0_HI16_ZMM, sc->fpstate->sw_reserved.xstate_bv));
+                ASSERT(TESTANY(XCR0_OPMASK, sc->fpstate->sw_reserved.xstate_bv));
                 for (i = 0; i < proc_num_simd_sse_avx_registers(); i++) {
                     memcpy((byte *)xstate + proc_xstate_area_zmm_hi256_offs() +
                                i * ZMMH_REG_SIZE,
@@ -614,7 +636,7 @@ mcontext_to_sigcontext_simd(sig_full_cxt_t *sc_full, priv_mcontext_t *mc)
                            &mc->simd[i + proc_num_simd_sse_avx_registers()],
                            ZMM_REG_SIZE);
                 }
-                ASSERT(TEST(XCR0_OPMASK, sc->fpstate->sw_reserved.xstate_bv));
+                ASSERT(TESTANY(XCR0_OPMASK, sc->fpstate->sw_reserved.xstate_bv));
                 for (i = 0; i < proc_num_opmask_registers(); i++) {
                     memcpy((byte *)xstate + proc_xstate_area_kmask_offs() +
                                i * OPMASK_AVX512BW_REG_SIZE,
@@ -623,7 +645,7 @@ mcontext_to_sigcontext_simd(sig_full_cxt_t *sc_full, priv_mcontext_t *mc)
             }
         }
 #else
-        /* FIXME i#1312: it is unclear if and how the components are arranged in
+        /* XXX i#1312: it is unclear if and how the components are arranged in
          * 32-bit mode by the kernel.
          */
 #endif
@@ -693,6 +715,13 @@ signal_arch_init(void)
          * compiler from optimizing it away.
          * XXX i#641, i#639: this breaks transparency to some extent until the
          * app uses fpu/xmm but we live with it.
+         * Given a security vulnerability and its mitigations, executing a fpu/xmm
+         * operation here might not be necessary anymore. The vulnerabilty, published on
+         * June 13, 2018, is CVE-2018-3665: "Lazy FPU Restore" schemes are vulnerable to
+         * the FPU state information leakage issue. The kernel-based mitigation was to
+         * automatically default to (safe) "eager" floating point register restore.  In
+         * this mode FPU state is saved and restored for every task/context switch
+         * regardless of whether the current process invokes FPU instructions or not.
          */
         __asm__ __volatile__("movd %%xmm0, %0" : "=g"(rc));
         memset(&act, 0, sizeof(act));

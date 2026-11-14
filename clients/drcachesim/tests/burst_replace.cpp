@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2016-2021 Google, Inc.  All rights reserved.
+ * Copyright (c) 2016-2026 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -34,6 +34,7 @@
  * a "burst" of execution in the middle of the application.  It then detaches.
  */
 
+#include "test_helpers.h"
 /* We deliberately do not include configure.h here to simulate what an
  * actual app will look like.  configure_DynamoRIO_static sets DR_APP_EXPORTS
  * for us.
@@ -48,6 +49,9 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+
+namespace dynamorio {
+namespace drmemtrace {
 
 #define MAGIC_VALUE ((void *)(ptr_uint_t)0xdeadbeefUL)
 
@@ -155,7 +159,7 @@ print_cb(void *data, char *dst, size_t max_len)
 }
 
 static const char *
-parse_cb(const char *src, OUT void **data)
+parse_cb(const char *src, DR_PARAM_OUT void **data)
 {
     const char *res;
     if (dr_sscanf(src, PIFX ",", data) != 1)
@@ -196,7 +200,8 @@ post_process()
             dir.modfile_bytes_, parse_cb, process_cb, MAGIC_VALUE, free_cb);
         assert(module_mapper->get_last_error().empty());
         // Test back-compat of deprecated APIs.
-        raw2trace_t raw2trace(dir.modfile_bytes_, dir.in_files_, dir.out_files_, NULL);
+        raw2trace_t raw2trace(dir.modfile_bytes_, dir.in_files_, dir.out_files_,
+                              dir.out_archives_);
         std::string error =
             raw2trace.handle_custom_data(parse_cb, process_cb, MAGIC_VALUE, free_cb);
         assert(error.empty());
@@ -218,7 +223,9 @@ post_process()
     raw2trace_directory_t dir;
     std::string dir_err = dir.initialize(raw_dir, "");
     assert(dir_err.empty());
-    raw2trace_t raw2trace(dir.modfile_bytes_, dir.in_files_, dir.out_files_, dr_context,
+    raw2trace_t raw2trace(dir.modfile_bytes_, dir.in_files_, dir.out_files_,
+                          dir.out_archives_, dir.encoding_file_,
+                          dir.serial_schedule_file_, dir.cpu_schedule_file_, dr_context,
                           0);
     std::string error =
         raw2trace.handle_custom_data(parse_cb, process_cb, MAGIC_VALUE, free_cb);
@@ -229,14 +236,17 @@ post_process()
 }
 
 int
-main(int argc, const char *argv[])
+test_main(int argc, const char *argv[])
 {
     static int outer_iters = 2048;
     /* We trace a 4-iter burst of execution. */
     static int iter_start = outer_iters / 3;
     static int iter_stop = iter_start + 4;
 
-    if (!my_setenv("DYNAMORIO_OPTIONS", "-stderr_mask 0xc -client_lib ';;-offline'"))
+    // Set the main buffer to 4K as our output is tuned to that for the count
+    // of writes.
+    if (!my_setenv("DYNAMORIO_OPTIONS",
+                   "-stderr_mask 0xc -client_lib ';;-offline -main_buf_records 4K'"))
         std::cerr << "failed to set env var!\n";
 
     std::cerr << "replace all file functions\n";
@@ -274,3 +284,6 @@ main(int argc, const char *argv[])
     std::cerr << "all done\n";
     return 0;
 }
+
+} // namespace drmemtrace
+} // namespace dynamorio

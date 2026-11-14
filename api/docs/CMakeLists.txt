@@ -53,11 +53,11 @@ set(genimg_dirname ${CMAKE_CURRENT_BINARY_DIR}/genimages)
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/genimages DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
 
 function (gendox_to_dox gendox_in gendox_out path master_list)
-  file(GLOB dox_files "${path}/*.dox" "${path}/*.dox.in")
+  file(GLOB_RECURSE dox_glob "${path}/*.dox" "${path}/*.dox.in")
   set(${master_list} ${${master_list}};${dox_files} PARENT_SCOPE)
-  foreach (dox_file ${dox_files})
+  foreach (dox_file ${dox_glob})
     file(READ "${dox_file}" dox_string)
-    string(REGEX MATCHALL "\n\\\\page [^ ]+" page "${dox_string}")
+    string(REGEX MATCHALL "\n\\\\page page_[^ ]+" page "${dox_string}")
     set(dox_pages ${dox_pages} ${page})
   endforeach (dox_file)
   foreach (page ${dox_pages})
@@ -72,8 +72,8 @@ endfunction (gendox_to_dox)
 # we want docs for Extensions (i#277/PR 540817) to be subpages but we
 # don't want to edit a top-level page to add new ones so we generate it
 file(GLOB dox_files *.dox)
-gendox_to_dox("ext" "ext_gendox" "${PROJECT_SOURCE_DIR}/ext/*/" dox_files)
-gendox_to_dox("tool" "tool_gendox" "${PROJECT_SOURCE_DIR}/clients/*/" dox_files)
+gendox_to_dox("ext" "ext_gendox" "${PROJECT_SOURCE_DIR}/ext" dox_files)
+gendox_to_dox("tool" "tool_gendox" "${PROJECT_SOURCE_DIR}/clients" dox_files)
 
 # determine doxygen version
 include(CMake_doxyutils.cmake)
@@ -153,10 +153,11 @@ macro (generate_html name dest_dir embeddable)
     VERBATIM # recommended: p260
     )
   set_directory_properties(PROPERTIES
-    ADDITIONAL_MAKE_CLEAN_FILES "html;latex;rtf")
+    ADDITIONAL_MAKE_CLEAN_FILES "html;latex")
 
   add_custom_target(${name} ALL
     DEPENDS ${doxyfile}
+            ${dox_files}
             ${figures_eps}
             ${figures_png}
             ${docsgen}

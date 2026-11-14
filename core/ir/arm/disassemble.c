@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2014-2015 Google, Inc.  All rights reserved.
+ * Copyright (c) 2014-2026 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -39,18 +39,16 @@
 #include "decode_private.h"
 #include "disassemble.h"
 
-#if defined(INTERNAL) || defined(DEBUG) || defined(CLIENT_INTERFACE)
-
-#    ifdef DEBUG
+#ifdef DEBUG
 /* case 10450: give messages to clients */
 /* we can't undef ASSERT b/c of DYNAMO_OPTION */
-#        undef ASSERT_TRUNCATE
-#        undef ASSERT_BITFIELD_TRUNCATE
-#        undef ASSERT_NOT_REACHED
-#        define ASSERT_TRUNCATE DO_NOT_USE_ASSERT_USE_CLIENT_ASSERT_INSTEAD
-#        define ASSERT_BITFIELD_TRUNCATE DO_NOT_USE_ASSERT_USE_CLIENT_ASSERT_INSTEAD
-#        define ASSERT_NOT_REACHED DO_NOT_USE_ASSERT_USE_CLIENT_ASSERT_INSTEAD
-#    endif
+#    undef ASSERT_TRUNCATE
+#    undef ASSERT_BITFIELD_TRUNCATE
+#    undef ASSERT_NOT_REACHED
+#    define ASSERT_TRUNCATE DO_NOT_USE_ASSERT_USE_CLIENT_ASSERT_INSTEAD
+#    define ASSERT_BITFIELD_TRUNCATE DO_NOT_USE_ASSERT_USE_CLIENT_ASSERT_INSTEAD
+#    define ASSERT_NOT_REACHED DO_NOT_USE_ASSERT_USE_CLIENT_ASSERT_INSTEAD
+#endif
 
 static const char *const pred_names[] = {
     "",   /* DR_PRED_NONE */
@@ -74,10 +72,10 @@ static const char *const pred_names[] = {
 
 /* in disassemble_shared.c */
 void
-internal_opnd_disassemble(char *buf, size_t bufsz, size_t *sofar INOUT,
+internal_opnd_disassemble(char *buf, size_t bufsz, size_t *sofar DR_PARAM_INOUT,
                           dcontext_t *dcontext, opnd_t opnd, bool use_size_sfx);
 void
-reg_disassemble(char *buf, size_t bufsz, size_t *sofar INOUT, reg_id_t reg,
+reg_disassemble(char *buf, size_t bufsz, size_t *sofar DR_PARAM_INOUT, reg_id_t reg,
                 dr_opnd_flags_t flags, const char *prefix, const char *suffix);
 
 const char *
@@ -89,8 +87,9 @@ instr_predicate_name(dr_pred_type_t pred)
 }
 
 int
-print_bytes_to_buffer(char *buf, size_t bufsz, size_t *sofar INOUT, byte *pc,
-                      byte *next_pc, instr_t *instr)
+d_r_print_encoding_first_line_to_buffer(char *buf, size_t bufsz,
+                                        size_t *sofar DR_PARAM_INOUT, byte *pc,
+                                        byte *next_pc, instr_t *instr)
 {
     /* Follow conventions used elsewhere with split for T32, solid for the rest */
     if (instr_get_isa_mode(instr) == DR_ISA_ARM_THUMB) {
@@ -113,14 +112,16 @@ print_bytes_to_buffer(char *buf, size_t bufsz, size_t *sofar INOUT, byte *pc,
 }
 
 void
-print_extra_bytes_to_buffer(char *buf, size_t bufsz, size_t *sofar INOUT, byte *pc,
-                            byte *next_pc, int extra_sz, const char *extra_bytes_prefix)
+d_r_print_encoding_second_line_to_buffer(char *buf, size_t bufsz,
+                                         size_t *sofar DR_PARAM_INOUT, byte *pc,
+                                         byte *next_pc, int extra_sz,
+                                         const char *extra_bytes_prefix)
 {
     /* There are no "extra" bytes */
 }
 
 static bool
-instr_is_non_list_store(instr_t *instr, int *num_tostore OUT)
+instr_is_non_list_store(instr_t *instr, int *num_tostore DR_PARAM_OUT)
 {
     int opcode = instr_get_opcode(instr);
     switch (opcode) {
@@ -157,7 +158,7 @@ instr_is_non_list_store(instr_t *instr, int *num_tostore OUT)
 }
 
 static bool
-instr_is_non_list_load(instr_t *instr, int *num_toload OUT)
+instr_is_non_list_load(instr_t *instr, int *num_toload DR_PARAM_OUT)
 {
     int opcode = instr_get_opcode(instr);
     switch (opcode) {
@@ -215,9 +216,9 @@ instr_is_priv_reglist(instr_t *instr)
 }
 
 static void
-disassemble_shift(char *buf, size_t bufsz, size_t *sofar INOUT, const char *prefix,
-                  const char *suffix, dr_shift_type_t shift, bool print_amount,
-                  uint amount)
+disassemble_shift(char *buf, size_t bufsz, size_t *sofar DR_PARAM_INOUT,
+                  const char *prefix, const char *suffix, dr_shift_type_t shift,
+                  bool print_amount, uint amount)
 {
     switch (shift) {
     case DR_SHIFT_NONE: break;
@@ -253,7 +254,7 @@ disassemble_shift(char *buf, size_t bufsz, size_t *sofar INOUT, const char *pref
 }
 
 void
-opnd_base_disp_scale_disassemble(char *buf, size_t bufsz, size_t *sofar INOUT,
+opnd_base_disp_scale_disassemble(char *buf, size_t bufsz, size_t *sofar DR_PARAM_INOUT,
                                  opnd_t opnd)
 {
     uint amount;
@@ -262,9 +263,9 @@ opnd_base_disp_scale_disassemble(char *buf, size_t bufsz, size_t *sofar INOUT,
 }
 
 bool
-opnd_disassemble_arch(char *buf, size_t bufsz, size_t *sofar INOUT, opnd_t opnd)
+opnd_disassemble_arch(char *buf, size_t bufsz, size_t *sofar DR_PARAM_INOUT, opnd_t opnd)
 {
-    if (opnd_is_immed_int(opnd) && TEST(DR_OPND_IS_SHIFT, opnd_get_flags(opnd))) {
+    if (opnd_is_immed_int(opnd) && TESTANY(DR_OPND_IS_SHIFT, opnd_get_flags(opnd))) {
         dr_shift_type_t shift = (dr_shift_type_t)opnd_get_immed_int(opnd);
         disassemble_shift(buf, bufsz, sofar, "", "", shift, false, 0);
         return true;
@@ -273,12 +274,12 @@ opnd_disassemble_arch(char *buf, size_t bufsz, size_t *sofar INOUT, opnd_t opnd)
 }
 
 bool
-opnd_disassemble_noimplicit(char *buf, size_t bufsz, size_t *sofar INOUT,
+opnd_disassemble_noimplicit(char *buf, size_t bufsz, size_t *sofar DR_PARAM_INOUT,
                             dcontext_t *dcontext, instr_t *instr, byte optype,
                             opnd_t opnd, bool prev, bool multiple_encodings, bool dst,
-                            int *idx INOUT)
+                            int *idx DR_PARAM_OUT)
 {
-    /* FIXME i#1683: we need to avoid the implicit dst-as-src regs for instrs
+    /* XXX i#1683: we need to avoid the implicit dst-as-src regs for instrs
      * such as OP_smlal.
      */
     /* XXX i#1683: we're relying on flags added by the decoder and by the
@@ -305,7 +306,7 @@ opnd_disassemble_noimplicit(char *buf, size_t bufsz, size_t *sofar INOUT,
         opnd_t memop = writes_list ? instr_get_src(instr, 0) : instr_get_dst(instr, 0);
         CLIENT_ASSERT(opnd_is_base_disp(memop), "internal disasm error");
         if (opnd_get_reg(opnd) == opnd_get_base(memop) &&
-            !TEST(DR_OPND_IN_LIST, opnd_get_flags(opnd)))
+            !TESTANY(DR_OPND_IN_LIST, opnd_get_flags(opnd)))
             return false; /* skip */
     }
     /* Writeback implicit operands for non-list instrs */
@@ -333,11 +334,11 @@ opnd_disassemble_noimplicit(char *buf, size_t bufsz, size_t *sofar INOUT,
                 return false; /* skip */
             type = opnd_get_index_shift(memop, &amount);
             if (opnd_is_immed_int(opnd) &&
-                ((!TEST(DR_OPND_SHIFTED, opnd_get_flags(memop)) &&
+                ((!TESTANY(DR_OPND_SHIFTED, opnd_get_flags(memop)) &&
                   /* rule out disp==0 hiding shift type */
                   max - tostore < 3 &&
                   opnd_get_immed_int(opnd) == opnd_get_disp(memop)) ||
-                 (TEST(DR_OPND_SHIFTED, opnd_get_flags(memop)) &&
+                 (TESTANY(DR_OPND_SHIFTED, opnd_get_flags(memop)) &&
                   (opnd_get_immed_int(opnd) == type ||
                    opnd_get_immed_int(opnd) == amount))))
                 return false; /* skip */
@@ -355,7 +356,7 @@ opnd_disassemble_noimplicit(char *buf, size_t bufsz, size_t *sofar INOUT,
         CLIENT_ASSERT(opnd_is_base_disp(memop), "internal disasm error");
         last = instr_get_dst(instr, instr_num_dsts(instr) - 1);
         writeback = (opnd_is_reg(last) && opnd_get_reg(last) == opnd_get_base(memop) &&
-                     !TEST(DR_OPND_IN_LIST, opnd_get_flags(last)));
+                     !TESTANY(DR_OPND_IN_LIST, opnd_get_flags(last)));
         reg_disassemble(buf, bufsz, sofar, opnd_get_base(memop), 0, "",
                         writes_list ? (writeback ? "!, " : ", ")
                                     : (writeback ? "!" : ""));
@@ -376,7 +377,7 @@ opnd_disassemble_noimplicit(char *buf, size_t bufsz, size_t *sofar INOUT,
             opnd_t prior =
                 dst ? instr_get_dst(instr, *idx - 1) : instr_get_src(instr, *idx - 1);
             if (opnd_is_immed_int(prior) &&
-                TEST(DR_OPND_IS_SHIFT, opnd_get_flags(prior))) {
+                TESTANY(DR_OPND_IS_SHIFT, opnd_get_flags(prior))) {
                 if (opnd_get_immed_int(prior) == DR_SHIFT_RRX)
                     return true; /* do not print value, which is always 1 */
                 /* No comma in between */
@@ -389,20 +390,20 @@ opnd_disassemble_noimplicit(char *buf, size_t bufsz, size_t *sofar INOUT,
     }
 
     /* Register lists */
-    if (opnd_is_reg(opnd) && TEST(DR_OPND_IN_LIST, opnd_get_flags(opnd))) {
+    if (opnd_is_reg(opnd) && TESTANY(DR_OPND_IN_LIST, opnd_get_flags(opnd))) {
         /* For now we do not print ranges as "r0-r4" but print each reg.
          * This matches some other decoders but not all.
          */
         opnd_t adj = opnd_create_null();
         if (*idx > 0)
             adj = dst ? instr_get_dst(instr, *idx - 1) : instr_get_src(instr, *idx - 1);
-        if (!opnd_is_reg(adj) || !TEST(DR_OPND_IN_LIST, opnd_get_flags(adj)))
+        if (!opnd_is_reg(adj) || !TESTANY(DR_OPND_IN_LIST, opnd_get_flags(adj)))
             print_to_buffer(buf, bufsz, sofar, "{");
         internal_opnd_disassemble(buf, bufsz, sofar, dcontext, opnd, false);
         adj = opnd_create_null();
         if (*idx + 1 < max)
             adj = dst ? instr_get_dst(instr, *idx + 1) : instr_get_src(instr, *idx + 1);
-        if (!opnd_is_reg(adj) || !TEST(DR_OPND_IN_LIST, opnd_get_flags(adj))) {
+        if (!opnd_is_reg(adj) || !TESTANY(DR_OPND_IN_LIST, opnd_get_flags(adj))) {
             print_to_buffer(buf, bufsz, sofar, "}%s",
                             instr_is_priv_reglist(instr) ? "^" : "");
         }
@@ -417,13 +418,13 @@ opnd_disassemble_noimplicit(char *buf, size_t bufsz, size_t *sofar INOUT,
         CLIENT_ASSERT(opnd_is_base_disp(memop), "internal disasm error");
         print_to_buffer(buf, bufsz, sofar, ", ");
         internal_opnd_disassemble(buf, bufsz, sofar, dcontext, memop, false);
-        /* FIXME i#1683: we need to print "!" but how do we tell whether
+        /* XXX i#1683: we need to print "!" but how do we tell whether
          * the memop has a disp?
          */
     }
     /* Writeback "!" */
     if (nonlist_load && opnd_is_base_disp(opnd)) {
-        /* FIXME i#1683: we need to print "!" but how do we tell whether
+        /* XXX i#1683: we need to print "!" but how do we tell whether
          * the memop has a disp?
          */
     }
@@ -433,7 +434,7 @@ opnd_disassemble_noimplicit(char *buf, size_t bufsz, size_t *sofar INOUT,
 
 void
 print_instr_prefixes(dcontext_t *dcontext, instr_t *instr, char *buf, size_t bufsz,
-                     size_t *sofar INOUT)
+                     size_t *sofar DR_PARAM_OUT)
 {
     return;
 }
@@ -457,7 +458,7 @@ instr_has_built_in_pred_name(instr_t *instr)
 
 void
 print_opcode_name(instr_t *instr, const char *name, char *buf, size_t bufsz,
-                  size_t *sofar INOUT)
+                  size_t *sofar DR_PARAM_OUT)
 {
     if (instr_get_opcode(instr) == OP_it && opnd_is_immed_int(instr_get_src(instr, 0)) &&
         opnd_is_immed_int(instr_get_src(instr, 1))) {
@@ -468,7 +469,7 @@ print_opcode_name(instr_t *instr, const char *name, char *buf, size_t bufsz,
                                   opnd_get_immed_int(instr_get_src(instr, 0)));
         for (i = 1 /*1st is implied*/; i < info.num_instrs; i++) {
             print_to_buffer(buf, bufsz, sofar, "%c",
-                            TEST(BITMAP_MASK(i), info.preds) ? 't' : 'e');
+                            TESTANY(BITMAP_MASK(i), info.preds) ? 't' : 'e');
         }
     } else if (instr_is_predicated(instr)) {
         dr_pred_type_t pred = instr_get_predicate(instr);
@@ -496,5 +497,3 @@ print_opcode_name(instr_t *instr, const char *name, char *buf, size_t bufsz,
     } else
         print_to_buffer(buf, bufsz, sofar, "%s", name);
 }
-
-#endif /* INTERNAL || CLIENT_INTERFACE */

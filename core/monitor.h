@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2012-2019 Google, Inc.  All rights reserved.
+ * Copyright (c) 2012-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2000-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -39,9 +39,9 @@
  */
 
 #ifndef _MONITOR_H_
-#define _MONITOR_H_ 1
+#define _MONITOR_H_
 
-#include "fragment.h" /* for trace_bb_info_t, and for CUSTOM_TRACES
+#include "fragment.h" /* for trace_bb_info_t, and for custom traces
                        * the "fragment_t wrapper" struct */
 
 /* synchronization of shared traces */
@@ -105,7 +105,7 @@ cur_trace_vmlist(dcontext_t *dcontext);
 /* This routine internally calls enter_couldbelinking, thus it is safe
  * to call from any linking state. Restores linking to previous state at exit.
  * If calling on another thread, caller should be synchornized with that thread
- * (either via flushing synch or thread_synch methods) FIXME : verify all users
+ * (either via flushing synch or thread_synch methods) XXX : verify all users
  * on other threads are properly synchronized
  */
 void
@@ -126,7 +126,7 @@ mangle_trace_at_end(void);
 
 /* trace head counters are thread-private and must be kept in a
  * separate table and not in the fragment_t structure.
- * FIXME: may want to do this for non-shared-cache, since persistent counters
+ * XXX: may want to do this for non-shared-cache, since persistent counters
  * may mitigate the performance hit of a small bb cache -- but for that
  * we could keep the counters in future_fragment_t when a bb dies and
  * re-initialize to that value when it comes back.
@@ -180,21 +180,17 @@ typedef struct _monitor_data_t {
      */
     generic_table_t *thead_table;
 
-#ifdef CLIENT_INTERFACE
     /* PR 299808: we re-build each bb and pass to the client */
     instrlist_t unmangled_ilist;
     instrlist_t *unmangled_bb_ilist; /* next bb */
     /* cache at start of trace building whether we're going to pass to client */
     bool pass_to_client;
-#endif
     /* Record whether final block ends in syscall or int.
-     * FIXME: remove once we have PR 307284.
+     * XXX: remove once we have PR 307284.
      */
     uint final_exit_flags;
 
-#ifdef CUSTOM_TRACES
     fragment_t wrapper; /* for creating new shadowed trace heads */
-#endif
 } monitor_data_t;
 
 /* PR 204770: use trace component bb tag for RCT source address */

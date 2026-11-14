@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2021 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2001-2010 VMware, Inc.  All rights reserved.
  * ********************************************************** */
 
@@ -63,8 +63,8 @@
  * to try and avoid relocations (case 7852) we should avoid using it
  * to avoid confusion (though we can always pick a different register,
  * even varying by function).
- * FIXME: should we use virtual registers instead?
- * FIXME: should we have ARG1_IN_REG macro that is either nop or load from stack?
+ * XXX: should we use virtual registers instead?
+ * XXX: should we have ARG1_IN_REG macro that is either nop or load from stack?
  * For now not bothering, but if we add more routines we'll want more support.
  * Naturally the ARG* macros are only valid at function entry.
  */
@@ -93,12 +93,8 @@ START_FILE
 #endif
 
 /* Count the slots for client clean call inlining. */
-#ifdef CLIENT_INTERFACE
 /* Add CLEANCALL_NUM_INLINE_SLOTS(5) * ARG_SZ for these slots.  No padding. */
 # define UPCXT_EXTRA (UPCXT_BEFORE_INLINE_SLOTS + 5 * ARG_SZ)
-#else
-# define UPCXT_EXTRA UPCXT_BEFORE_INLINE_SLOTS
-#endif
 
 /* XXX: duplicated in os_exports.h */
 #ifdef X64
@@ -158,6 +154,7 @@ DECL_EXTERN(dr_app_start_helper)
 #endif
 DECL_EXTERN(dynamo_process_exit)
 DECL_EXTERN(dynamo_thread_exit)
+DECL_EXTERN(dynamo_thread_exit_dcontext)
 DECL_EXTERN(dynamo_thread_stack_free_and_exit)
 DECL_EXTERN(dynamorio_app_take_over_helper)
 DECL_EXTERN(found_modified_code)
@@ -169,7 +166,7 @@ DECL_EXTERN(internal_exception_info)
 DECL_EXTERN(is_currently_on_dstack)
 DECL_EXTERN(nt_continue_setup)
 #if defined(UNIX)
-DECL_EXTERN(master_signal_handler_C)
+DECL_EXTERN(main_signal_handler_C)
 #endif
 #ifdef MACOS
 DECL_EXTERN(new_bsdthread_setup)
@@ -220,7 +217,7 @@ DECL_EXTERN(load_dynamo_failure)
  * required for non early follow children, we have to explicitly tell the
  * linker to do so.  This is done in the Makefile.
  * Note that if it weren't for wanting local go-native code we would have
- * auto_setup in x86_code.c be dynamo_auto_start.
+ * auto_setup in asm_aux.c be dynamo_auto_start.
  */
         DECLARE_FUNC(dynamo_auto_start)
 GLOBAL_LABEL(dynamo_auto_start:)
@@ -310,7 +307,6 @@ call_dispatch_alt_stack_no_free:
         ret
         END_FUNC(call_switch_stack)
 
-#ifdef CLIENT_INTERFACE
 /*
  * Calls the specified function 'func' after switching to the DR stack
  * for the thread corresponding to 'drcontext'.
@@ -431,7 +427,6 @@ GLOBAL_LABEL(dr_call_on_clean_stack:)
 # endif
         ret
         END_FUNC(dr_call_on_clean_stack)
-#endif /* CLIENT_INTERFACE */
 
 /*
  * Copies from the current xsp to tos onto the base of stack and then
@@ -529,14 +524,14 @@ GLOBAL_LABEL(dynamorio_app_take_over:)
         END_FUNC(dynamorio_app_take_over)
 
 /*
- * cleanup_and_terminate(dcontext_t *dcontext,     // 1*ARG_SZ+XBP
- *                       int sysnum,               // 2*ARG_SZ+XBP = syscall #
- *                       int sys_arg1/param_base,  // 3*ARG_SZ+XBP = arg1 for syscall
- *                       int sys_arg2,             // 4*ARG_SZ+XBP = arg2 for syscall
- *                       bool exitproc,            // 5*ARG_SZ+XBP
- *                       (these 2 args are only used for Mac thread exit:)
- *                       int sys_arg3,             // 6*ARG_SZ+XBP = arg3 for syscall
- *                       int sys_arg4)             // 7*ARG_SZ+XBP = arg4 for syscall
+ * cleanup_and_terminate(dcontext_t *dcontext,        // 1*ARG_SZ+XBP
+ *                   ptr_uint_t sysnum,               // 2*ARG_SZ+XBP = syscall #
+ *                   ptr_uint_t sys_arg1/param_base,  // 3*ARG_SZ+XBP = arg1 for syscall
+ *                   ptr_uint_t sys_arg2,             // 4*ARG_SZ+XBP = arg2 for syscall
+ *                   bool exitproc,                   // 5*ARG_SZ+XBP
+ *                   (These 2 args are only used for Mac thread exit:)
+ *                   ptr_uint_t sys_arg3,             // 6*ARG_SZ+XBP = arg3 for syscall
+ *                   ptr_uint_t sys_arg4)             // 7*ARG_SZ+XBP = arg4 for syscall
  *
  * See decl in arch_exports.h for description.
  *
@@ -614,7 +609,12 @@ cat_done_saving_dstack:
         CALLC0(GLOBAL_REF(dynamo_process_exit))
         jmp      cat_no_thread
 cat_thread_only:
-        CALLC0(GLOBAL_REF(dynamo_thread_exit))
+        /* We need to pass dcontext as get_thread_private_dcontext() can return
+         * NULL from is_thread_tls_initialized() seeing detacher_tid being set
+         * which we do not want for client threads.
+         */
+        mov      REG_XAX, [1*ARG_SZ + REG_XBP] /* dcontext */
+        CALLC1(GLOBAL_REF(dynamo_thread_exit_dcontext), REG_XAX)
 cat_no_thread:
         /* now switch to d_r_initstack for cleanup of dstack
          * could use d_r_initstack for whole thing but that's too long
@@ -647,6 +647,10 @@ cat_have_lock:
         mov      REG_XDI, REG_XAX    /* esp to use */
 #endif
         mov      REG_XSI, [2*ARG_SZ + REG_XBP]  /* sysnum */
+#ifdef MACOS64
+        /* For now we assume a BSD syscall */
+        or       REG_XSI, SYSCALL_NUM_MARKER_BSD
+#endif
         pop      REG_XAX             /* syscall */
         pop      REG_XCX             /* dstack */
 #if defined(UNIX) && !defined(X64)
@@ -819,7 +823,7 @@ GLOBAL_LABEL(global_do_syscall_sygate_sysenter:)
         pop      PTRSZ [REG_XSP]
         push     PTRSZ SYMREF(sysenter_ret_address)
 #if defined(X64) && defined(WINDOWS)
-        syscall  /* FIXME ml64 won't take "sysenter" so half-fixing now */
+        syscall  /* XXX ml64 won't take "sysenter" so half-fixing now */
 #else
         sysenter
 #endif
@@ -957,7 +961,7 @@ GLOBAL_LABEL(dynamorio_syscall_sysenter:)
         mov      eax, [4 + esp]
         mov      REG_XDX, REG_XSP
 #if defined(X64) && defined(WINDOWS)
-        syscall  /* FIXME ml64 won't take "sysenter" so half-fixing now */
+        syscall  /* XXX ml64 won't take "sysenter" so half-fixing now */
 #else
         sysenter
 #endif
@@ -999,7 +1003,7 @@ GLOBAL_LABEL(dynamorio_syscall_sygate_sysenter:)
          * dr and we don't make alertable system calls.  An alternate scheme
          * kept the return address off the top of the stack which works fine
          * (nothing alertable), but just seemed too risky.
-         * FIXME - any perf impact from breaking hardware return predictor */
+         * XXX - any perf impact from breaking hardware return predictor */
         pop      REG_XDX
         mov      eax, DWORD SYMREF(sysenter_tls_offset)
         mov      SEGMEM(fs,eax), edx
@@ -1014,7 +1018,7 @@ GLOBAL_LABEL(dynamorio_syscall_sygate_sysenter:)
         push     PTRSZ SYMREF(sysenter_ret_address)
         mov      REG_XDX, REG_XSP
 #if defined(X64) && defined(WINDOWS)
-        syscall  /* FIXME ml64 won't take "sysenter" so half-fixing now */
+        syscall  /* XXX ml64 won't take "sysenter" so half-fixing now */
 #else
         sysenter
 #endif
@@ -1122,10 +1126,6 @@ GLOBAL_LABEL(dynamorio_syscall_wow64_noedx:)
 #endif /* WINDOWS */
 
 #ifdef UNIX
-/* FIXME: this function should be in #ifdef CLIENT_INTERFACE
- * However, the compiler complains about it in
- * vps-debug-internal-32 build, so we remove the ifdef now.
- */
 /* i#555: to avoid client use app's vsyscall, we enforce all clients
  * use int 0x80 for system call.
  */
@@ -1148,6 +1148,12 @@ GLOBAL_LABEL(client_int_syscall:)
  */
         DECLARE_FUNC(_start)
 GLOBAL_LABEL(_start:)
+        /* i#38: Attaching while in middle of blocking syscall requires padded null bytes
+         * with number_of_nop_instr = sizeof(syscall_instr) / sizeof(nop_instr).
+         * For detailed explanation see issue page.
+         */
+        nop
+        nop
         /* i#1676, i#1708: relocate dynamorio if it is not loaded to preferred address.
          * We call this here to ensure it's safe to access globals once in C code
          * (xref i#1865).
@@ -1230,14 +1236,14 @@ GLOBAL_LABEL(dynamorio_sigreturn:)
         int      HEX(80)
 #endif
         /* should not return.  if we somehow do,infinite loop is intentional.
-         * FIXME: do better in release build! FIXME - why not an int3? */
+         * XXX: do better in release build! XXX - why not an int3? */
         jmp      GLOBAL_REF(unexpected_return)
         END_FUNC(dynamorio_sigreturn)
 
 /* we need to exit without using any stack, to support
  * THREAD_SYNCH_TERMINATED_AND_CLEANED.
  * XXX: on MacOS this does use the stack.
- * FIXME i#1403: on MacOS we fail to free the app's stack: we need to pass it to
+ * XXX i#1403: on MacOS we fail to free the app's stack: we need to pass it to
  * bsdthread_terminate.
  */
         DECLARE_FUNC(dynamorio_sys_exit)
@@ -1265,7 +1271,7 @@ dynamorio_sys_exit_next:
         mov      ARG2, REG_XAX /* kernel port, which we just acquired */
         mov      ARG1, 0 /* join semaphore: SEMAPHORE_NULL */
         mov      eax, SYS_bsdthread_terminate
-        or       eax, HEX(2000000) /* 2<<24 for BSD syscall */
+        or       eax, SYSCALL_NUM_MARKER_BSD
         mov      r10, rcx
         syscall
 # else
@@ -1292,7 +1298,7 @@ dynamorio_sys_exit_next:
 # endif
 #endif
         /* should not return.  if we somehow do, infinite loop is intentional.
-         * FIXME: do better in release build! FIXME - why not an int3? */
+         * XXX: do better in release build! XXX - why not an int3? */
 dynamorio_sys_exit_failed:
         jmp      GLOBAL_REF(unexpected_return)
         END_FUNC(dynamorio_sys_exit)
@@ -1399,7 +1405,7 @@ GLOBAL_LABEL(dynamorio_sys_exit_group:)
         int      HEX(80)
 #endif
         /* should not return.  if we somehow do, infinite loop is intentional.
-         * FIXME: do better in release build!  why not an int3? */
+         * XXX: do better in release build!  why not an int3? */
         jmp      GLOBAL_REF(unexpected_return)
         END_FUNC(dynamorio_sys_exit_group)
 
@@ -1414,7 +1420,7 @@ GLOBAL_LABEL(dynamorio_nonrt_sigreturn:)
         /* PR 254280: we assume int$80 is ok even for LOL64 */
         int      HEX(80)
         /* should not return.  if we somehow do,infinite loop is intentional.
-         * FIXME: do better in release build! FIXME - why not an int3? */
+         * XXX: do better in release build! XXX - why not an int3? */
         jmp      GLOBAL_REF(unexpected_return)
         END_FUNC(dynamorio_nonrt_sigreturn)
 #endif
@@ -1423,18 +1429,18 @@ GLOBAL_LABEL(dynamorio_nonrt_sigreturn:)
 /* We used to get the SP by taking the address of our args, but that doesn't
  * work on x64 nor with other compilers.  Today we use asm to pass in the
  * initial SP.  For x64, we add a 4th register param and tail call to
- * master_signal_handler_C.  Adding a param and doing a tail call on ia32 is
+ * main_signal_handler_C.  Adding a param and doing a tail call on ia32 is
  * hard, so we make a real call and pass only xsp.  The C routine uses it to
  * read the original params.
  * See also PR 305020.
  */
-        DECLARE_FUNC(master_signal_handler)
-GLOBAL_LABEL(master_signal_handler:)
+        DECLARE_FUNC(main_signal_handler)
+GLOBAL_LABEL(main_signal_handler:)
 #ifdef X64
 # ifdef LINUX
         mov      ARG4, REG_XSP /* pass as extra arg */
-        jmp      GLOBAL_REF(master_signal_handler_C)
-        /* master_signal_handler_C will do the ret */
+        jmp      GLOBAL_REF(main_signal_handler_C)
+        /* main_signal_handler_C will do the ret */
 # else /* MACOS */
         mov      rax, REG_XSP /* save for extra arg */
         push     ARG2 /* infostyle */
@@ -1442,7 +1448,7 @@ GLOBAL_LABEL(master_signal_handler:)
         push     ARG6 /* token */
         /* rsp is now aligned again */
         mov      ARG6, rax /* pass as extra arg */
-        CALLC0(GLOBAL_REF(master_signal_handler_C))
+        CALLC0(GLOBAL_REF(main_signal_handler_C))
         /* Set up args to SYS_sigreturn */
         pop      ARG3 /* token */
         pop      ARG1 /* ucxt */
@@ -1455,7 +1461,7 @@ GLOBAL_LABEL(master_signal_handler:)
          * intermediate frame.
          */
         mov      REG_XAX, REG_XSP
-        CALLC1_FRESH(GLOBAL_REF(master_signal_handler_C), REG_XAX)
+        CALLC1_FRESH(GLOBAL_REF(main_signal_handler_C), REG_XAX)
 # ifdef MACOS
         mov      eax, ARG5 /* ucxt */
         /* Set up args to SYS_sigreturn, skipping the retaddr slot */
@@ -1466,7 +1472,7 @@ GLOBAL_LABEL(master_signal_handler:)
         ret
 # endif
 #endif
-        END_FUNC(master_signal_handler)
+        END_FUNC(main_signal_handler)
 
 #else /* !HAVE_SIGALTSTACK */
 
@@ -1480,8 +1486,8 @@ GLOBAL_LABEL(master_signal_handler:)
  * of a C routine: have to fix up locals + frame ptr, or jmp to start of
  * func and clobber callee-saved regs (which messes up vmkernel sigreturn).
  */
-        DECLARE_FUNC(master_signal_handler)
-GLOBAL_LABEL(master_signal_handler:)
+        DECLARE_FUNC(main_signal_handler)
+GLOBAL_LABEL(main_signal_handler:)
         mov      REG_XAX, ARG1
         mov      REG_XCX, ARG2
         mov      REG_XDX, ARG3
@@ -1542,7 +1548,7 @@ no_swap:
         pop      ARG2
         pop      ARG1
         mov      rcx, rsp /* pass as 4th arg */
-        jmp      GLOBAL_REF(master_signal_handler_C)
+        jmp      GLOBAL_REF(main_signal_handler_C)
         /* can't return, no retaddr */
 # else
         add      REG_XSP, 3*ARG_SZ
@@ -1550,65 +1556,11 @@ no_swap:
          * intermediate frame.
          */
         mov      REG_XAX, REG_XSP
-        CALLC1(GLOBAL_REF(master_signal_handler_C), REG_XAX)
+        CALLC1(GLOBAL_REF(main_signal_handler_C), REG_XAX)
         ret
 # endif
-        END_FUNC(master_signal_handler)
+        END_FUNC(main_signal_handler)
 #endif /* !HAVE_SIGALTSTACK */
-
-#ifdef LINUX
-/* SYS_clone swaps the stack so we need asm support to call it.
- * signature:
- *   thread_id_t dynamorio_clone(uint flags, byte *newsp, void *ptid, void *tls,
- *                               void *ctid, void (*func)(void))
- */
-        DECLARE_FUNC(dynamorio_clone)
-GLOBAL_LABEL(dynamorio_clone:)
-        /* save func for use post-syscall on the newsp.
-         * when using clone_record_t we have 4 slots we can clobber.
-         */
-# ifdef X64
-        sub      ARG2, ARG_SZ
-        mov      [ARG2], ARG6 /* func is now on TOS of newsp */
-        /* all args are already in syscall registers */
-        mov      r10, rcx
-        mov      REG_XAX, SYS_clone
-        syscall
-# else
-        mov      REG_XAX, ARG6
-        mov      REG_XCX, ARG2
-        sub      REG_XCX, ARG_SZ
-        mov      [REG_XCX], REG_XAX /* func is now on TOS of newsp */
-        mov      REG_XDX, ARG3
-        /* preserve callee-saved regs */
-        push     REG_XBX
-        push     REG_XSI
-        push     REG_XDI
-        /* now can't use ARG* since xsp modified by pushes */
-        mov      REG_XBX, DWORD [4*ARG_SZ + REG_XSP] /* ARG1 + 3 pushes */
-        mov      REG_XSI, DWORD [7*ARG_SZ + REG_XSP] /* ARG4 + 3 pushes */
-        mov      REG_XDI, DWORD [8*ARG_SZ + REG_XSP] /* ARG5 + 3 pushes */
-        mov      REG_XAX, SYS_clone
-        /* PR 254280: we assume int$80 is ok even for LOL64 */
-        int      HEX(80)
-# endif
-        cmp      REG_XAX, 0
-        jne      dynamorio_clone_parent
-        pop      REG_XCX
-        call     REG_XCX
-        /* shouldn't return */
-        jmp      GLOBAL_REF(unexpected_return)
-dynamorio_clone_parent:
-# ifndef X64
-        /* restore callee-saved regs */
-        pop      REG_XDI
-        pop      REG_XSI
-        pop      REG_XBX
-# endif
-        /* return val is in eax still */
-        ret
-        END_FUNC(dynamorio_clone)
-#endif /* LINUX */
 
 #endif /* UNIX */
 
@@ -1646,7 +1598,7 @@ GLOBAL_LABEL(new_bsdthread_intercept:)
         DECLARE_FUNC(nt_continue_dynamo_start)
 GLOBAL_LABEL(nt_continue_dynamo_start:)
         /* assume valid esp
-         * FIXME: this routine should really not assume esp */
+         * XXX: this routine should really not assume esp */
 
         /* grab exec state and pass as param in a priv_mcontext_t struct */
         PUSH_PRIV_MCXT(0 /* for priv_mcontext_t.pc */)
@@ -1716,7 +1668,7 @@ GLOBAL_LABEL(back_from_native:)
 Lback_from_native:
 #endif
         /* assume valid esp
-         * FIXME: more robust if don't use app's esp -- should use d_r_initstack
+         * XXX: more robust if don't use app's esp -- should use d_r_initstack
          */
         /* grab exec state and pass as param in a priv_mcontext_t struct */
         PUSH_PRIV_MCXT(0 /* for priv_mcontext_t.pc */)
@@ -1769,7 +1721,6 @@ GLOBAL_LABEL(native_plt_call:)
  * SEH or do unwinding which is done by standard versions.
  */
 
-#ifdef CLIENT_INTERFACE
 /* Front-end for client use where we don't want to expose our struct layouts,
  * yet we must call dr_setjmp directly w/o a call frame in between for
  * a proper restore point.
@@ -1781,7 +1732,6 @@ GLOBAL_LABEL(dr_try_start:)
         add      ARG1, TRY_CXT_SETJMP_OFFS
         jmp      GLOBAL_REF(dr_setjmp)
         END_FUNC(dr_try_start)
-#endif /* CLIENT_INTERFACE */
 
 /* int cdecl dr_setjmp(dr_jmp_buf *buf);
  */
@@ -1971,7 +1921,7 @@ GLOBAL_LABEL(FUNCNAME:)
         DECLARE_FUNC(FUNCNAME)
 GLOBAL_LABEL(FUNCNAME:)
         mov      REG_XAX, ARG1
-        /* FIXME: do we need an fwait prior to the fnsave? */
+        /* XXX: do we need an fwait prior to the fnsave? */
         fnsave   [REG_XAX]
         fwait
         ret
@@ -2207,7 +2157,7 @@ GLOBAL_LABEL(get_own_context_helper:)
  *   xmm_caller_saved_buf need not be 16-byte aligned.
  *   for linux, also saves xmm6-15 (PR 302107).
  *   caller must ensure that the underlying processor supports SSE!
- * FIXME PR 266305: AMD optimization guide says to use movlps+movhps for unaligned
+ * XXX PR 266305: AMD optimization guide says to use movlps+movhps for unaligned
  * stores, instead of movups (movups is best for loads): but for
  * simplicity I'm sticking with movups (assumed not perf-critical here).
  */
@@ -2585,7 +2535,7 @@ inv64_transfer_to_64:
      * no address is above 4GB, as this is a WOW64 process.
      */
         /* Save WOW64 state.
-         * FIXME: if the x64 code makes any callbacks, not only do we need
+         * XXX: if the x64 code makes any callbacks, not only do we need
          * a wrapper to go back to x86 mode but we need to restore these
          * values in case the x86 callback invokes any syscalls!
          * Really messy and fragile.
@@ -2609,7 +2559,7 @@ inv64_transfer_to_64:
         je       inv64_arg_copy_done
 inv64_arg_copy_loop:
         mov      edx, dword ptr [12 + 4*ecx + eax] /* ecx = 1-based arg ordinal */
-        /* FIXME: sign-extension is not always what the user wants.
+        /* XXX: sign-extension is not always what the user wants.
          * But the only general way to solve it would be to take in type codes
          * for each arg!
          */
@@ -2677,10 +2627,17 @@ inv64_return_to_32:
  * C code.  C code takes over when it returns to use.  We restore
  * regs and return to app code.
  * Executes on app stack but we assume app stack is fine at this point.
+ *
+ * We've pushed a retaddr on the stack, but we expect all our takeover
+ * points to be at function entry where the app's retaddr was just pushed
+ * and thus stack alignment was at +ptrsz and is +2*ptrsz on entry here.
  */
         DECLARE_EXPORTED_FUNC(dynamorio_earliest_init_takeover)
 GLOBAL_LABEL(dynamorio_earliest_init_takeover:)
-        PUSHGPR
+        push     REG_XAX /* Save xax (PUSH_PRIV_MCXT clobbers it). */
+        lea      REG_XSP, [REG_XSP - ARG_SZ] /* Align stack whether 32 or 64-bit. */
+        PUSH_PRIV_MCXT(PTRSZ [REG_XSP + 2*ARG_SZ -\
+                       PUSH_PRIV_MCXT_PRE_PC_SHIFT]) /* Return address as pc. */
 # ifdef EARLIEST_INIT_DEBUGBREAK
         /* giant loop so can attach debugger, then change ebx to 1
          * to step through rest of code */
@@ -2695,16 +2652,23 @@ dynamorio_earliest_init_repeatme:
         cmp      ebx, 0
         jg       dynamorio_earliest_init_repeat_outer
 # endif
+        lea      REG_XDX, [REG_XSP] /* Pointer to priv_mcontext_t. */
+        /* Fix up app's xsp from the retaddr + push + align we did. */
+        mov      REG_XAX, PTRSZ [REG_XSP + MCONTEXT_XSP_OFFS]
+        lea      REG_XAX, [REG_XAX + 3*ARG_SZ]
+        mov      PTRSZ [REG_XSP + MCONTEXT_XSP_OFFS], REG_XAX
+        /* Load passed-in xax which points to the arg struct. */
+        mov      REG_XAX, PTRSZ [REG_XSP + PRIV_MCXT_SIZE + ARG_SZ]
         /* Load earliest_args_t.app_xax, written by our gencode. */
         mov      REG_XCX, PTRSZ [REG_XAX]
         /* Store into xax slot on stack. */
-        mov      PTRSZ [PUSHGPR_XAX_OFFS + REG_XSP], REG_XCX
-        /* Args are pointed at by xax. */
-        CALLC1(GLOBAL_REF(dynamorio_earliest_init_takeover_C), REG_XAX)
+        mov      PTRSZ [REG_XSP + MCONTEXT_XAX_OFFS], REG_XCX
+        CALLC2(GLOBAL_REF(dynamorio_earliest_init_takeover_C), REG_XAX, REG_XDX)
         /* We will either be under DR control or running natively at this point. */
 
         /* Restore. */
-        POPGPR
+        POP_PRIV_MCXT_GPRS()
+        lea      REG_XSP, [REG_XSP + 2*ARG_SZ] /* Undo align + push. */
         ret
         END_FUNC(dynamorio_earliest_init_takeover)
 #endif /* WINDOWS */

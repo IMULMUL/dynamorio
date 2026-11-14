@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2021 Google, Inc.   All rights reserved.
+ * Copyright (c) 2011-2026 Google, Inc.   All rights reserved.
  * Copyright (c) 2009-2010 Derek Bruening   All rights reserved.
  * **********************************************************/
 
@@ -115,8 +115,9 @@ static void
 privload_init_search_paths(void);
 
 static bool
-privload_get_import_descriptor(privmod_t *mod, IMAGE_IMPORT_DESCRIPTOR **imports OUT,
-                               app_pc *imports_end OUT);
+privload_get_import_descriptor(privmod_t *mod,
+                               IMAGE_IMPORT_DESCRIPTOR **imports DR_PARAM_OUT,
+                               app_pc *imports_end DR_PARAM_OUT);
 
 static bool
 privload_process_one_import(privmod_t *mod, privmod_t *impmod, IMAGE_THUNK_DATA *lookup,
@@ -137,7 +138,6 @@ privload_redirect_imports(privmod_t *impmod, const char *name, privmod_t *import
 static void
 privload_add_windbg_cmds(void);
 
-#ifdef CLIENT_INTERFACE
 /* Isolate the app's PEB by making a copy for use by private libs (i#249) */
 static PEB *private_peb;
 static bool private_peb_initialized = false;
@@ -149,8 +149,7 @@ static void *pre_nt_rpc;
 static void *pre_nls_cache;
 /* Isolate TEB->ThreadLocalStoragePointer. */
 static void *pre_static_tls;
-/* FIXME i#875: we do not have ntdll!RtlpFlsLock isolated.  Living w/ it for now. */
-#endif
+/* XXX i#875: we do not have ntdll!RtlpFlsLock isolated.  Living w/ it for now. */
 
 /* NtTickCount: not really a syscall, just reads KUSER_SHARED_DATA.
  * Redirects to RtlGetTickCount on Win2003+.
@@ -176,12 +175,11 @@ os_loader_init_prologue(void)
     app_pc drdll = get_dynamorio_dll_start();
     app_pc user32 = NULL;
     privmod_t *mod;
-    /* FIXME i#812: need to delay this for earliest injection */
+    /* XXX i#812: need to delay this for earliest injection */
     if (!dr_earliest_injected && !standalone_library) {
         user32 = (app_pc)get_module_handle(L"user32.dll");
     }
 
-#ifdef CLIENT_INTERFACE
     if (INTERNAL_OPTION(private_peb)) {
         /* Isolate the app's PEB by making a copy for use by private libs (i#249).
          * We just do a shallow copy for now until we hit an issue w/ deeper fields
@@ -192,9 +190,10 @@ os_loader_init_prologue(void)
          * to get info.PebBaseAddress: we assume they don't do that.  It's not
          * exposed in any WinAPI routine.
          */
-        GET_NTDLL(RtlInitializeCriticalSection, (OUT RTL_CRITICAL_SECTION * crit));
+        GET_NTDLL(RtlInitializeCriticalSection,
+                  (DR_PARAM_OUT RTL_CRITICAL_SECTION * crit));
         PEB *own_peb = get_own_peb();
-        /* FIXME: does it need to be page-aligned? */
+        /* XXX: does it need to be page-aligned? */
         private_peb = HEAP_TYPE_ALLOC(GLOBAL_DCONTEXT, PEB, ACCT_OTHER, UNPROTECTED);
         memcpy(private_peb, own_peb, sizeof(*private_peb));
         /* We need priv libs to NOT use any locks that app code uses: else we'll
@@ -204,7 +203,7 @@ os_loader_init_prologue(void)
          */
         private_peb->FastPebLock = HEAP_TYPE_ALLOC(GLOBAL_DCONTEXT, RTL_CRITICAL_SECTION,
                                                    ACCT_OTHER, UNPROTECTED);
-        if (!dr_earliest_injected) /* FIXME i#812: need to delay this */
+        if (!dr_earliest_injected) /* XXX i#812: need to delay this */
             RtlInitializeCriticalSection(private_peb->FastPebLock);
 
         /* We can't redirect ntdll routines allocating memory internally,
@@ -212,7 +211,7 @@ os_loader_init_prologue(void)
          * We do this after the swap in case it affects some other peb field,
          * in which case it will match the RtlDestroyHeap.
          */
-        if (dr_earliest_injected) { /* FIXME i#812: need to delay RtlCreateHeap */
+        if (dr_earliest_injected) { /* XXX i#812: need to delay RtlCreateHeap */
             private_peb->ProcessHeap = own_peb->ProcessHeap;
         } else {
             private_peb->ProcessHeap =
@@ -256,15 +255,18 @@ os_loader_init_prologue(void)
             LOG(GLOBAL, LOG_LOADER, 2, "initial thread TEB->NlsCache=" PFX "\n",
                 pre_nls_cache);
         }
-        if (should_swap_teb_static_tls()) {
-            pre_static_tls = d_r_get_tls(STATIC_TLS_TIB_OFFSET);
-            d_r_set_tls(STATIC_TLS_TIB_OFFSET, NULL);
-            LOG(GLOBAL, LOG_LOADER, 2,
-                "initial thread TEB->ThreadLocalStoragePointer=" PFX "\n",
-                pre_static_tls);
-        }
+        /* FIX: i#6024: when kernelbase.dll has TLS or client which will lead to
+         * crash. Solution is to always save pre_static_tls but do not set
+         * ThreadLocalStoragePointer to NULL. If we set it to NULL, it will lead to
+         * crash when application uses ThreadLocalStoragePointer (eg. __declspec(thread)
+         * is used), but client or kernelbase.dll (Win11/Win22H2) or client doesn't
+         * have TLS which will fail to restore TheadLocalStoragePointer later in
+         * calls to should_swap_teb_static_tls() as tlx_next_idx is 0
+         */
+        pre_static_tls = d_r_get_tls(STATIC_TLS_TIB_OFFSET);
+        LOG(GLOBAL, LOG_LOADER, 2,
+            "initial thread TEB->ThreadLocalStoragePointer=" PFX "\n", pre_static_tls);
     }
-#endif
 
     drwinapi_init();
 
@@ -279,7 +281,7 @@ os_loader_init_prologue(void)
     mod = privload_insert(NULL, ntdll, get_allocation_size(ntdll, NULL), "ntdll.dll",
                           modpath);
     mod->externally_loaded = true;
-    /* FIXME i#234: Once we have earliest injection and load DR via this private loader
+    /* XXX i#234: Once we have earliest injection and load DR via this private loader
      * (i#234/PR 204587) we can remove this
      */
     mod = privload_insert(NULL, drdll, get_allocation_size(drdll, NULL),
@@ -291,7 +293,7 @@ os_loader_init_prologue(void)
         NULL, get_application_base(), get_application_end() - get_application_base() + 1,
         get_application_short_unqualified_name(), get_application_name());
     mod->externally_loaded = true;
-#if defined(STATIC_LIBRARY) && defined(CLIENT_INTERFACE)
+#ifdef STATIC_LIBRARY
     /* Set up TLS and ensure the thread init functions are called.
      * loader_shared will not call privload_os_finalize() for externally_loaded,
      * but it will call privload_call_entry() for us.
@@ -300,7 +302,7 @@ os_loader_init_prologue(void)
     privload_os_finalize(mod);
 #endif
 
-    /* FIXME i#1299: loading a private user32.dll is problematic: it registers
+    /* XXX i#1299: loading a private user32.dll is problematic: it registers
      * callbacks that KiUserCallbackDispatcher invokes.  For now we do not
      * duplicate it.  If the app loads it dynamically later we will end up
      * duplicating but not worth checking for that.
@@ -340,7 +342,6 @@ os_loader_exit(void)
 {
     drwinapi_exit();
 
-#ifdef CLIENT_INTERFACE
     if (INTERNAL_OPTION(private_peb)) {
         /* Swap back so any further peb queries (e.g., reading env var
          * while reporting a leak) use a non-freed peb
@@ -366,7 +367,6 @@ os_loader_exit(void)
                        ACCT_OTHER, UNPROTECTED);
         HEAP_TYPE_FREE(GLOBAL_DCONTEXT, private_peb, PEB, ACCT_OTHER, UNPROTECTED);
     }
-#endif
 
     tls_next_idx = 0;
 }
@@ -374,7 +374,6 @@ os_loader_exit(void)
 void
 os_loader_thread_init_prologue(dcontext_t *dcontext)
 {
-#ifdef CLIENT_INTERFACE
     /* XXX i#4030: We do not support libraries loaded after init time.  We'd have
      * to go through and re-allocate all the thread arrays.
      * We detect this and abort in privload_os_finalize().
@@ -452,31 +451,25 @@ os_loader_thread_init_prologue(dcontext_t *dcontext)
          */
         dcontext->teb_base = (byte *)d_r_get_tls(SELF_TIB_OFFSET);
     }
-#endif
 
-#ifdef CLIENT_INTERFACE
     if (INTERNAL_OPTION(private_peb))
         swap_peb_pointer(dcontext, true /*to priv*/);
-#endif
 }
 
 void
 os_loader_thread_init_epilogue(dcontext_t *dcontext)
 {
-#ifdef CLIENT_INTERFACE
     /* For subsequent app threads, peb ptr will be swapped to priv
      * by transfer_to_dispatch(), and w/ FlsData swap we have to
      * properly nest.
      */
     if (dynamo_initialized /*later thread*/ && !IS_CLIENT_THREAD(dcontext))
         swap_peb_pointer(dcontext, false /*to app*/);
-#endif
 }
 
 void
 os_loader_thread_exit(dcontext_t *dcontext)
 {
-#ifdef CLIENT_INTERFACE
     /* i#3633: In case of windows 1903 if priv_fls_data ends up in internal list of
      * ntdll.dll, we have to unlink it manually. We do unlinking always on thread
      * exit.
@@ -487,10 +480,8 @@ os_loader_thread_exit(dcontext_t *dcontext)
                         tls_array_count, ACCT_OTHER, PROTECTED);
         dcontext->priv_static_tls = NULL;
     }
-#endif
 }
 
-#ifdef CLIENT_INTERFACE
 /* our copy of the PEB for isolation (i#249) */
 PEB *
 get_private_peb(void)
@@ -520,12 +511,12 @@ get_private_peb(void)
 bool
 should_swap_peb_pointer(void)
 {
-#    ifdef STANDALONE_UNIT_TEST
+#ifdef STANDALONE_UNIT_TEST
     /* Our drwinapi tests require FLS isolation, etc. */
     return true;
-#    else
+#else
     return (INTERNAL_OPTION(private_peb) && CLIENTS_EXIST());
-#    endif
+#endif
 }
 
 bool
@@ -543,7 +534,6 @@ should_swap_teb_static_tls(void)
      */
     return tls_next_idx > 0 && should_swap_teb_nonstack_fields();
 }
-#endif /* CLIENT_INTERFACE */
 
 static void *
 get_teb_field(dcontext_t *dcontext, ushort offs)
@@ -577,27 +567,23 @@ is_using_app_peb(dcontext_t *dcontext)
     PEB *cur_peb = get_teb_field(dcontext, PEB_TIB_OFFSET);
     void *cur_stack_limit;
     void *cur_stack_base;
-#ifdef CLIENT_INTERFACE
     void *cur_fls;
     void *cur_rpc;
     void *cur_nls_cache;
     void *cur_static_tls;
     if (!INTERNAL_OPTION(private_peb) || !private_peb_initialized)
         return true;
-#endif
     ASSERT(dcontext != NULL && dcontext != GLOBAL_DCONTEXT);
     ASSERT(cur_peb != NULL);
     cur_stack_limit = get_teb_field(dcontext, BASE_STACK_TIB_OFFSET);
     cur_stack_base = get_teb_field(dcontext, TOP_STACK_TIB_OFFSET);
-    if (IF_CLIENT_INTERFACE_ELSE(
-            !should_swap_peb_pointer() || !should_swap_teb_nonstack_fields(), true)) {
+    if (!should_swap_peb_pointer() || !should_swap_teb_nonstack_fields()) {
         if (SWAP_TEB_STACKLIMIT())
             return cur_stack_limit != dcontext->dstack - DYNAMORIO_STACK_SIZE;
         if (SWAP_TEB_STACKBASE())
             return cur_stack_base != dcontext->dstack;
         return true;
     }
-#ifdef CLIENT_INTERFACE
     cur_fls = get_teb_field(dcontext, FLS_DATA_TIB_OFFSET);
     cur_rpc = get_teb_field(dcontext, NT_RPC_TIB_OFFSET);
     cur_nls_cache = get_teb_field(dcontext, NLS_CACHE_TIB_OFFSET);
@@ -626,7 +612,6 @@ is_using_app_peb(dcontext_t *dcontext)
         ASSERT(cur_static_tls == NULL || cur_static_tls != dcontext->priv_static_tls);
         return true;
     }
-#endif
 }
 
 #ifdef DEBUG
@@ -635,18 +620,15 @@ print_teb_fields(dcontext_t *dcontext, const char *reason)
 {
     void *cur_stack_limit = get_teb_field(dcontext, BASE_STACK_TIB_OFFSET);
     byte *cur_stack_base = (byte *)get_teb_field(dcontext, TOP_STACK_TIB_OFFSET);
-#    ifdef CLIENT_INTERFACE
     void *cur_fls = get_teb_field(dcontext, FLS_DATA_TIB_OFFSET);
     void *cur_rpc = get_teb_field(dcontext, NT_RPC_TIB_OFFSET);
     void *cur_nls_cache = get_teb_field(dcontext, NLS_CACHE_TIB_OFFSET);
     void *cur_static_tls = get_teb_field(dcontext, STATIC_TLS_TIB_OFFSET);
-#    endif
     LOG(THREAD, LOG_LOADER, 1, "%s\n", reason);
     LOG(THREAD, LOG_LOADER, 3, "  cur stack_limit=" PFX ", app stack_limit=" PFX "\n",
         cur_stack_limit, dcontext->app_stack_limit);
     LOG(THREAD, LOG_LOADER, 3, "  cur stack_base=" PFX ", app stack_base=" PFX "\n",
         cur_stack_base, dcontext->app_stack_base);
-#    ifdef CLIENT_INTERFACE
     LOG(THREAD, LOG_LOADER, 3, "  cur fls=" PFX ", app fls=" PFX ", priv fls=" PFX "\n",
         cur_fls, dcontext->app_fls_data, dcontext->priv_fls_data);
     LOG(THREAD, LOG_LOADER, 3, "  cur rpc=" PFX ", app rpc=" PFX ", priv rpc=" PFX "\n",
@@ -657,48 +639,43 @@ print_teb_fields(dcontext_t *dcontext, const char *reason)
     LOG(THREAD, LOG_LOADER, 3,
         "  cur static_tls=" PFX ", app static_tls=" PFX ", priv static_tls=" PFX "\n",
         cur_static_tls, dcontext->app_static_tls, dcontext->priv_static_tls);
-#    endif
 }
 #endif
 
 static void
 swap_peb_pointer_ex(dcontext_t *dcontext, bool to_priv, dr_state_flags_t flags)
 {
-#ifdef CLIENT_INTERFACE
     PEB *tgt_peb = to_priv ? get_private_peb() : get_own_peb();
     ASSERT(INTERNAL_OPTION(private_peb));
     ASSERT(private_peb_initialized);
     ASSERT(tgt_peb != NULL);
-    if (TEST(DR_STATE_PEB, flags) && should_swap_peb_pointer()) {
+    if (TESTANY(DR_STATE_PEB, flags) && should_swap_peb_pointer()) {
         set_teb_field(dcontext, PEB_TIB_OFFSET, (void *)tgt_peb);
         LOG(THREAD, LOG_LOADER, 2, "set teb->peb to " PFX "\n", tgt_peb);
     }
-#endif
     if (dcontext != NULL && dcontext != GLOBAL_DCONTEXT) {
         /* We preserve TEB->LastErrorValue and we swap TEB->FlsData,
          * TEB->ReservedForNtRpc, and TEB->NlsCache.
          */
         void *cur_stack_limit = get_teb_field(dcontext, BASE_STACK_TIB_OFFSET);
         byte *cur_stack_base = (byte *)get_teb_field(dcontext, TOP_STACK_TIB_OFFSET);
-#ifdef CLIENT_INTERFACE
         void *cur_fls = NULL;
         void *cur_rpc = NULL;
         void *cur_nls_cache = NULL;
         void *cur_static_tls = NULL;
-        if (TEST(DR_STATE_TEB_MISC, flags) && should_swap_teb_nonstack_fields()) {
+        if (TESTANY(DR_STATE_TEB_MISC, flags) && should_swap_teb_nonstack_fields()) {
             cur_fls = get_teb_field(dcontext, FLS_DATA_TIB_OFFSET);
             cur_rpc = get_teb_field(dcontext, NT_RPC_TIB_OFFSET);
             cur_nls_cache = get_teb_field(dcontext, NLS_CACHE_TIB_OFFSET);
         }
-        if (TEST(DR_STATE_TEB_MISC, flags) && should_swap_teb_static_tls()) {
+        if (TESTANY(DR_STATE_TEB_MISC, flags) && should_swap_teb_static_tls()) {
             cur_static_tls = get_teb_field(dcontext, STATIC_TLS_TIB_OFFSET);
         }
-#endif
         DOLOG(3, LOG_LOADER, {
             print_teb_fields(dcontext, to_priv ? "pre swap to priv" : "pre swap to app");
         });
         if (to_priv) {
-            if (TEST(DR_STATE_STACK_BOUNDS, flags) &&
+            if (TESTANY(DR_STATE_STACK_BOUNDS, flags) &&
                 dynamo_initialized /* on app stack until init finished */) {
                 if (SWAP_TEB_STACKLIMIT() &&
                     /* Handle two in a row, using an exact cmp b/c
@@ -718,8 +695,7 @@ swap_peb_pointer_ex(dcontext_t *dcontext, bool to_priv, dr_state_flags_t flags)
                     set_teb_field(dcontext, TOP_STACK_TIB_OFFSET, dcontext->dstack);
                 }
             }
-#ifdef CLIENT_INTERFACE
-            if (TEST(DR_STATE_TEB_MISC, flags) && should_swap_teb_nonstack_fields()) {
+            if (TESTANY(DR_STATE_TEB_MISC, flags) && should_swap_teb_nonstack_fields()) {
                 /* note: two calls in a row will clobber app_errno w/ wrong value! */
                 dcontext->app_errno =
                     (int)(ptr_int_t)get_teb_field(dcontext, ERRNO_TIB_OFFSET);
@@ -737,7 +713,7 @@ swap_peb_pointer_ex(dcontext_t *dcontext, bool to_priv, dr_state_flags_t flags)
                                   dcontext->priv_nls_cache);
                 }
             }
-            if (TEST(DR_STATE_TEB_MISC, flags) && should_swap_teb_static_tls()) {
+            if (TESTANY(DR_STATE_TEB_MISC, flags) && should_swap_teb_static_tls()) {
                 if (dcontext->priv_static_tls !=
                     cur_static_tls) { /* handle two in a row */
                     dcontext->app_static_tls = cur_static_tls;
@@ -745,9 +721,8 @@ swap_peb_pointer_ex(dcontext_t *dcontext, bool to_priv, dr_state_flags_t flags)
                                   dcontext->priv_static_tls);
                 }
             }
-#endif
         } else {
-            if (TEST(DR_STATE_STACK_BOUNDS, flags)) {
+            if (TESTANY(DR_STATE_STACK_BOUNDS, flags)) {
                 if (SWAP_TEB_STACKLIMIT() &&
                     /* Handle two in a row, using an exact cmp b/c
                      * is_dynamo_address() is slow and needs locks (i#1832).
@@ -765,8 +740,7 @@ swap_peb_pointer_ex(dcontext_t *dcontext, bool to_priv, dr_state_flags_t flags)
                                   dcontext->app_stack_base);
                 }
             }
-#ifdef CLIENT_INTERFACE
-            if (TEST(DR_STATE_TEB_MISC, flags) && should_swap_teb_nonstack_fields()) {
+            if (TESTANY(DR_STATE_TEB_MISC, flags) && should_swap_teb_nonstack_fields()) {
                 /* two calls in a row should be fine */
                 set_teb_field(dcontext, ERRNO_TIB_OFFSET,
                               (void *)(ptr_int_t)dcontext->app_errno);
@@ -784,7 +758,7 @@ swap_peb_pointer_ex(dcontext_t *dcontext, bool to_priv, dr_state_flags_t flags)
                                   dcontext->app_nls_cache);
                 }
             }
-            if (TEST(DR_STATE_TEB_MISC, flags) && should_swap_teb_static_tls()) {
+            if (TESTANY(DR_STATE_TEB_MISC, flags) && should_swap_teb_static_tls()) {
                 if (dcontext->app_static_tls !=
                     cur_static_tls) { /* handle two in a row */
                     /* Unlike the other fields, we control this private one so we
@@ -794,22 +768,22 @@ swap_peb_pointer_ex(dcontext_t *dcontext, bool to_priv, dr_state_flags_t flags)
                                   dcontext->app_static_tls);
                 }
             }
-#endif
         }
-#ifdef CLIENT_INTERFACE
         ASSERT(!is_dynamo_address(dcontext->app_stack_limit) ||
                IS_CLIENT_THREAD(dcontext));
         ASSERT(!is_dynamo_address((byte *)dcontext->app_stack_base - 1) ||
                IS_CLIENT_THREAD(dcontext));
         if (should_swap_teb_nonstack_fields()) {
-            ASSERT(!is_dynamo_address(dcontext->app_fls_data));
+            /* TODO i#7220: We'd like to fix app_fls_data problems but for now we
+             * downgrade to a curiosity to avoid breakage.
+             */
+            ASSERT_CURIOSITY_ONCE(!is_dynamo_address(dcontext->app_fls_data));
             ASSERT(!is_dynamo_address(dcontext->app_nt_rpc));
             ASSERT(!is_dynamo_address(dcontext->app_nls_cache));
         }
         if (should_swap_teb_static_tls()) {
             ASSERT(!is_dynamo_address(dcontext->app_static_tls));
         }
-#endif
         /* Once we have earier injection we should be able to assert
          * that priv_fls_data is either NULL or a DR address: but on
          * notepad w/ drinject it's neither: need to investigate.
@@ -834,9 +808,7 @@ swap_peb_pointer(dcontext_t *dcontext, bool to_priv)
 void
 restore_peb_pointer_for_thread(dcontext_t *dcontext)
 {
-#ifdef CLIENT_INTERFACE
     PEB *tgt_peb = get_own_peb();
-    ASSERT_NOT_TESTED();
     ASSERT(INTERNAL_OPTION(private_peb));
     ASSERT(private_peb_initialized);
     ASSERT(tgt_peb != NULL);
@@ -864,10 +836,8 @@ restore_peb_pointer_for_thread(dcontext_t *dcontext)
         LOG(THREAD, LOG_LOADER, 3, "restored app static_tls to " PFX "\n",
             dcontext->app_static_tls);
     }
-#endif
 }
 
-#ifdef CLIENT_INTERFACE
 void
 loader_pre_client_thread_exit(dcontext_t *dcontext)
 {
@@ -881,7 +851,6 @@ loader_pre_client_thread_exit(dcontext_t *dcontext)
                       dcontext->dstack - DYNAMORIO_STACK_SIZE);
     }
 }
-#endif /* CLIENT_INTERFACE */
 
 void
 check_app_stack_limit(dcontext_t *dcontext)
@@ -905,9 +874,9 @@ check_app_stack_limit(dcontext_t *dcontext)
     do {
         check_pc -= PAGE_SIZE;
         res = query_virtual_memory(check_pc, &mbi, sizeof(mbi));
-    } while (res == sizeof(mbi) && !TEST(PAGE_GUARD, mbi.Protect) &&
+    } while (res == sizeof(mbi) && !TESTANY(PAGE_GUARD, mbi.Protect) &&
              check_pc > (byte *)(ptr_uint_t)PAGE_SIZE);
-    if (res == sizeof(mbi) && TEST(PAGE_GUARD, mbi.Protect) &&
+    if (res == sizeof(mbi) && TESTANY(PAGE_GUARD, mbi.Protect) &&
         check_pc + PAGE_SIZE < start_pc) {
         LOG(THREAD, LOG_LOADER, 2,
             "updated stored TEB.StackLimit from " PFX " to " PFX "\n", start_pc,
@@ -923,27 +892,22 @@ check_app_stack_limit(dcontext_t *dcontext)
 bool
 os_should_swap_state(void)
 {
-    return SWAP_TEB_STACKLIMIT() ||
-        SWAP_TEB_STACKBASE() IF_CLIENT_INTERFACE(|| should_swap_peb_pointer() ||
-                                                 should_swap_teb_nonstack_fields());
+    return SWAP_TEB_STACKLIMIT() || SWAP_TEB_STACKBASE() || should_swap_peb_pointer() ||
+        should_swap_teb_nonstack_fields();
 }
 
 bool
 os_using_app_state(dcontext_t *dcontext)
 {
-#ifdef CLIENT_INTERFACE
     return is_using_app_peb(dcontext);
-#endif
     return true;
 }
 
 void
 os_swap_context(dcontext_t *dcontext, bool to_app, dr_state_flags_t flags)
 {
-#ifdef CLIENT_INTERFACE
     /* i#249: swap PEB pointers */
     swap_peb_pointer_ex(dcontext, !to_app /*to priv*/, flags);
-#endif
 }
 
 static void
@@ -1026,7 +990,8 @@ privload_unload_imports(privmod_t *mod)
 
 /* if anything fails, undoes the mapping and returns NULL */
 app_pc
-privload_map_and_relocate(const char *filename, size_t *size OUT, modload_flags_t flags)
+privload_map_and_relocate(const char *filename, size_t *size DR_PARAM_OUT,
+                          modload_flags_t flags)
 {
     file_t fd;
     app_pc map;
@@ -1034,7 +999,7 @@ privload_map_and_relocate(const char *filename, size_t *size OUT, modload_flags_
     byte *(*map_func)(file_t, size_t *, uint64, app_pc, uint, map_flags_t);
     bool (*unmap_func)(file_t, size_t);
     ASSERT(size != NULL);
-    ASSERT_OWN_RECURSIVE_LOCK(!TEST(MODLOAD_NOT_PRIVLIB, flags), &privload_lock);
+    ASSERT_OWN_RECURSIVE_LOCK(!TESTANY(MODLOAD_NOT_PRIVLIB, flags), &privload_lock);
 
     /* On win32 OS_EXECUTE is required to create a section w/ rwx
      * permissions, which is in turn required to map a view w/ rwx
@@ -1055,7 +1020,7 @@ privload_map_and_relocate(const char *filename, size_t *size OUT, modload_flags_
      * to have app execute from their .text.  We do want other
      * privately-loaded libs to be on the DR-areas list (though that
      * means that if we mess up and the app executes their code, we throw
-     * an app exception: FIXME: should we raise a better error message?
+     * an app exception: XXX: should we raise a better error message?
      */
     *size = 0; /* map at full size */
     if (dynamo_heap_initialized && !standalone_library) {
@@ -1093,7 +1058,7 @@ privload_map_and_relocate(const char *filename, size_t *size OUT, modload_flags_
         return NULL;
     }
 #ifdef X64
-    if (TEST(MODLOAD_REACHABLE, flags)) {
+    if (TESTANY(MODLOAD_REACHABLE, flags)) {
         bool reloc = module_file_relocatable(map);
         (*unmap_func)(map, *size);
         map = NULL;
@@ -1233,7 +1198,7 @@ privload_process_imports(privmod_t *mod)
         LOG(GLOBAL, LOG_LOADER, 2, "%s: %s imports from %s\n", __FUNCTION__, mod->name,
             impname);
 
-        /* FIXME i#233: support bound imports: for now ignoring */
+        /* XXX i#233: support bound imports: for now ignoring */
         if (imports->TimeDateStamp == -1) {
             /* Imports are bound via "new bind": need to walk
              * IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT =>
@@ -1254,14 +1219,12 @@ privload_process_imports(privmod_t *mod)
                 impname);
             return false;
         }
-#ifdef CLIENT_INTERFACE
         /* i#852: identify all libs that import from DR as client libs */
         if (impmod->base == get_dynamorio_dll_start())
             mod->is_client = true;
-#endif
 
         /* walk the lookup table and address table in lockstep */
-        /* FIXME: should check readability: if had no-dcontext try (i#350) could just
+        /* XXX: should check readability: if had no-dcontext try (i#350) could just
          * do try/except around whole thing
          */
         lookup = (IMAGE_THUNK_DATA *)RVA_TO_VA(mod->base, imports->OriginalFirstThunk);
@@ -1299,14 +1262,15 @@ privload_process_imports(privmod_t *mod)
      * has an extra 10 bytes in the dir->Size for unknown reasons so suppressing
      */
 
-    /* FIXME i#233: support delay-load: IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT */
+    /* XXX i#233: support delay-load: IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT */
 
     return true;
 }
 
 static bool
-privload_get_import_descriptor(privmod_t *mod, IMAGE_IMPORT_DESCRIPTOR **imports OUT,
-                               app_pc *imports_end OUT)
+privload_get_import_descriptor(privmod_t *mod,
+                               IMAGE_IMPORT_DESCRIPTOR **imports DR_PARAM_OUT,
+                               app_pc *imports_end DR_PARAM_OUT)
 {
     IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)mod->base;
     IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)(mod->base + dos->e_lfanew);
@@ -1349,7 +1313,7 @@ privload_process_one_import(privmod_t *mod, privmod_t *impmod, IMAGE_THUNK_DATA 
     const char *forwpath = NULL;
 
     ASSERT_OWN_RECURSIVE_LOCK(true, &privload_lock);
-    if (TEST(IMAGE_ORDINAL_FLAG, lookup->u1.Function)) {
+    if (TESTANY(IMAGE_ORDINAL_FLAG, lookup->u1.Function)) {
         /* XXX: for 64-bit this is a 64-bit type: should we widen through
          * get_proc_address_by_ordinal()?
          */
@@ -1360,7 +1324,7 @@ privload_process_one_import(privmod_t *mod, privmod_t *impmod, IMAGE_THUNK_DATA 
         /* import by name */
         IMAGE_IMPORT_BY_NAME *name = (IMAGE_IMPORT_BY_NAME *)RVA_TO_VA(
             mod->base, (lookup->u1.AddressOfData & ~(IMAGE_ORDINAL_FLAG)));
-        /* FIXME optimization i#233:
+        /* XXX optimization i#233:
          * - try name->Hint first
          * - build hashtables for quick lookup instead of repeatedly walking
          *   export tables
@@ -1374,7 +1338,6 @@ privload_process_one_import(privmod_t *mod, privmod_t *impmod, IMAGE_THUNK_DATA 
     /* loop to handle sequence of forwarders */
     while (func == NULL) {
         if (forwarder == NULL) {
-#ifdef CLIENT_INTERFACE
             /* there's a syslog in loader_init() but we want to provide the symbol */
             char msg[MAXIMUM_PATH * 2];
             snprintf(msg, BUFFER_SIZE_ELEMENTS(msg), "import %s not found in ",
@@ -1382,7 +1345,6 @@ privload_process_one_import(privmod_t *mod, privmod_t *impmod, IMAGE_THUNK_DATA 
             NULL_TERMINATE_BUFFER(msg);
             SYSLOG(SYSLOG_ERROR, CLIENT_LIBRARY_UNLOADABLE, 4, get_application_name(),
                    get_application_pid(), msg, impmod->name);
-#endif
             LOG(GLOBAL, LOG_LOADER, 1, "%s: import %s not found in %s\n", __FUNCTION__,
                 impfunc, impmod->name);
             return false;
@@ -1465,7 +1427,6 @@ privload_call_entry(dcontext_t *dcontext, privmod_t *privmod, uint reason)
          */
         call_routines = dcontext->owning_thread == d_r_get_thread_id();
     }
-#ifdef CLIENT_INTERFACE
     /* First, call the static-TLS callbacks. */
     os_privmod_data_t *opd = (os_privmod_data_t *)privmod->os_privmod_data;
     /* We must set up the thread's TLS first.
@@ -1500,10 +1461,17 @@ privload_call_entry(dcontext_t *dcontext, privmod_t *privmod, uint reason)
                                       opd->tls_callbacks[i], privmod->name);
             });
     }
-#endif
     /* Then, call the module entry point. */
     app_pc entry = get_module_entry(privmod->base);
     ASSERT_OWN_RECURSIVE_LOCK(true, &privload_lock);
+    if (str_case_prefix(privmod->name, "combase")) {
+        /* XXX i#6962: combase.dll calls HandlePossibleBadComBaseDllLoad which runs
+         * int3 which DR somehow does not intercept, resulting in silent crash. For now
+         * we skip it.
+         */
+        call_routines = false;
+        SYSLOG_INTERNAL_INFO_ONCE("skipping combase initializer (i#6962)");
+    }
     /* get_module_entry adds base => returns base instead of NULL */
     if (call_routines && entry != NULL && entry != privmod->base &&
         /* We call the TLS routines for the externally_loaded executable for
@@ -1532,26 +1500,30 @@ privload_call_entry(dcontext_t *dcontext, privmod_t *privmod, uint reason)
               res = FALSE;
             });
 
-        if (!res && get_os_version() >= WINDOWS_VERSION_7 &&
-            /* i#364: win7 _BaseDllInitialize fails to initialize a new console
-             * (0xc0000041 (3221225537) - The NtConnectPort request is refused)
-             * which we ignore for now.  DR always had trouble writing to the
-             * console anyway (xref i#261).
-             * Update: for i#440, this should now succeed, but we leave this
-             * in place just in case.
+        if (!res) {
+            /* We have had multiple cases of initializers failing without fatal
+             * consequences, and given that we do not have resources to track
+             * down every detail it is best to note the failure and move on.
+             *
+             * Past examples include:
+             * + i#364: win7 _BaseDllInitialize fails to initialize a new console
+             *   (0xc0000041 (3221225537) - The NtConnectPort request is refused)
+             *   which we ignore for now.  DR always had trouble writing to the
+             *   console anyway (xref i#261).
+             *   Update: for i#440, this should now succeed, but we leave this
+             *   in place just in case.
+             * + i#2221: combase's entry fails on win10.  So far ignoring it
+             *   hasn't cause any problems with simple clients.
+             * + i#6570: bcrypt's entry suddenly started failing.  Ignoring it
+             * is working so far; if that changes we'll have to dig into it.
              */
-            (str_case_prefix(privmod->name, "kernel") ||
-             /* i#2221: combase's entry fails on win10.  So far ignoring it
-              * hasn't cause any problems with simple clients.
-              */
-             str_case_prefix(privmod->name, "combase"))) {
-            LOG(GLOBAL, LOG_LOADER, 1, "%s: ignoring failure of %s entry\n", __FUNCTION__,
-                privmod->name);
+            SYSLOG_INTERNAL_WARNING(
+                "ignoring failure of private library %s entry (call reason=%d)",
+                privmod->name, reason);
             res = TRUE;
         }
         return_val = CAST_TO_bool(res);
     }
-#ifdef CLIENT_INTERFACE
     if (reason == DLL_THREAD_EXIT && opd->tls_size > 0) {
         /* Free the TLS. */
         ASSERT(dcontext != NULL && dcontext != GLOBAL_DCONTEXT);
@@ -1568,7 +1540,6 @@ privload_call_entry(dcontext_t *dcontext, privmod_t *privmod, uint reason)
          */
         privload_free_opd(privmod);
     }
-#endif
     return return_val;
 }
 
@@ -1689,7 +1660,6 @@ map_api_set_dll(const char *name, privmod_t *dependent)
              str_case_prefix(name, "API-MS-Win-Core-Comm-L1-1") ||
              str_case_prefix(name, "API-MS-Win-Core-Console-L2-1") ||
              str_case_prefix(name, "API-MS-Win-Core-CRT-L2-1") ||
-             str_case_prefix(name, "API-MS-Win-Core-File-L2-1") ||
              str_case_prefix(name, "API-MS-Win-Core-Job-L1-1") ||
              str_case_prefix(name, "API-MS-Win-Core-Localization-L2-1") ||
              str_case_prefix(name, "API-MS-Win-Core-Localization-Private-L1-1") ||
@@ -1712,7 +1682,13 @@ map_api_set_dll(const char *name, privmod_t *dependent)
              str_case_prefix(name, "API-MS-Win-Security-Appcontainer-L1-1") ||
              str_case_prefix(name, "API-MS-Win-Security-Base-Private-L1-1"))
         return "kernelbase.dll";
-    else if (str_case_prefix(name, "API-MS-Win-Core-Heap-Obsolete-L1-1"))
+    else if (str_case_prefix(name, "API-MS-Win-Core-File-L2-1")) {
+        /* i#2658: In kernel32 on win7 but kernelbase on win8+. */
+        if (get_os_version() <= WINDOWS_VERSION_7)
+            return "kernel32.dll";
+        else
+            return "kernelbase.dll";
+    } else if (str_case_prefix(name, "API-MS-Win-Core-Heap-Obsolete-L1-1"))
         return "kernel32.dll";
     else if (str_case_prefix(name, "API-MS-Win-Service-Private-L1-1") ||
              str_case_prefix(name, "API-MS-Win-Security-Audit-L1-1") ||
@@ -1750,6 +1726,7 @@ map_api_set_dll(const char *name, privmod_t *dependent)
              str_case_prefix(name, "API-MS-Win-Core-Localization-Obsolete-L1-2") ||
              str_case_prefix(name, "API-MS-Win-Core-Localization-Obsolete-L1-3") ||
              str_case_prefix(name, "API-MS-Win-Core-Path-L1-1") ||
+             str_case_prefix(name, "API-MS-Win-Core-Pcw-L1-1") ||
              str_case_prefix(name, "API-MS-Win-Core-PerfCounters-L1-1") ||
              str_case_prefix(name, "API-MS-Win-Core-ProcessSnapshot-L1-1") ||
              str_case_prefix(name, "API-MS-Win-Core-Psm-Key-L1-1") ||
@@ -1768,7 +1745,8 @@ map_api_set_dll(const char *name, privmod_t *dependent)
         return "kernelbase.dll";
     else if (str_case_prefix(name, "API-MS-Win-Core-PrivateProfile-L1-1") ||
              str_case_prefix(name, "API-MS-Win-Core-Atoms-L1-1") ||
-             str_case_prefix(name, "API-MS-Win-Core-Job-L2-1"))
+             str_case_prefix(name, "API-MS-Win-Core-Job-L2-1") ||
+             str_case_prefix(name, "API-MS-Win-DownLevel-Kernel32-L2-1"))
         return "kernel32.dll";
     else if (str_case_prefix(name, "API-MS-Win-Core-WinRT-Error-L1-1"))
         return "combase.dll";
@@ -1913,9 +1891,8 @@ privload_locate_and_load(const char *impname, privmod_t *dependent, bool reachab
             return mod; /* if fails to load, don't keep searching */
         }
     }
-    /* 5) dirs on PATH: FIXME: not supported yet */
+    /* 5) dirs on PATH: XXX: not supported yet */
 
-#ifdef CLIENT_INTERFACE
     if (mod == NULL) {
         /* There's a SYSLOG in loader_init(), but we want the name of the missing
          * library.  If we end up using this loading code for cases where we
@@ -1925,7 +1902,6 @@ privload_locate_and_load(const char *impname, privmod_t *dependent, bool reachab
         SYSLOG(SYSLOG_ERROR, CLIENT_LIBRARY_UNLOADABLE, 4, get_application_name(),
                get_application_pid(), impname, "\n\tCannot find library");
     }
-#endif
     return mod;
 }
 
@@ -2136,7 +2112,7 @@ return success;
  * The solution here would be to monitor such attempts by the app and free the console
  * that is setup here.
  */
-typedef BOOL(WINAPI *kernel32_AttachConsole_t)(IN DWORD);
+typedef BOOL(WINAPI *kernel32_AttachConsole_t)(DR_PARAM_IN DWORD);
 static kernel32_AttachConsole_t kernel32_AttachConsole;
 
 bool
@@ -2621,8 +2597,9 @@ privload_add_windbg_cmds_post_init(privmod_t *mod)
  * or sthg that is checked on every LOG or ASSERT.
  */
 
-typedef NTSTATUS(NTAPI *nt_protect_t)(IN HANDLE, IN OUT PVOID *, IN OUT PSIZE_T, IN ULONG,
-                                      OUT PULONG);
+typedef NTSTATUS(NTAPI *nt_protect_t)(DR_PARAM_IN HANDLE, DR_PARAM_INOUT PVOID *,
+                                      DR_PARAM_INOUT PSIZE_T, DR_PARAM_IN ULONG,
+                                      DR_PARAM_OUT PULONG);
 static nt_protect_t bootstrap_ProtectVirtualMemory;
 
 /* exported for earliest_inject_init() */
@@ -2775,7 +2752,7 @@ privload_bootstrap_dynamorio_imports(byte *dr_base, byte *ntdll_base)
         while (lookup->u1.Function != 0) {
             IMAGE_IMPORT_BY_NAME *name = (IMAGE_IMPORT_BY_NAME *)RVA_TO_VA(
                 dr_base, (lookup->u1.AddressOfData & ~(IMAGE_ORDINAL_FLAG)));
-            if (TEST(IMAGE_ORDINAL_FLAG, lookup->u1.Function))
+            if (TESTANY(IMAGE_ORDINAL_FLAG, lookup->u1.Function))
                 return false; /* no ordinal support */
 
             func = privload_bootstrap_get_export(ntdll_base, (const char *)name->Name);

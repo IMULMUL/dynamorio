@@ -1,5 +1,5 @@
 /* ******************************************************************************
- * Copyright (c) 2015-2017 Google, Inc.  All rights reserved.
+ * Copyright (c) 2015-2023 Google, Inc.  All rights reserved.
  * ******************************************************************************/
 
 /*
@@ -47,16 +47,23 @@
 #include <string>
 #include <sstream>
 
+namespace dynamorio {
+namespace drcpusim {
+
+using ::dynamorio::droption::droption_parser_t;
+using ::dynamorio::droption::DROPTION_SCOPE_ALL;
+using ::dynamorio::droption::DROPTION_SCOPE_CLIENT;
+
 // XXX i#1732: make a msgbox on Windows (controlled by option for batch runs)
-#define NOTIFY(level, ...)                     \
-    do {                                       \
-        if (op_verbose.get_value() >= (level)) \
-            dr_fprintf(STDERR, __VA_ARGS__);   \
+#define NOTIFY(level, ...)                                          \
+    do {                                                            \
+        if (dynamorio::drcpusim::op_verbose.get_value() >= (level)) \
+            dr_fprintf(STDERR, __VA_ARGS__);                        \
     } while (0)
 
 static bool (*opcode_supported)(instr_t *);
 
-static std::vector<std::string> blacklist;
+static std::vector<std::string> blocklist;
 
 static app_pc exe_start;
 
@@ -128,6 +135,16 @@ instr_is_3DNow_no_Intel(instr_t *instr)
             (instr_get_opcode(instr) != OP_prefetchw || !op_allow_prefetchw.get_value()));
 }
 
+static bool
+instr_is_cet_nop(instr_t *instr)
+{
+    /* OP_endbr64, OP_endbr32, and OP_rdssp are newer instructions in Intel CET but they
+     * decode as nop on old processors, so they should be harmless.
+     */
+    int opc = instr_get_opcode(instr);
+    return opc == OP_endbr64 || opc == OP_endbr32 || opc == OP_rdssp;
+}
+
 /***************************************************
  * Pentium
  */
@@ -161,7 +178,7 @@ opcode_supported_Pentium(instr_t *instr)
         opc == OP_fxrstor32 ||
         // We assume that new opcodes from SSE3+ (incl OP_monitor and OP_mwait)
         // were appended to the enum.
-        opc >= OP_fisttp)
+        (opc >= OP_fisttp && !instr_is_cet_nop(instr)))
         return false;
     return true;
 #    endif
@@ -194,7 +211,7 @@ opcode_supported_PentiumMMX(instr_t *instr)
         opc == OP_sysexit || opc == OP_fxsave32 || opc == OP_fxrstor32 ||
         // We assume that new opcodes from SSE3+ (incl OP_monitor and OP_mwait)
         // were appended to the enum.
-        opc >= OP_fisttp)
+        (opc >= OP_fisttp && !instr_is_cet_nop(instr)))
         return false;
     return true;
 #    endif
@@ -229,7 +246,7 @@ opcode_supported_PentiumPro(instr_t *instr)
         opc == OP_fxsave32 || opc == OP_fxrstor32 ||
         // We assume that new opcodes from SSE3+ (incl OP_monitor and OP_mwait)
         // were appended to the enum.
-        opc >= OP_fisttp)
+        (opc >= OP_fisttp && !instr_is_cet_nop(instr)))
         return false;
     return true;
 #    endif
@@ -263,7 +280,7 @@ opcode_supported_Klamath(instr_t *instr)
         opc == OP_fxsave32 || opc == OP_fxrstor32 ||
         // We assume that new opcodes from SSE3+ (incl OP_monitor and OP_mwait)
         // were appended to the enum.
-        opc >= OP_fisttp)
+        (opc >= OP_fisttp && !instr_is_cet_nop(instr)))
         return false;
     return true;
 #    endif
@@ -296,7 +313,7 @@ opcode_supported_Deschutes(instr_t *instr)
     if (instr_is_sse(instr) || instr_is_sse2(instr) || instr_is_3DNow_no_Intel(instr) ||
         // We assume that new opcodes from SSE3+ (incl OP_monitor and OP_mwait)
         // were appended to the enum.
-        opc >= OP_fisttp)
+        (opc >= OP_fisttp && !instr_is_cet_nop(instr)))
         return false;
     return true;
 #    endif
@@ -329,7 +346,7 @@ opcode_supported_Pentium3(instr_t *instr)
     if (instr_is_sse2(instr) || instr_is_3DNow_no_Intel(instr) ||
         // We assume that new opcodes from SSE3+ (incl OP_monitor and OP_mwait)
         // were appended to the enum.
-        opc >= OP_fisttp)
+        (opc >= OP_fisttp && !instr_is_cet_nop(instr)))
         return false;
     return true;
 #    endif
@@ -364,7 +381,7 @@ opcode_supported_Banias(instr_t *instr)
     if (instr_is_3DNow_no_Intel(instr) ||
         // We assume that new and only new opcodes from SSE3+ were
         // appended to the enum, except some SSE2 added late.
-        (opc >= OP_fisttp && !instr_is_sse2(instr)))
+        (opc >= OP_fisttp && !instr_is_sse2(instr) && !instr_is_cet_nop(instr)))
         return false;
     return true;
 #    endif
@@ -401,8 +418,8 @@ opcode_supported_Prescott(instr_t *instr)
     if (instr_is_3DNow_no_Intel(instr) ||
         // We assume that new and only new opcodes from SSSE3+ were
         // appended to the enum, except some SSE2 added late.
-        (opc >= OP_pshufb &&
-         !instr_is_sse2(instr)
+        (opc >= OP_pshufb && !instr_is_sse2(instr) &&
+         !instr_is_cet_nop(instr)
 #    ifdef X64
          // Allow new x64 opcodes
          && opc != OP_movsxd && opc != OP_swapgs
@@ -443,8 +460,8 @@ opcode_supported_Merom(instr_t *instr)
     if (instr_is_3DNow_no_Intel(instr) ||
         // We assume that new and only new opcodes from SSE4+ were
         // appended to the enum, except some SSE2 added late.
-        (opc >= OP_popcnt &&
-         !instr_is_sse2(instr)
+        (opc >= OP_popcnt && !instr_is_sse2(instr) &&
+         !instr_is_cet_nop(instr)
 #    ifdef X64
          // Allow new x64 opcodes
          && opc != OP_movsxd && opc != OP_swapgs
@@ -487,8 +504,8 @@ opcode_supported_Penryn(instr_t *instr)
     if (instr_is_3DNow_no_Intel(instr) ||
         // We assume that new and only new opcodes from SSE4+ were
         // appended to the enum, except some SSE2 added late.
-        (opc >= OP_popcnt && !instr_is_sse2(instr) &&
-         !instr_is_sse41(instr)
+        (opc >= OP_popcnt && !instr_is_sse2(instr) && !instr_is_sse41(instr) &&
+         !instr_is_cet_nop(instr)
 #    ifdef X64
          // Allow new x64 opcodes
          && opc != OP_movsxd && opc != OP_swapgs
@@ -529,7 +546,8 @@ opcode_supported_Nehalem(instr_t *instr)
     if (instr_is_3DNow_no_Intel(instr) || (instr_is_sse4A(instr) && opc != OP_popcnt) ||
         // We assume that new and only new opcodes from SSE4+ were
         // appended to the enum, except some SSE2 added late.
-        (opc >= OP_vmcall && !instr_is_sse2(instr) && opc != OP_rdtscp))
+        (opc >= OP_vmcall && !instr_is_sse2(instr) && opc != OP_rdtscp &&
+         !instr_is_cet_nop(instr)))
         return false;
     return true;
 }
@@ -565,7 +583,7 @@ opcode_supported_Westmere(instr_t *instr)
         // We assume that new and only new opcodes were appended to
         // the enum, except some SSE2 added late.
         // We assume we don't care about AMD SVM or Intel VMX (user-mode only).
-        (opc >= OP_movbe && !instr_is_sse2(instr)))
+        (opc >= OP_movbe && !instr_is_sse2(instr) && !instr_is_cet_nop(instr)))
         return false;
     return true;
 }
@@ -603,7 +621,8 @@ opcode_supported_Sandybridge(instr_t *instr)
         // We assume that new and only new opcodes were appended to
         // the enum, except some SSE2 and split *xsave64 added late.
         // We assume we don't care about AMD SVM.
-        (opc >= OP_vcvtph2ps && !(opc >= OP_movq2dq && opc <= OP_xsaveopt64)))
+        (opc >= OP_vcvtph2ps && !(opc >= OP_movq2dq && opc <= OP_xsaveopt64) &&
+         !instr_is_cet_nop(instr)))
         return false;
     return true;
 }
@@ -642,7 +661,7 @@ opcode_supported_Ivybridge(instr_t *instr)
         (opc >= OP_vfmadd132ps && opc <= OP_vfnmsub231sd) ||
         // We assume that new and only new opcodes were appended to the enum.
         // We assume we don't care about AMD SVM.
-        opc >= OP_rdseed)
+        (opc >= OP_rdseed && !instr_is_cet_nop(instr)))
         return false;
     return true;
 }
@@ -710,8 +729,8 @@ report_invalid_opcode(int opc, app_pc pc)
     if (mod != NULL)
         modname = dr_module_preferred_name(mod);
     if (modname != NULL) {
-        for (std::vector<std::string>::iterator i = blacklist.begin();
-             i != blacklist.end(); ++i) {
+        for (std::vector<std::string>::iterator i = blocklist.begin();
+             i != blocklist.end(); ++i) {
             if (*i == modname) {
                 dr_free_module_data(mod);
                 return;
@@ -756,8 +775,11 @@ event_app_instruction(void *drcontext, void *tag, instrlist_t *bb, instr_t *inst
         dr_save_reg(drcontext, bb, instr, DR_REG_XCX, SPILL_SLOT_2);
         // XXX: technically drmgr doesn't want us inserting instrs *after* the
         // app instr but this is the simplest way to go.
-        dr_insert_clean_call(drcontext, bb, instr_get_next(instr), (void *)fake_cpuid,
-                             false, 0);
+        dr_insert_clean_call_ex(
+            drcontext, bb, instr_get_next(instr), (void *)fake_cpuid,
+            static_cast<dr_cleancall_save_t>(DR_CLEANCALL_READS_APP_CONTEXT |
+                                             DR_CLEANCALL_WRITES_APP_CONTEXT),
+            0);
     }
 #endif
     return DR_EMIT_DEFAULT;
@@ -769,28 +791,9 @@ event_exit(void)
     drmgr_exit();
 }
 
-DR_EXPORT void
-dr_client_main(client_id_t id, int argc, const char *argv[])
+static void
+set_opcode_and_model()
 {
-    dr_set_client_name("DynamoRIO CPU Simulator", "http://dynamorio.org/issues");
-
-#ifdef WINDOWS
-    dr_enable_console_printing();
-#endif
-
-    std::string parse_err;
-    if (!droption_parser_t::parse_argv(DROPTION_SCOPE_CLIENT, argc, argv, &parse_err,
-                                       NULL)) {
-        NOTIFY(0, "Usage error: %s\nUsage:\n%s", parse_err.c_str(),
-               droption_parser_t::usage_short(DROPTION_SCOPE_ALL).c_str());
-        dr_abort();
-    }
-    if (op_cpu.get_value().empty()) {
-        NOTIFY(0, "Usage error: cpu is required\nUsage:\n%s",
-               droption_parser_t::usage_short(DROPTION_SCOPE_ALL).c_str());
-        dr_abort();
-    }
-
 #ifdef X86
     if (op_cpu.get_value() == "Pentium") {
         opcode_supported = opcode_supported_Pentium;
@@ -851,18 +854,50 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
     NOTIFY(0, "ARM not supported yet\n");
     dr_abort();
 #endif
+}
 
-    if (!op_blacklist.get_value().empty()) {
-        std::stringstream stream(op_blacklist.get_value());
-        std::string entry;
-        while (std::getline(stream, entry, ':'))
-            blacklist.push_back(entry);
+} // namespace drcpusim
+} // namespace dynamorio
+
+DR_EXPORT void
+dr_client_main(client_id_t id, int argc, const char *argv[])
+{
+    using ::dynamorio::droption::droption_parser_t;
+    using ::dynamorio::droption::DROPTION_SCOPE_ALL;
+    using ::dynamorio::droption::DROPTION_SCOPE_CLIENT;
+
+    dr_set_client_name("DynamoRIO CPU Simulator", "http://dynamorio.org/issues");
+
+#ifdef WINDOWS
+    dr_enable_console_printing();
+#endif
+
+    std::string parse_err;
+    if (!droption_parser_t::parse_argv(DROPTION_SCOPE_CLIENT, argc, argv, &parse_err,
+                                       NULL)) {
+        NOTIFY(0, "Usage error: %s\nUsage:\n%s", parse_err.c_str(),
+               droption_parser_t::usage_short(DROPTION_SCOPE_ALL).c_str());
+        dr_abort();
+    }
+    if (dynamorio::drcpusim::op_cpu.get_value().empty()) {
+        NOTIFY(0, "Usage error: cpu is required\nUsage:\n%s",
+               droption_parser_t::usage_short(DROPTION_SCOPE_ALL).c_str());
+        dr_abort();
     }
 
-    if (op_ignore_all_libs.get_value()) {
+    dynamorio::drcpusim::set_opcode_and_model();
+
+    if (!dynamorio::drcpusim::op_blocklist.get_value().empty()) {
+        std::stringstream stream(dynamorio::drcpusim::op_blocklist.get_value());
+        std::string entry;
+        while (std::getline(stream, entry, ':'))
+            dynamorio::drcpusim::blocklist.push_back(entry);
+    }
+
+    if (dynamorio::drcpusim::op_ignore_all_libs.get_value()) {
         module_data_t *exe = dr_get_main_module();
         DR_ASSERT(exe != NULL);
-        exe_start = exe->start;
+        dynamorio::drcpusim::exe_start = exe->start;
         dr_free_module_data(exe);
     }
 
@@ -870,7 +905,8 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
         DR_ASSERT(false);
 
     /* register events */
-    dr_register_exit_event(event_exit);
-    if (!drmgr_register_bb_instrumentation_event(NULL, event_app_instruction, NULL))
+    drmgr_register_exit_event(dynamorio::drcpusim::event_exit);
+    if (!drmgr_register_bb_instrumentation_event(
+            NULL, dynamorio::drcpusim::event_app_instruction, NULL))
         DR_ASSERT(false);
 }

@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2017 Google, Inc.  All rights reserved.
+ * Copyright (c) 2017-2022 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -38,14 +38,6 @@
 #include "drutil.h"
 #include "drreg.h"
 #include <string.h> /* memset */
-
-#define CHECK(x, msg)                                                                \
-    do {                                                                             \
-        if (!(x)) {                                                                  \
-            dr_fprintf(STDERR, "CHECK failed %s:%d: %s\n", __FILE__, __LINE__, msg); \
-            dr_abort();                                                              \
-        }                                                                            \
-    } while (0);
 
 #define MINSERT instrlist_meta_preinsert
 
@@ -125,7 +117,7 @@ dr_init(client_id_t id)
     if (!drmgr_init() || drreg_init(&ops) != DRREG_SUCCESS || !drutil_init())
         CHECK(false, "init failed");
 
-    dr_register_exit_event(event_exit);
+    drmgr_register_exit_event(event_exit);
     if (!drmgr_register_bb_instrumentation_event(NULL, event_app_instruction, NULL))
         CHECK(false, "init failed");
 }

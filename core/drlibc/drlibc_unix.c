@@ -1,5 +1,5 @@
 /* *******************************************************************************
- * Copyright (c) 2010-2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2026 Google, Inc.  All rights reserved.
  * Copyright (c) 2011 Massachusetts Institute of Technology  All rights reserved.
  * Copyright (c) 2000-2010 VMware, Inc.  All rights reserved.
  * *******************************************************************************/
@@ -40,11 +40,7 @@
  * os.c - Linux specific routines
  */
 
-/* See os.c comment on why we define this. */
-#define _LARGEFILE64_SOURCE
-#include <sys/types.h>
 #include <sys/mman.h>
-#include <sys/stat.h>
 #include <fcntl.h>
 
 /* Avoid pulling in deps from instr_inline.h included from globals.h */
@@ -70,7 +66,7 @@
 #endif
 
 process_id_t
-get_process_id()
+get_process_id(void)
 {
     return dynamorio_syscall(SYS_getpid, 0);
 }
@@ -96,11 +92,11 @@ uint
 memprot_to_osprot(uint prot)
 {
     uint mmap_prot = 0;
-    if (TEST(MEMPROT_EXEC, prot))
+    if (TESTANY(MEMPROT_EXEC, prot))
         mmap_prot |= PROT_EXEC;
-    if (TEST(MEMPROT_READ, prot))
+    if (TESTANY(MEMPROT_READ, prot))
         mmap_prot |= PROT_READ;
-    if (TEST(MEMPROT_WRITE, prot))
+    if (TESTANY(MEMPROT_WRITE, prot))
         mmap_prot |= PROT_WRITE;
     return mmap_prot;
 }
@@ -118,7 +114,7 @@ mmap_syscall_succeeded(byte *retval)
                              result == -EBADF ||
                      result == -EACCES || result == -EINVAL || result == -ETXTBSY ||
                      result == -EAGAIN || result == -ENOMEM || result == -ENODEV ||
-                     result == -EFAULT || result == -EPERM);
+                     result == -EFAULT || result == -EPERM || result == -EEXIST);
     return !fail;
 }
 
@@ -144,7 +140,7 @@ munmap_syscall(byte *addr, size_t len)
     return dynamorio_syscall(SYS_munmap, 2, addr, len);
 }
 
-/* FIXME - not available in 2.0 or earlier kernels, not really an issue since no one
+/* XXX - not available in 2.0 or earlier kernels, not really an issue since no one
  * should be running anything that old. */
 static int
 llseek_syscall(int fd, int64 offset, int origin, int64 *result)
@@ -164,8 +160,8 @@ llseek_syscall(int fd, int64 offset, int origin, int64 *result)
 #endif
 }
 
-static ptr_int_t
-dynamorio_syscall_stat(const char *fname, struct stat64 *st)
+ptr_int_t
+dr_stat_syscall(const char *fname, struct stat64 *st)
 {
 #ifdef SYSNUM_STAT
     return dynamorio_syscall(SYSNUM_STAT, 2, fname, st);
@@ -179,7 +175,7 @@ os_file_exists(const char *fname, bool is_dir)
 {
     /* _LARGEFILE64_SOURCE should make libc struct match kernel (see top of file) */
     struct stat64 st;
-    ptr_int_t res = dynamorio_syscall_stat(fname, &st);
+    ptr_int_t res = dr_stat_syscall(fname, &st);
     if (res != 0) {
         LOG(THREAD_GET, LOG_SYSCALLS, 2, "%s failed: " PIFX "\n", __func__, res);
         return false;
@@ -193,12 +189,12 @@ bool
 os_files_same(const char *path1, const char *path2)
 {
     struct stat64 st1, st2;
-    ptr_int_t res = dynamorio_syscall_stat(path1, &st1);
+    ptr_int_t res = dr_stat_syscall(path1, &st1);
     if (res != 0) {
         LOG(THREAD_GET, LOG_SYSCALLS, 2, "%s failed: " PIFX "\n", __func__, res);
         return false;
     }
-    res = dynamorio_syscall_stat(path2, &st2);
+    res = dr_stat_syscall(path2, &st2);
     if (res != 0) {
         LOG(THREAD_GET, LOG_SYSCALLS, 2, "%s failed: " PIFX "\n", __func__, res);
         return false;
@@ -211,7 +207,7 @@ os_get_file_size(const char *file, uint64 *size)
 {
     /* _LARGEFILE64_SOURCE should make libc struct match kernel (see top of file) */
     struct stat64 st;
-    ptr_int_t res = dynamorio_syscall_stat(file, &st);
+    ptr_int_t res = dr_stat_syscall(file, &st);
     if (res != 0) {
         LOG(THREAD_GET, LOG_SYSCALLS, 2, "%s failed: " PIFX "\n", __func__, res);
         return false;
@@ -242,7 +238,7 @@ os_get_file_size_by_handle(file_t fd, uint64 *size)
 bool
 os_create_dir(const char *fname, create_directory_flags_t create_dir_flags)
 {
-    bool require_new = TEST(CREATE_DIR_REQUIRE_NEW, create_dir_flags);
+    bool require_new = TESTANY(CREATE_DIR_REQUIRE_NEW, create_dir_flags);
 #ifdef SYS_mkdir
     int rc = dynamorio_syscall(SYS_mkdir, 2, fname, S_IRWXU | S_IRWXG);
 #else
@@ -319,30 +315,34 @@ os_open(const char *fname, int os_open_flags)
 {
     int res;
     int flags = 0;
-    if (TEST(OS_OPEN_ALLOW_LARGE, os_open_flags))
+    int mode = 0;
+    const int create_mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP;
+
+    if (TESTANY(OS_OPEN_ALLOW_LARGE, os_open_flags))
         flags |= O_LARGEFILE;
-    if (TEST(OS_OPEN_WRITE_ONLY, os_open_flags))
-        res = open_syscall(fname, flags | O_WRONLY, 0);
-    else if (!TEST(OS_OPEN_WRITE, os_open_flags))
-        res = open_syscall(fname, flags | O_RDONLY, 0);
+
+    if (TESTANY(OS_OPEN_WRITE_ONLY, os_open_flags)) {
+        flags |= O_WRONLY | O_CREAT;
+        mode = create_mode;
+    } else if (!TESTANY(OS_OPEN_WRITE, os_open_flags))
+        flags |= O_RDONLY;
     else {
-        res = open_syscall(
-            fname,
-            flags | O_RDWR | O_CREAT |
-                (TEST(OS_OPEN_APPEND, os_open_flags)
-                     ?
-                     /* Currently we only support either appending
-                      * or truncating, just like Windows and the client
-                      * interface.  If we end up w/ a use case that wants
-                      * neither it could open append and then seek; if we do
-                      * add OS_TRUNCATE or sthg we'll need to add it to
-                      * any current writers who don't set OS_OPEN_REQUIRE_NEW.
-                      */
-                     O_APPEND
-                     : O_TRUNC) |
-                (TEST(OS_OPEN_REQUIRE_NEW, os_open_flags) ? O_EXCL : 0),
-            S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
+        flags |= O_RDWR | O_CREAT |
+            /* Currently we only support either appending
+             * or truncating, just like Windows and the client
+             * interface.  If we end up w/ a use case that wants
+             * neither it could open append and then seek; if we do
+             * add OS_TRUNCATE or sthg we'll need to add it to
+             * any current writers who don't set OS_OPEN_REQUIRE_NEW.
+             */
+            (TESTANY(OS_OPEN_APPEND, os_open_flags) ? O_APPEND : O_TRUNC) |
+            (TESTANY(OS_OPEN_REQUIRE_NEW, os_open_flags) ? O_EXCL : 0);
+
+        mode = create_mode;
     }
+
+    res = open_syscall(fname, flags, mode);
+
     if (res < 0)
         return INVALID_FILE;
 
@@ -421,7 +421,7 @@ os_rename_file(const char *orig_name, const char *new_name, bool replace)
         /* SYS_rename replaces so we must test beforehand => could have race */
         /* _LARGEFILE64_SOURCE should make libc struct match kernel (see top of file) */
         struct stat64 st;
-        ptr_int_t res = dynamorio_syscall_stat(new_name, &st);
+        ptr_int_t res = dr_stat_syscall(new_name, &st);
         if (res == 0)
             return false;
         else if (res != -ENOENT) {
@@ -449,24 +449,26 @@ os_delete_mapped_file(const char *filename)
 
 /* We mark as weak so the core can override with its more complex version. */
 WEAK byte *
-os_map_file(file_t f, size_t *size INOUT, uint64 offs, app_pc addr, uint prot,
+os_map_file(file_t f, size_t *size DR_PARAM_INOUT, uint64 offs, app_pc addr, uint prot,
             map_flags_t map_flags)
 {
     int flags;
     byte *map;
+#if defined(LINUX) && !defined(X64)
     uint pg_offs;
     ASSERT_TRUNCATE(pg_offs, uint, offs / PAGE_SIZE);
     pg_offs = (uint)(offs / PAGE_SIZE);
+#endif
 #ifdef VMX86_SERVER
     flags = MAP_PRIVATE; /* MAP_SHARED not supported yet */
 #else
-    flags = TEST(MAP_FILE_COPY_ON_WRITE, map_flags) ? MAP_PRIVATE : MAP_SHARED;
+    flags = TESTANY(MAP_FILE_COPY_ON_WRITE, map_flags) ? MAP_PRIVATE : MAP_SHARED;
 #endif
     /* Allows memory request instead of mapping a file,
      * so we can request memory from a particular address with fixed argument */
     if (f == -1)
         flags |= MAP_ANONYMOUS;
-    if (TEST(MAP_FILE_FIXED, map_flags))
+    if (TESTANY(MAP_FILE_FIXED, map_flags))
         flags |= MAP_FIXED;
     map = mmap_syscall(addr, *size, memprot_to_osprot(prot), flags, f,
                        /* x86 Linux mmap uses offset in pages */
@@ -496,6 +498,8 @@ const reg_id_t syscall_regparms[MAX_SYSCALL_ARGS] = {
 #    endif /* 64/32-bit */
 #elif defined(AARCHXX)
     DR_REG_R0, DR_REG_R1, DR_REG_R2, DR_REG_R3, DR_REG_R4, DR_REG_R5,
+#elif defined(RISCV64)
+    DR_REG_A0, DR_REG_A1, DR_REG_A2, DR_REG_A3, DR_REG_A4, DR_REG_A5,
 #endif /* X86/ARM */
 };
 
@@ -508,6 +512,8 @@ const reg_id_t syscall_regparms[MAX_SYSCALL_ARGS] = {
  * the disassembly of those functions: there should be no relocations.
  */
 static size_t page_size = 0;
+
+static size_t auxv_minsigstksz = 0;
 
 /* Return true if size is a multiple of the page size.
  * XXX: This function may be called when DynamoRIO is in a fragile state, or not
@@ -577,6 +583,22 @@ os_page_size(void)
     return size;
 }
 
+/* With SIGSTKSZ now in sysconf and an auxv var AT_MINSIGSTKSZ we avoid
+ * using the defines and try to lookup the min value in os_page_size_init().
+ */
+size_t
+os_minsigstksz(void)
+{
+#ifdef AARCH64
+#    define MINSIGSTKSZ_DEFAULT 5120
+#else
+#    define MINSIGSTKSZ_DEFAULT 2048
+#endif
+    if (auxv_minsigstksz == 0)
+        return MINSIGSTKSZ_DEFAULT;
+    return auxv_minsigstksz;
+}
+
 void
 os_page_size_init(const char **env, bool env_followed_by_auxv)
 {
@@ -595,12 +617,18 @@ os_page_size_init(const char **env, bool env_followed_by_auxv)
         /* Skip environment. */
         while (*env != 0)
             ++env;
-        /* Look for AT_PAGESZ in the auxiliary vector. */
+        /* Look for AT_PAGESZ and other values in the auxiliary vector. */
         for (auxv = (ELF_AUXV_TYPE *)(env + 1); auxv->a_type != AT_NULL; auxv++) {
             if (auxv->a_type == AT_PAGESZ) {
                 os_set_page_size(auxv->a_un.a_val);
                 break;
             }
+#    ifdef AT_MINSIGSTKSZ
+            else if (auxv->a_type == AT_MINSIGSTKSZ) {
+                auxv_minsigstksz = auxv->a_un.a_val;
+                break;
+            }
+#    endif
         }
     }
 #endif /* LINUX */

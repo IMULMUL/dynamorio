@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2019 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2026 Google, Inc.  All rights reserved.
  * Copyright (c) 2008-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -37,7 +37,7 @@
  */
 
 #ifndef _SIGNAL_PRIVATE_H_
-#define _SIGNAL_PRIVATE_H_ 1
+#define _SIGNAL_PRIVATE_H_
 
 /* We have an ordering issue so we split out LINUX from globals.h */
 #include "configure.h"
@@ -137,7 +137,9 @@ struct _prev_sigaction_t {
 #endif
 
 #ifdef LINUX
+#    ifndef ANDROID64
 typedef unsigned int old_sigset_t;
+#    endif
 
 struct _old_sigaction_t {
     handler_t handler;
@@ -175,6 +177,13 @@ typedef struct {
         unsigned long uc_regspace[128] __attribute__((__aligned__(8)));
         kernel_vfp_sigframe_t uc_vfp;
     } coproc;
+#    elif defined(RISCV64)
+    unsigned long uc_flags;
+    struct ucontext *uc_link;
+    stack_t uc_stack;
+    kernel_sigset_t uc_sigmask;
+    unsigned char sigset_ex[1024 / 8 - sizeof(kernel_sigset_t)];
+    sigcontext_t uc_mcontext;
 #    else
 #        error NYI
 #    endif
@@ -207,7 +216,11 @@ typedef _STRUCT_UCONTEXT /* == __darwin_ucontext */ kernel_ucontext_t;
  * (these are from /usr/src/linux/arch/i386/kernel/signal.c for kernel 2.4.17)
  */
 
-#    define RETCODE_SIZE 8
+#    if defined(X86)
+#        define RETCODE_SIZE 8
+#    elif defined(ARM)
+#        define RETCODE_SIZE 16
+#    endif
 
 typedef struct sigframe {
 #    ifdef X86
@@ -224,7 +237,7 @@ typedef struct sigframe {
     kernel_ucontext_t uc;
     char retcode[RETCODE_SIZE];
 #    endif
-    /* FIXME: this is a field I added, so our frame looks different from
+    /* XXX: this is a field I added, so our frame looks different from
      * the kernel's...but where else can I store sig where the app won't
      * clobber it?
      * WARNING: our handler receives only rt frames, and we construct
@@ -273,11 +286,17 @@ typedef struct rt_sigframe {
 #    elif defined(AARCHXX)
     kernel_siginfo_t info;
     kernel_ucontext_t uc;
-    char retcode[RETCODE_SIZE];
+#    elif defined(RISCV64)
+    kernel_siginfo_t info;
+    kernel_ucontext_t uc;
 #    endif
 
 #elif defined(MACOS)
-#    ifdef X64
+#    ifdef AARCH64
+    kernel_siginfo_t info;
+    struct __darwin_ucontext64 uc;
+    struct __darwin_mcontext64 mc;
+#    elif defined(X64)
     /* Kernel places padding to align to 16 (via an inefficient alignment macro!),
      * and then skips the retaddr slot to align to 8.
      */
@@ -317,14 +336,12 @@ typedef struct rt_sigframe {
  */
 typedef struct _sigpending_t {
     sigframe_rt_t rt_frame;
-#ifdef CLIENT_INTERFACE
     /* i#182/PR 449996: we provide the faulting access address for SIGSEGV, etc. */
     byte *access_address;
-#endif
     /* use the sigcontext, not the mcontext (used to restart syscalls for i#1145) */
     bool use_sigcontext;
-    /* was this unblocked at receive time? */
-    bool unblocked;
+    /* Was this unblocked at receive time? */
+    bool unblocked_at_receipt;
     struct _sigpending_t *next;
 #if defined(LINUX) && defined(X86)
     /* fpstate is no longer kept inside the frame, and is not always present.
@@ -380,12 +397,33 @@ typedef struct _thread_itimer_info_t {
 struct _sigfd_pipe_t;
 typedef struct _sigfd_pipe_t sigfd_pipe_t;
 
-typedef struct _thread_sig_info_t {
-    /* we use kernel_sigaction_t so we don't have to translate back and forth
-     * between it and libc version.
-     * have to dynamically allocate app_sigaction array so we can share it.
+/* Data that is shared for all threads in a CLONE_SIGHAND group.
+ * Typically this is the whole thread group or "process".
+ * The thread_sig_info_t for each thread in the group points to a
+ * single copy of this structure.
+ */
+typedef struct _sighand_info_t {
+    bool is_shared;
+    int refcount;
+    mutex_t lock;
+    /* We use kernel_sigaction_t so we don't have to translate back and forth
+     * between it and the libc version.
      */
-    kernel_sigaction_t **app_sigaction;
+    kernel_sigaction_t *action[SIGARRAY_SIZE];
+    bool we_intercept[SIGARRAY_SIZE];
+    /* For handling masked-for-app-but-not-for-DR signals.  Any time we receive
+     * a signal in a thread for which it is blocked, we need to know whether it was
+     * a "process"-wide signal and whether some other thread has it unblocked.
+     * To avoid heavyweight locks every time, we keep an atomic-access counter of
+     * unmasked threads for each signal, for the CLONE_SIGHAND group (typically
+     * whole process).
+     */
+    int threads_unmasked[SIGARRAY_SIZE];
+} sighand_info_t;
+
+typedef struct _thread_sig_info_t {
+    /* A pointer to handler info shared in a CLONE_SIGHAND group. */
+    sighand_info_t *sighand;
 
     /* We save the old sigaction across a sigaction syscall so we can return it
      * in post-syscall handling.
@@ -403,13 +441,6 @@ typedef struct _thread_sig_info_t {
      * squash alarm or profiling signals up until this point.
      */
     bool fully_initialized;
-
-    /* with CLONE_SIGHAND we may have to share app_sigaction */
-    bool shared_app_sigaction;
-    mutex_t *shared_lock;
-    int *shared_refcount;
-    /* signals we intercept must also be sharable */
-    bool *we_intercept;
 
     /* DR and clients use itimers, so we need to emulate the app's itimer
      * usage.  This info is shared across CLONE_THREAD threads only for
@@ -441,7 +472,26 @@ typedef struct _thread_sig_info_t {
     /* "lock" to prevent interrupting signal from messing up sigpending array */
     bool accessing_sigpending;
     bool nested_pending_ok;
+
+    /* This thread's application signal mask: the set of blocked signals.
+     * We need to keep this in sync with the thread-group-shared
+     * sighand->threads_unmasked.
+     *
+     * reroute_to_unmasked_thread() needs read access to app_sigblocked from other
+     * threads.  However, we also need lockless read access from our signal handler.
+     * Since all writes are from the owning thread, we read w/o a lock from the owning
+     * thread, but use the lock for writes from the owning thread and reads from
+     * other threads.  (The bitwise operations make it difficult to use atomic
+     * updates instead of a mutex.)
+     */
     kernel_sigset_t app_sigblocked;
+    mutex_t sigblocked_lock;
+    /* This is a not-guaranteed-accurate indicator of whether we're inside an
+     * app signal handler.  We can't know for sure when a handler ends if the
+     * app exits with a longjmp instead of siglongjmp.
+     */
+    bool in_app_handler;
+
     /* for returning the old mask (xref PR 523394) */
     kernel_sigset_t pre_syscall_app_sigblocked;
     /* for preserving the app memory (xref i#1187), and for preserving app
@@ -523,26 +573,6 @@ kernel_sigaddset(kernel_sigset_t *set, int _sig)
         set->sig[sig / _NSIG_BPW] |= 1UL << (sig % _NSIG_BPW);
 }
 
-static inline void
-kernel_sigdelset(kernel_sigset_t *set, int _sig)
-{
-    uint sig = _sig - 1;
-    if (_NSIG_WORDS == 1)
-        set->sig[0] &= ~(1UL << sig);
-    else
-        set->sig[sig / _NSIG_BPW] &= ~(1UL << (sig % _NSIG_BPW));
-}
-
-static inline bool
-kernel_sigismember(kernel_sigset_t *set, int _sig)
-{
-    int sig = _sig - 1; /* go to 0-based */
-    if (_NSIG_WORDS == 1)
-        return CAST_TO_bool(1 & (set->sig[0] >> sig));
-    else
-        return CAST_TO_bool(1 & (set->sig[sig / _NSIG_BPW] >> (sig % _NSIG_BPW)));
-}
-
 /* XXX: how does libc do this? */
 static inline void
 copy_kernel_sigset_to_sigset(kernel_sigset_t *kset, sigset_t *uset)
@@ -567,15 +597,15 @@ static inline bool
 libc_sigismember(const sigset_t *set, int _sig)
 {
     int sig = _sig - 1; /* go to 0-based */
-#if defined(MACOS) || defined(ANDROID)
+#if defined(MACOS) || defined(ANDROID32)
     /* sigset_t is just a uint32 */
-    return TEST(1UL << sig, *set);
+    return TESTANY(1UL << sig, *set);
 #else
     /* "set->__val" would be cleaner, but is glibc specific (e.g. musl libc
      * uses __bits as the field name on sigset_t).
      */
     uint bits_per = 8 * sizeof(ulong);
-    return TEST(1UL << (sig % bits_per), ((const ulong *)set)[sig / bits_per]);
+    return TESTANY(1UL << (sig % bits_per), ((const ulong *)set)[sig / bits_per]);
 #endif
 }
 
@@ -596,6 +626,10 @@ sigaction_syscall(int sig, kernel_sigaction_t *act, kernel_sigaction_t *oact);
 
 void
 set_handler_sigact(kernel_sigaction_t *act, int sig, handler_t handler);
+
+int
+sigprocmask_syscall(int how, kernel_sigset_t *set, kernel_sigset_t *oset,
+                    size_t sigsetsize);
 
 /***************************************************************************
  * OS-SPECIFIC ROUTINES (in signal_<os>.c)

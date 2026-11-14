@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2015-2016 Google, Inc.  All rights reserved.
+ * Copyright (c) 2015-2022 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -36,14 +36,6 @@
 #include "drmgr.h"
 #include "drreg.h"
 #include "client_tools.h"
-
-#define CHECK(x, msg)                                                                \
-    do {                                                                             \
-        if (!(x)) {                                                                  \
-            dr_fprintf(STDERR, "CHECK failed %s:%d: %s\n", __FILE__, __LINE__, msg); \
-            dr_abort();                                                              \
-        }                                                                            \
-    } while (0);
 
 /* This test assumes that DR has a global lock around bb creation,
  * allowing us to use a global var here.
@@ -98,7 +90,7 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
         CHECK(false, "drmgr init failed");
     if (drreg_init(&ops) != DRREG_SUCCESS)
         CHECK(false, "drreg_init failed");
-    dr_register_exit_event(event_exit);
+    drmgr_register_exit_event(event_exit);
     if (!drmgr_register_bb_instrumentation_event(NULL, event_app_instruction, NULL))
         CHECK(false, "bb reg failed");
 }

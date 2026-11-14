@@ -1,5 +1,5 @@
 /* *******************************************************************************
- * Copyright (c) 2011-2021 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2026 Google, Inc.  All rights reserved.
  * Copyright (c) 2010 Massachusetts Institute of Technology  All rights reserved.
  * Copyright (c) 2009 Derek Bruening   All rights reserved.
  * *******************************************************************************/
@@ -39,9 +39,7 @@
 
 #include "globals.h"
 #include "module_shared.h"
-#ifdef CLIENT_INTERFACE
-#    include "instrument.h" /* for instrument_client_lib_unloaded */
-#endif
+#include "instrument.h" /* for instrument_client_lib_unloaded */
 
 /* ok to be in .data w/ no sentinel head node b/c never empties out
  * .ntdll always there for Windows, so no need to unprot.
@@ -140,11 +138,9 @@ privload_process_early_mods(void)
         NULL_TERMINATE_BUFFER(name_copy);
         if (!privload_load_process(mod)) {
             mod = NULL; /* it's been unloaded! */
-#ifdef CLIENT_INTERFACE
             SYSLOG(SYSLOG_ERROR, CLIENT_LIBRARY_UNLOADABLE, 5, get_application_name(),
                    get_application_pid(), name_copy,
                    ": unable to process imports of client library.");
-#endif
             os_terminate(NULL, TERMINATE_PROCESS);
             ASSERT_NOT_REACHED();
         }
@@ -155,7 +151,7 @@ static inline bool
 loader_should_call_entry(privmod_t *mod)
 {
     return !mod->externally_loaded
-#if defined(STATIC_LIBRARY) && defined(WINDOWS) && defined(CLIENT_INTERFACE)
+#if defined(STATIC_LIBRARY) && defined(WINDOWS)
         /* For STATIC_LIBRARY, externally loaded may be a client (the executable)
          * for which we need to handle static TLS: i#4052.
          */
@@ -179,14 +175,11 @@ loader_init_prologue(void)
 
     for (uint i = 0; i < privmod_static_idx; i++) {
         /* Transfer to real list so we can do normal processing later. */
-#ifdef CLIENT_INTERFACE
         privmod_t *mod =
-#endif
             privload_insert(NULL, privmod_static[i].base, privmod_static[i].size,
                             privmod_static[i].name, privmod_static[i].path);
-#ifdef CLIENT_INTERFACE
+        mod->is_top_level_client = true;
         mod->is_client = true;
-#endif
     }
 
 #ifdef WINDOWS
@@ -223,10 +216,8 @@ loader_init_epilogue(dcontext_t *dcontext)
         snprintf(name_copy, BUFFER_SIZE_ELEMENTS(name_copy), "%s", mod->name);
         NULL_TERMINATE_BUFFER(name_copy);
         if (!privload_load_finalize(dcontext, mod)) {
-#ifdef CLIENT_INTERFACE
             SYSLOG(SYSLOG_ERROR, CLIENT_LIBRARY_UNLOADABLE, 5, get_application_name(),
                    get_application_pid(), name_copy, ": library initializer failed.");
-#endif
             os_terminate(NULL, TERMINATE_PROCESS);
             ASSERT_NOT_REACHED();
         }
@@ -279,7 +270,7 @@ loader_thread_init(dcontext_t *dcontext)
          * holding privload_lock and the priv lib
          * DllMain may acquire the same lock that another thread acquired
          * in its app code before requesting a synchall (flush, exit).
-         * FIXME i#875: we do not have ntdll!RtlpFlsLock isolated.
+         * XXX i#875: we do not have ntdll!RtlpFlsLock isolated.
          * Living w/ it for now.  It should be unlikely for the app to
          * hold RtlpFlsLock and then acquire privload_lock: privload_lock
          * is used for import redirection but those don't apply within
@@ -530,9 +521,8 @@ privload_insert(privmod_t *after, app_pc base, size_t size, const char *name,
     }
     mod->ref_count = 1;
     mod->externally_loaded = false;
-#ifdef CLIENT_INTERFACE
-    mod->is_client = false; /* up to caller to set later */
-#endif
+    mod->is_top_level_client = false; /* up to caller to set later */
+    mod->is_client = false;           /* up to caller to set later */
     mod->called_proc_entry = false;
     mod->called_proc_exit = false;
     /* do not add non-heap struct to list: in init() we'll move array to list */
@@ -651,7 +641,8 @@ privload_load(const char *filename, privmod_t *dependent, bool client)
         ASSERT_CURIOSITY(privload_recurse_cnt < 20); /* win7 dbghelp gets to 12 */
     });
 
-    LOG(GLOBAL, LOG_LOADER, 2, "%s: loading %s\n", __FUNCTION__, filename);
+    LOG(GLOBAL, LOG_LOADER, 2, "%s: loading %s (depth %d)\n", __FUNCTION__, filename,
+        privload_recurse_cnt);
 
     map = privload_map_and_relocate(filename, &size, client ? MODLOAD_REACHABLE : 0);
     if (map == NULL) {
@@ -702,10 +693,9 @@ privload_load(const char *filename, privmod_t *dependent, bool client)
                 return NULL;
         }
     }
-#ifdef CLIENT_INTERFACE
     if (privmod->is_client)
         instrument_client_lib_loaded(privmod->base, privmod->base + privmod->size);
-#endif
+    DOCHECK(1, { privload_recurse_cnt--; });
     return privmod;
 }
 
@@ -721,10 +711,8 @@ privload_unload(privmod_t *privmod)
     if (privmod->ref_count == 0) {
         LOG(GLOBAL, LOG_LOADER, 1, "%s: unloading %s @ " PFX "\n", __FUNCTION__,
             privmod->name, privmod->base);
-#ifdef CLIENT_INTERFACE
         if (privmod->is_client)
             instrument_client_lib_unloaded(privmod->base, privmod->base + privmod->size);
-#endif
         if (privmod->prev == NULL) {
             bool prot = DATASEC_PROTECTED(DATASEC_RARELY_PROT);
             if (prot)
@@ -931,16 +919,28 @@ loader_allow_unsafe_static_behavior(void)
 }
 
 /* For heap redirection we need to provide alignment beyond what DR's allocator
- * provides: DR does just pointer-sized alignment (HEAP_ALIGNMENT) while we want
- * double-pointer-size (STANDARD_HEAP_ALIGNMENT).  We take advantage of knowing
- * that DR's alloc is either already double-aligned or is just off by one pointer:
- * so there are only two conditions.  We use the top bit of the size to form our
- * header word.
- * XXX i#4243: To support redirected memalign or C++17 aligned operator new we'll
- * need support for more general alignment.
+ * provides: DR does just pointer-sized alignment (HEAP_ALIGNMENT).
+ * We store up to 3 header words: the DR allocation size, the offset from the DR
+ * allocation, and the requested size.
+ * To avoid the extra header words for smaller allocations, we use bits at the top of the
+ * first header to indicate whether the other headers are present.
+ * We also optimize for STANDARD_HEAP_ALIGNMENT=16 with a special shift bit
+ * to avoid the extra headers when we just need to know if the 8-aligned
+ * DR alloc is at 16 or off by 8.
  */
 #define REDIRECT_HEADER_SHIFTED (1ULL << IF_X64_ELSE(63, 31))
+#define REDIRECT_EXTRA_HEADERS (1ULL << IF_X64_ELSE(62, 30))
 
+#define HEADER_WORD_SIZE sizeof(size_t)
+
+#ifdef STANDALONE_UNIT_TEST
+/* For unit tests use a shim where we can control what global_heap_alloc() returns. */
+static void *
+mock_global_heap_alloc(size_t size HEAPACCT(which_heap_t which));
+#    define GLOBAL_HEAP_ALLOC mock_global_heap_alloc
+#else
+#    define GLOBAL_HEAP_ALLOC global_heap_alloc
+#endif
 /* This routine allocates memory from DR's global memory pool.  Unlike
  * dr_global_alloc(), however, we store the size of the allocation in
  * the first few bytes so redirect_free() can retrieve it.  We also align
@@ -948,56 +948,100 @@ loader_allow_unsafe_static_behavior(void)
  * is also not guaranteed-reachable.
  */
 void *
-redirect_malloc(size_t size)
+redirect_aligned_alloc(size_t alignment, size_t size)
 {
     void *mem;
-    /* We need extra space to store the size and alignment bit and ensure the returned
-     * pointer is aligned.
+    if (!IS_POWER_OF_2(alignment))
+        return NULL;
+    size_t header_size = HEADER_WORD_SIZE;
+    if (alignment < STANDARD_HEAP_ALIGNMENT) {
+        /* Do not bother to support HEAP_ALIGNMENT < STANDARD_HEAP_ALIGNMENT.
+         * It is rare here and would require further header bits to know
+         * the requested size.
+         */
+        alignment = STANDARD_HEAP_ALIGNMENT;
+    } else if (alignment > STANDARD_HEAP_ALIGNMENT)
+        header_size += 2 * HEADER_WORD_SIZE;
+    /* We always need extra space to store the size and to ensure the returned pointer is
+     * aligned. We try to avoid needing the other two headers.
+     * For AArch32 HEAP_ALIGNMENT > HEADER_WORD_SIZE so we could end up without enough
+     * space for the header: ALIGN_FORWARD to add padding.
      */
-    size_t alloc_size = size + sizeof(size_t) + STANDARD_HEAP_ALIGNMENT - HEAP_ALIGNMENT;
-    /* Our header is the size itself, with the top bit stolen to indicate alignment. */
-    if (TEST(REDIRECT_HEADER_SHIFTED, alloc_size)) {
-        /* We do not support the top bit being set as that conflicts with the bit in
-         * our header.  This should be fine as all sytem allocators we have seen also
+    size_t alloc_size =
+        size + ALIGN_FORWARD(header_size, HEAP_ALIGNMENT) + alignment - HEAP_ALIGNMENT;
+    /* Our header is the size itself, with the top bits stolen. */
+    if (TESTANY(REDIRECT_HEADER_SHIFTED | REDIRECT_EXTRA_HEADERS, alloc_size)) {
+        /* We do not support the top bits being set as that conflicts with the bits in
+         * our header.  This should be fine as all system allocators we have seen also
          * have size limits that are this size (for 32-bit) or even smaller.
          */
         CLIENT_ASSERT(false, "malloc failed: size requested is too large");
         return NULL;
     }
-    mem = global_heap_alloc(alloc_size HEAPACCT(ACCT_LIBDUP));
+    mem = GLOBAL_HEAP_ALLOC(alloc_size HEAPACCT(ACCT_LIBDUP));
     if (mem == NULL) {
         CLIENT_ASSERT(false, "malloc failed: out of memory");
         return NULL;
     }
-    ptr_uint_t res =
-        ALIGN_FORWARD((ptr_uint_t)mem + sizeof(size_t), STANDARD_HEAP_ALIGNMENT);
-    size_t header = alloc_size;
-    ASSERT(HEAP_ALIGNMENT * 2 == STANDARD_HEAP_ALIGNMENT);
-    ASSERT(!TEST(REDIRECT_HEADER_SHIFTED, header));
-    if (res == (ptr_uint_t)mem + sizeof(size_t)) {
-        /* Already aligned. */
-    } else if (res == (ptr_uint_t)mem + sizeof(size_t) * 2) {
-        /* DR's alignment is "odd" for double-pointer so we're adding one pointer. */
-        header |= REDIRECT_HEADER_SHIFTED;
-    } else
-        ASSERT_NOT_REACHED();
-    *((size_t *)(res - sizeof(size_t))) = header;
+    ptr_uint_t res = ALIGN_FORWARD((ptr_uint_t)mem + header_size, alignment);
+    size_t header_1 = alloc_size;
+    if (alignment > STANDARD_HEAP_ALIGNMENT) {
+        header_1 |= REDIRECT_EXTRA_HEADERS;
+        ASSERT(header_size == 3 * HEADER_WORD_SIZE);
+        /* The 2nd header is the offset to the start of the alloc. */
+        *((size_t *)(res - 2 * HEADER_WORD_SIZE)) = res - (ptr_uint_t)mem;
+        /* The 3rd header is the requested size, to support user queries for that.
+         * Only Windows really has that interface, though we also use this for our
+         * current redirect_realloc. Should we rewrite redirect_realloc to not
+         * need this and make this Windows-only?
+         */
+        *((size_t *)(res - 3 * HEADER_WORD_SIZE)) = size;
+    } else {
+        ASSERT(alignment == STANDARD_HEAP_ALIGNMENT);
+        if (res == (ptr_uint_t)mem + header_size) {
+            /* Already aligned. */
+        } else {
+            header_1 |= REDIRECT_HEADER_SHIFTED;
+        }
+    }
+    *((size_t *)(res - HEADER_WORD_SIZE)) = header_1;
     ASSERT(res + size <= (ptr_uint_t)mem + alloc_size);
     return (void *)res;
+}
+
+void *
+redirect_malloc(size_t size)
+{
+    return redirect_aligned_alloc(STANDARD_HEAP_ALIGNMENT, size);
 }
 
 /* Returns the underlying DR allocation's size and starting point, given a
  * wrapped-malloc-layer pointer from a client/privlib.
  */
 static inline size_t
-redirect_malloc_size_and_start(void *mem, OUT void **start_out)
+redirect_malloc_size_and_start(void *mem, DR_PARAM_OUT void **start_out,
+                               DR_PARAM_OUT size_t *requested_size)
 {
-    size_t *size_ptr = (size_t *)((ptr_uint_t)mem - sizeof(size_t));
+    size_t *size_ptr = (size_t *)((ptr_uint_t)mem - HEADER_WORD_SIZE);
     size_t size = *((size_t *)size_ptr);
     void *start = size_ptr;
-    if (TEST(REDIRECT_HEADER_SHIFTED, size)) {
-        start = size_ptr - 1;
-        size &= ~REDIRECT_HEADER_SHIFTED;
+    if (TESTANY(REDIRECT_EXTRA_HEADERS, size)) {
+        size_t offset = *(size_t *)((ptr_uint_t)mem - 2 * HEADER_WORD_SIZE);
+        start = (void *)((ptr_uint_t)mem - offset);
+        if (requested_size != NULL)
+            *requested_size = *(size_t *)((ptr_uint_t)mem - 3 * HEADER_WORD_SIZE);
+        size &= ~REDIRECT_EXTRA_HEADERS;
+    } else {
+        if (TESTANY(REDIRECT_HEADER_SHIFTED, size)) {
+            start = size_ptr - 1;
+            size &= ~REDIRECT_HEADER_SHIFTED;
+        }
+        if (requested_size != NULL) {
+            /* Subtract the header and extra size for alignment. */
+            *requested_size = size -
+                (ALIGN_FORWARD(HEADER_WORD_SIZE, HEAP_ALIGNMENT) +
+                 STANDARD_HEAP_ALIGNMENT - HEAP_ALIGNMENT);
+        }
     }
     if (start_out != NULL)
         *start_out = start;
@@ -1009,14 +1053,9 @@ redirect_malloc_requested_size(void *mem)
 {
     if (mem == NULL)
         return 0;
-    void *start;
-    size_t size = redirect_malloc_size_and_start(mem, &start);
-    size -= sizeof(size_t);
-    if (start != mem) {
-        /* Subtract the extra size for alignment. */
-        size -= sizeof(size_t);
-    }
-    return size;
+    size_t requested_size;
+    redirect_malloc_size_and_start(mem, NULL, &requested_size);
+    return requested_size;
 }
 
 /* This routine allocates memory from DR's global memory pool. Unlike
@@ -1072,7 +1111,7 @@ redirect_free(void *mem)
     if (mem == NULL)
         return;
     void *start;
-    size_t size = redirect_malloc_size_and_start(mem, &start);
+    size_t size = redirect_malloc_size_and_start(mem, &start, NULL);
     global_heap_free(start, size HEAPACCT(ACCT_LIBDUP));
 }
 
@@ -1130,5 +1169,116 @@ redirect_strdup_initonly(const char *str)
     CLIENT_ASSERT(!disallow_unsafe_static_calls || !dynamo_initialized || dynamo_exited,
                   "strdup invoked mid-run when disallowed by DR_DISALLOW_UNSAFE_STATIC");
     return redirect_strdup(str);
+}
+#endif
+
+#ifdef STANDALONE_UNIT_TEST
+/* Set enable_heap_alloc_address_override=true to have mock_global_heap_alloc() return
+ * heap_alloc_address_override.
+ * This is not thread safe but unit tests are assumed to be single-threaded.
+ */
+static bool enable_heap_alloc_address_override = false;
+static void *heap_alloc_address_override = NULL;
+
+static void *
+mock_global_heap_alloc(size_t size HEAPACCT(which_heap_t which))
+{
+    if (enable_heap_alloc_address_override) {
+        return (void *)heap_alloc_address_override;
+    } else {
+        return global_heap_alloc(size HEAPACCT(which));
+    }
+}
+
+void
+unit_test_redirect_heap(void)
+{
+    print_file(STDERR, "testing heap redirection routines\n");
+
+    ASSERT(STANDARD_HEAP_ALIGNMENT % HEAP_ALIGNMENT == 0);
+
+    void *p = redirect_malloc(HEAP_ALIGNMENT - 2);
+    ASSERT(ALIGNED(p, STANDARD_HEAP_ALIGNMENT));
+    ASSERT(redirect_malloc_requested_size(p) == HEAP_ALIGNMENT - 2);
+    p = redirect_realloc(p, HEAP_ALIGNMENT * 2 + 1);
+    ASSERT(ALIGNED(p, STANDARD_HEAP_ALIGNMENT));
+    ASSERT(redirect_malloc_requested_size(p) == HEAP_ALIGNMENT * 2 + 1);
+    redirect_free(p);
+
+    p = redirect_malloc(HEAP_ALIGNMENT);
+    ASSERT(ALIGNED(p, STANDARD_HEAP_ALIGNMENT));
+    ASSERT(redirect_malloc_requested_size(p) == HEAP_ALIGNMENT);
+    redirect_free(p);
+
+    p = redirect_malloc(STANDARD_HEAP_ALIGNMENT);
+    ASSERT(ALIGNED(p, STANDARD_HEAP_ALIGNMENT));
+    ASSERT(redirect_malloc_requested_size(p) == STANDARD_HEAP_ALIGNMENT);
+    redirect_free(p);
+
+    p = redirect_malloc(STANDARD_HEAP_ALIGNMENT * 2);
+    ASSERT(ALIGNED(p, STANDARD_HEAP_ALIGNMENT));
+    ASSERT(redirect_malloc_requested_size(p) == STANDARD_HEAP_ALIGNMENT * 2);
+    redirect_free(p);
+
+    p = redirect_aligned_alloc(1, 5);
+    ASSERT(redirect_malloc_requested_size(p) == 5);
+    redirect_free(p);
+
+    p = redirect_aligned_alloc(2, 3);
+    ASSERT(ALIGNED(p, 2));
+    ASSERT(redirect_malloc_requested_size(p) == 3);
+    redirect_free(p);
+
+    p = redirect_aligned_alloc(HEAP_ALIGNMENT, 3);
+    ASSERT(ALIGNED(p, HEAP_ALIGNMENT));
+    ASSERT(redirect_malloc_requested_size(p) == 3);
+    redirect_free(p);
+
+    p = redirect_aligned_alloc(STANDARD_HEAP_ALIGNMENT, 3);
+    ASSERT(ALIGNED(p, STANDARD_HEAP_ALIGNMENT));
+    ASSERT(redirect_malloc_requested_size(p) == 3);
+    redirect_free(p);
+
+    p = redirect_aligned_alloc(STANDARD_HEAP_ALIGNMENT * 2, HEAP_ALIGNMENT - 2);
+    ASSERT(ALIGNED(p, STANDARD_HEAP_ALIGNMENT * 2));
+    ASSERT(redirect_malloc_requested_size(p) == HEAP_ALIGNMENT - 2);
+    redirect_free(p);
+
+    p = redirect_aligned_alloc(STANDARD_HEAP_ALIGNMENT * 2, HEAP_ALIGNMENT);
+    ASSERT(ALIGNED(p, STANDARD_HEAP_ALIGNMENT * 2));
+    ASSERT(redirect_malloc_requested_size(p) == HEAP_ALIGNMENT);
+    redirect_free(p);
+
+    p = redirect_aligned_alloc(STANDARD_HEAP_ALIGNMENT * 2, STANDARD_HEAP_ALIGNMENT);
+    ASSERT(ALIGNED(p, STANDARD_HEAP_ALIGNMENT * 2));
+    ASSERT(redirect_malloc_requested_size(p) == STANDARD_HEAP_ALIGNMENT);
+    redirect_free(p);
+
+    p = redirect_aligned_alloc(STANDARD_HEAP_ALIGNMENT * 4, STANDARD_HEAP_ALIGNMENT + 2);
+    ASSERT(ALIGNED(p, STANDARD_HEAP_ALIGNMENT * 4));
+    ASSERT(redirect_malloc_requested_size(p) == STANDARD_HEAP_ALIGNMENT + 2);
+    redirect_free(p);
+
+    /* Test allocation where the backing memory has different HEAP_ALIGNMENT aligned
+     * offsets.
+     */
+    const size_t alignment = STANDARD_HEAP_ALIGNMENT * 2;
+    /* Allocate more backing memory than we need so there is room for the allocation's
+     * headers, alignment padding, and payload.
+     */
+    void *mem = redirect_malloc(8 * alignment);
+    ptr_uint_t base = ALIGN_FORWARD((ptr_uint_t)mem, alignment);
+    enable_heap_alloc_address_override = true;
+    for (size_t offset = 0; offset < alignment; offset += HEAP_ALIGNMENT) {
+        heap_alloc_address_override = (void *)(base + offset);
+        p = redirect_aligned_alloc(alignment, STANDARD_HEAP_ALIGNMENT);
+        ASSERT(ALIGNED(p, alignment));
+        ASSERT(redirect_malloc_requested_size(p) == STANDARD_HEAP_ALIGNMENT);
+        /* p is not a real allocation so don't free it. The backing memory is freed below.
+         */
+    }
+
+    enable_heap_alloc_address_override = false;
+    redirect_free(mem);
 }
 #endif

@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2021 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2022 Google, Inc.  All rights reserved.
  * Copyright (c) 2003-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -99,6 +99,7 @@ STATS_DEF("Re-takeovers after native", num_retakeover_after_native)
 #else
 RSTATS_DEF("Total signals delivered", num_signals)
 RSTATS_DEF("Total signals delivered to native threads", num_native_signals)
+RSTATS_DEF("Signals rerouted", num_signals_rerouted)
 RSTATS_DEF("Signals dropped", num_signals_dropped)
 RSTATS_DEF("Signals in coarse units delayed", num_signals_coarse_delayed)
 #endif
@@ -486,9 +487,7 @@ STATS_DEF("Fragments deleted after selfmod", num_fragments_deleted_selfmod)
 STATS_DEF("Fragments deleted for munmap or RO consistency",
           num_fragments_deleted_consistency)
 STATS_DEF("Fragments deleted for copy & replace", num_fragments_deleted_copy_and_replace)
-#ifdef CLIENT_INTERFACE
 STATS_DEF("Fragments deleted by client interface", num_fragments_deleted_client)
-#endif
 #ifdef SIDELINE
 STATS_DEF("Fragments deleted by sideline replacement", num_fragments_deleted_sideline)
 #endif
@@ -556,11 +555,9 @@ STATS_DEF("Trace fragments extended, ibl exits updated", num_traces_ibl_extended
 STATS_DEF("Trace fragments extended w/shared syscall block",
           num_traces_shared_syscall_extended)
 #endif
-#ifdef CUSTOM_TRACES
 STATS_DEF("Custom traces extended beyond normal stop", custom_traces_stop_late)
 STATS_DEF("Custom traces stopped early", custom_traces_stop_early)
 STATS_DEF("Shadowed bbs built for custom traces", custom_traces_bbs_built)
-#endif
 STATS_DEF("Recreated fragments, total", num_recreated_fragments)
 STATS_DEF("Recreated fragments, traces", num_recreated_traces)
 STATS_DEF("Recreations via app re-decode", recreate_via_app_ilist)
@@ -681,7 +678,7 @@ STATS_DEF("Waits due to shared cache barrier", num_wait_shared_barrier)
 
 STATS_DEF("Entrance hooks to DR", num_entering_DR)
 STATS_DEF("Exit hooks from DR", num_exiting_DR)
-STATS_DEF("Fcache exits, total", num_exits)
+RSTATS_DEF("Fcache exits, total", num_exits)
 STATS_DEF("Fcache exits, coarse-grain fragments", num_exits_coarse)
 STATS_DEF("Fcache exits, coarse-grain targeting trace head", num_exits_coarse_trace_head)
 STATS_DEF("Fcache exits, fine targeting th coarse", num_exits_fine2th_coarse)
@@ -697,9 +694,7 @@ STATS_DEF("Fcache exits, going native", num_exits_native)
 #ifdef HOT_PATCHING_INTERFACE
 STATS_DEF("Fcache exits, hot patching control flow change", num_exits_hot_patch)
 #endif
-#ifdef CLIENT_INTERFACE
 STATS_DEF("Fcache exits, client redirecting", num_exits_client_redirect)
-#endif
 STATS_DEF("Fcache entrances aborted b/c target missing", num_entrances_aborted)
 STATS_DEF("Fcache exits, from traces", num_trace_exits)
 STATS_DEF("Fcache exits, from BBs", num_bb_exits)
@@ -909,10 +904,8 @@ STATS_DEF("Peak total reserved memory", peak_reserved_memory_capacity)
 STATS_DEF("Guard pages, reserved virtual pages", guard_pages)
 STATS_DEF("Peak guard pages, reserved virtual pages", peak_guard_pages)
 
-#ifdef CLIENT_INTERFACE
 RSTATS_DEF("Current client raw mmap size", client_raw_mmap_size)
 RSTATS_DEF("Peak client raw mmap size", peak_client_raw_mmap_size)
-#endif
 RSTATS_DEF("Current stack capacity (bytes)", stack_capacity)
 RSTATS_DEF("Peak stack capacity (bytes)", peak_stack_capacity)
 STATS_DEF("Mmaps sharing stack alloc region", mmap_share_stack_region)

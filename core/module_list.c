@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2026 Google, Inc.  All rights reserved.
  * Copyright (c) 2008-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -65,7 +65,7 @@ os_get_module_info_lock(void)
 {
     if (loaded_module_areas != NULL)
         d_r_read_lock(&module_data_lock);
-    /* else we assume past exit: FIXME: best to have exited bool */
+    /* else we assume past exit: XXX: best to have exited bool */
 }
 
 void
@@ -82,7 +82,7 @@ os_get_module_info_write_lock(void)
 {
     if (loaded_module_areas != NULL)
         d_r_write_lock(&module_data_lock);
-    /* else we assume past exit: FIXME: best to have exited bool */
+    /* else we assume past exit: XXX: best to have exited bool */
 }
 
 void
@@ -90,7 +90,7 @@ os_get_module_info_write_unlock(void)
 {
     if (loaded_module_areas != NULL)
         d_r_write_unlock(&module_data_lock);
-    /* else we assume past exit: FIXME: best to have exited bool */
+    /* else we assume past exit: XXX: best to have exited bool */
 }
 
 bool
@@ -233,7 +233,8 @@ module_list_remove_mapping(module_area_t *ma, app_pc map_start, app_pc map_end)
     ASSERT(os_get_module_info_write_locked());
     vmvector_remove(loaded_module_areas, map_start, map_end);
     LOG(GLOBAL, LOG_INTERP | LOG_VMAREAS, 2,
-        "\tmodule %s segment [" PFX "," PFX "] removed\n",
+        "\tmodule %s %s segment [" PFX "," PFX "] removed\n",
+        ma->full_path == NULL ? "<no path>" : ma->full_path,
         (GET_MODULE_NAME(&ma->names) == NULL) ? "<no name>" : GET_MODULE_NAME(&ma->names),
         map_start, map_end);
 }
@@ -260,7 +261,8 @@ module_list_add(app_pc base, size_t view_size, bool at_map,
         ASSERT(ma != NULL);
 
         LOG(GLOBAL, LOG_INTERP | LOG_VMAREAS, 1,
-            "module %s |%s| [" PFX "," PFX "] added\n",
+            "module %s %s |%s| [" PFX "," PFX "] added\n",
+            ma->full_path == NULL ? "<no path>" : ma->full_path,
             (GET_MODULE_NAME(&ma->names) == NULL) ? "<no name>"
                                                   : GET_MODULE_NAME(&ma->names),
             ma->names.file_name == NULL ? "<no file>" : ma->names.file_name, base,
@@ -289,10 +291,8 @@ void
 module_list_remove(app_pc base, size_t view_size)
 {
     /* lookup and free module */
-#ifdef CLIENT_INTERFACE
     module_data_t *client_data = NULL;
     bool inform_client = false;
-#endif
     module_area_t *ma;
 
     /* note that vmvector_lookup doesn't protect the custom data,
@@ -309,14 +309,13 @@ module_list_remove(app_pc base, size_t view_size)
         (GET_MODULE_NAME(&ma->names) == NULL) ? "<no name>"
                                               : GET_MODULE_NAME(&ma->names));
 
-#ifdef CLIENT_INTERFACE
     /* inform clients of module unloads, we copy the data now and wait to
      * call the client till after we've released the module areas lock */
     if (CLIENTS_EXIST()
         /* don't notify for drearlyhelper* or other during-init modules */
         && dynamo_initialized
         /* don't notify for modules that were not executed (i#884) */
-        && TEST(MODULE_LOAD_EVENT, ma->flags)) {
+        && TESTANY(MODULE_LOAD_EVENT, ma->flags)) {
         client_data = copy_module_area_to_module_data(ma);
         inform_client = true;
     }
@@ -328,7 +327,6 @@ module_list_remove(app_pc base, size_t view_size)
     os_get_module_info_write_lock();
     ma = (module_area_t *)vmvector_lookup(loaded_module_areas, base);
     ASSERT_CURIOSITY(ma != NULL); /* loader can't have a race */
-#endif
 
     native_exec_module_unload(ma);
 
@@ -644,10 +642,9 @@ module_calculate_digest_helper(struct MD5Context *md5_full_cxt /* OPTIONAL */,
  */
 static bool
 ensure_section_readable(app_pc module_base, app_pc seg_start, size_t seg_len,
-                        uint seg_chars, OUT uint *old_prot, app_pc view_start,
+                        uint seg_chars, DR_PARAM_OUT uint *old_prot, app_pc view_start,
                         size_t view_len)
 {
-    int ok;
     app_pc intersection_start;
     size_t intersection_len;
 
@@ -658,7 +655,13 @@ ensure_section_readable(app_pc module_base, app_pc seg_start, size_t seg_len,
 
     /* on X86-32 as long as any of RWX is set the contents is readable */
     if (TESTANY(OS_IMAGE_EXECUTE | OS_IMAGE_READ | OS_IMAGE_WRITE, seg_chars)) {
-        ASSERT(is_readable_without_exception(intersection_start, intersection_len));
+        /* We're mid-load and on recent ld.so segments spanning a gap are mprotected
+         * to noaccess *before* their contents are mapped.  The text segment of
+         * interest should be mapped but we haven't yet updated allmem.
+         * Thus we must query the OS.
+         */
+        ASSERT(
+            is_readable_without_exception_query_os(intersection_start, intersection_len));
         return true;
     }
     /* such a mapping could potentially be used for some protection
@@ -671,15 +674,16 @@ ensure_section_readable(app_pc module_base, app_pc seg_start, size_t seg_len,
     SYSLOG_INTERNAL_WARNING("unreadable section @" PFX "\n", seg_start);
 #ifdef WINDOWS
     /* Preserve COW flags */
-    ok = protect_virtual_memory(intersection_start, intersection_len, PAGE_READONLY,
-                                old_prot);
+    DEBUG_DECLARE(bool ok =)
+    protect_virtual_memory(intersection_start, intersection_len, PAGE_READONLY, old_prot);
     ASSERT(ok);
     ASSERT_CURIOSITY(*old_prot == PAGE_NOACCESS ||
                      *old_prot == PAGE_WRITECOPY); /* expecting unmodifed even
                                                     * if writable */
 #else
     /* No other flags to preserve, should be no-access, so we ignore old_prot */
-    ok = os_set_protection(intersection_start, intersection_len, MEMPROT_READ);
+    DEBUG_DECLARE(bool ok =)
+    os_set_protection(intersection_start, intersection_len, MEMPROT_READ);
     ASSERT(ok);
 #endif
     return false;
@@ -735,7 +739,7 @@ restore_unreadable_section(app_pc module_base, app_pc seg_start, size_t seg_len,
  * larger than the mapped view size.
  */
 void
-module_calculate_digest(OUT module_digest_t *digest, app_pc module_base,
+module_calculate_digest(DR_PARAM_OUT module_digest_t *digest, app_pc module_base,
                         size_t module_size, bool full_digest, bool short_digest,
                         size_t short_digest_size, uint sec_char_include,
                         uint sec_char_exclude)
@@ -805,7 +809,7 @@ module_calculate_digest(OUT module_digest_t *digest, app_pc module_base,
     region_start = module_base + 0;
     region_len = module_get_header_size(module_base);
 
-    /* FIXME: note that if we want to provide/match an Authenticode
+    /* XXX: note that if we want to provide/match an Authenticode
      * hash we'd have to skip the Checksum field in the header - see
      * pecoff_v8 */
 
@@ -875,7 +879,7 @@ module_calculate_digest(OUT module_digest_t *digest, app_pc module_base,
         }
     });
 
-    /* FIXME: Note that if we did want to have an md5sum-matching
+    /* XXX: Note that if we did want to have an md5sum-matching
      * digest we'd have to append the module bytes with the extra
      * bytes that are only present on disk in our digest.  Since
      * usually quite small that could be handled by a read_file()

@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2014-2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2014-2026 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -121,7 +121,7 @@ set_up_bb_dups(void *drbbdup_ctx, void *drcontext, void *tag, instrlist_t *bb,
     *enable_dynamic_handling = false;
 
     /* Register the case encoding for counting the execution of hot basic blocks. */
-    drbbdup_register_case_encoding(drbbdup_ctx, (uintptr_t) true /* hot */);
+    drbbdup_register_case_encoding(drbbdup_ctx, (uintptr_t)true /* hot */);
 
     /* Set the default case encoding for tracking the hit count of basic blocks. */
     return 0; /* cold */
@@ -129,7 +129,7 @@ set_up_bb_dups(void *drbbdup_ctx, void *drcontext, void *tag, instrlist_t *bb,
 
 static void
 analyse_orig_bb(void *drcontext, void *tag, instrlist_t *bb, void *user_data,
-                IN void **orig_analysis_data)
+                DR_PARAM_IN void **orig_analysis_data)
 {
     /* Extract bb_pc and store it as analysis data. */
     app_pc *bb_pc = dr_thread_alloc(drcontext, sizeof(app_pc));
@@ -239,7 +239,7 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
         DR_ASSERT(false);
 
     /* register events */
-    dr_register_exit_event(event_exit);
+    drmgr_register_exit_event(event_exit);
 
     hashtable_init_ex(&hit_count_table, HASH_BITS, HASH_INTPTR, false /*!strdup*/,
                       false /*synchronization is external*/, destroy_hit_count, NULL,

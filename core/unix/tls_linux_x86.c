@@ -1,5 +1,5 @@
 /* *******************************************************************************
- * Copyright (c) 2010-2019 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2026 Google, Inc.  All rights reserved.
  * Copyright (c) 2011 Massachusetts Institute of Technology  All rights reserved.
  * Copyright (c) 2000-2010 VMware, Inc.  All rights reserved.
  * *******************************************************************************/
@@ -54,6 +54,7 @@
 #endif
 
 #include <asm/ldt.h>
+#include <errno.h>
 
 #ifdef X64
 /* Linux GDT layout in x86_64:
@@ -101,7 +102,7 @@ static bool on_WSL;
 /* Indicates that on the next request for a GDT entry, we should return the GDT
  * entry we stole for private library TLS.  The entry index is in
  * lib_tls_gdt_index.
- * FIXME i#107: For total segment transparency, we can use the same approach
+ * XXX i#107: For total segment transparency, we can use the same approach
  * with tls_gdt_index.
  */
 bool return_stolen_lib_tls_gdt;
@@ -215,7 +216,7 @@ print_all_ldt(void)
 
 /* returns -1 if all indices are in use */
 static int
-find_unused_ldt_index()
+find_unused_ldt_index(void)
 {
     int i, bytes;
     /* N.B.: we don't have 64K of stack for the full LDT_ENTRIES
@@ -309,7 +310,7 @@ choose_gdt_slots(os_local_state_t *os_tls)
     /* using local static b/c dynamo_initialized is not set for a client thread
      * when created in client's dr_client_main routine
      */
-    /* FIXME: Could be racy if we have multiple threads initializing during
+    /* XXX: Could be racy if we have multiple threads initializing during
      * startup.
      */
     if (tls_global_init)
@@ -365,7 +366,6 @@ choose_gdt_slots(os_local_state_t *os_tls)
     ASSERT_CURIOSITY(tls_gdt_index == (kernel_is_64bit() ? GDT_64BIT : GDT_32BIT));
 #endif
 
-#ifdef CLIENT_INTERFACE
     if (INTERNAL_OPTION(private_loader) && tls_gdt_index != -1) {
         /* Use the app's selector with our own TLS base for libraries.  app_fs
          * and app_gs are initialized by the caller in os_tls_app_seg_init().
@@ -397,7 +397,6 @@ choose_gdt_slots(os_local_state_t *os_tls)
          */
         lib_tls_gdt_index = SELECTOR_INDEX(os_tls->app_lib_tls_reg);
     }
-#endif
 }
 
 void
@@ -480,7 +479,7 @@ tls_thread_init(os_local_state_t *os_tls, byte *segment)
                     LOG(GLOBAL, LOG_THREADS, 1, "os_tls_init: using MSR\n");
                     tls_using_msr = true;
                 }
-                if (IF_CLIENT_INTERFACE_ELSE(INTERNAL_OPTION(private_loader), false)) {
+                if (INTERNAL_OPTION(private_loader)) {
                     res = dynamorio_syscall(SYS_arch_prctl, 2, ARCH_SET_FS,
                                             os_tls->os_seg_info.priv_lib_tls_base);
                     /* Assuming set fs must be successful if set gs succeeded. */
@@ -493,7 +492,7 @@ tls_thread_init(os_local_state_t *os_tls, byte *segment)
                     res);
             }
         } else {
-            /* FIXME PR 205276: we don't currently handle it: fall back on ldt, but
+            /* XXX PR 205276: we don't currently handle it: fall back on ldt, but
              * we'll have the same conflict w/ the selector...
              */
             ASSERT_BUG_NUM(205276, cur_gs == NULL);
@@ -545,7 +544,6 @@ tls_thread_init(os_local_state_t *os_tls, byte *segment)
                 res);
         }
 
-#ifdef CLIENT_INTERFACE
         /* Install the library TLS base. */
         if (INTERNAL_OPTION(private_loader) && res >= 0) {
             app_pc base = os_tls->os_seg_info.priv_lib_tls_base;
@@ -563,7 +561,6 @@ tls_thread_init(os_local_state_t *os_tls, byte *segment)
                 WRITE_LIB_SEG(selector);
             }
         }
-#endif
     }
 
     if (os_tls->tls_type == TLS_TYPE_NONE) {
@@ -586,7 +583,7 @@ tls_thread_init(os_local_state_t *os_tls, byte *segment)
 }
 
 bool
-tls_thread_preinit()
+tls_thread_preinit(void)
 {
 #ifdef X64
     /* i#3356: Write a non-zero value to the gs base to work around an AMD bug
@@ -662,12 +659,12 @@ tls_get_fs_gs_segment_base(uint seg)
     uint selector = read_thread_register(seg);
     uint index = SELECTOR_INDEX(selector);
     LOG(THREAD_GET, LOG_THREADS, 4, "%s selector %x index %d ldt %d\n", __func__,
-        selector, index, TEST(SELECTOR_IS_LDT, selector));
+        selector, index, TESTANY(SELECTOR_IS_LDT, selector));
 
     if (seg != SEG_FS && seg != SEG_GS)
         return (byte *)POINTER_MAX;
 
-    if (TEST(SELECTOR_IS_LDT, selector)) {
+    if (TESTANY(SELECTOR_IS_LDT, selector)) {
         LOG(THREAD_GET, LOG_THREADS, 4, "selector is LDT\n");
         /* we have to read the entire ldt from 0 to the index */
         size_t sz = sizeof(raw_ldt_entry_t) * (index + 1);
@@ -724,7 +721,7 @@ tls_get_fs_gs_segment_base(uint seg)
         }
     }
 #elif defined(ARM)
-    /* FIXME i#1551: NYI on ARM */
+    /* TODO i#1551: NYI on ARM */
     ASSERT_NOT_REACHED();
 #endif /* X86/ARM */
     return (byte *)POINTER_MAX;
@@ -764,20 +761,21 @@ tls_set_fs_gs_segment_base(tls_type_t tls_type, uint seg,
     }
     }
 #elif defined(ARM)
-    /* FIXME i#1551: NYI on ARM */
+    /* TODO i#1551: NYI on ARM */
     ASSERT_NOT_REACHED();
 #endif /* X86/ARM */
     return (res >= 0);
 }
 
 void
-tls_init_descriptor(our_modify_ldt_t *desc OUT, void *base, size_t size, uint index)
+tls_init_descriptor(our_modify_ldt_t *desc DR_PARAM_OUT, void *base, size_t size,
+                    uint index)
 {
     initialize_ldt_struct(desc, base, size, index);
 }
 
 bool
-tls_get_descriptor(int index, our_modify_ldt_t *desc OUT)
+tls_get_descriptor(int index, our_modify_ldt_t *desc DR_PARAM_OUT)
 {
     int res;
     /* No support for LDT here */
@@ -874,15 +872,88 @@ os_set_dr_seg(dcontext_t *dcontext, reg_id_t seg)
     ASSERT(res >= 0);
 }
 
+/* The kernel rejects an arch_prctl(ARCH_SET_GS) base at or above TASK_SIZE_MAX with
+ * EPERM.  TASK_SIZE_MAX is (1 << 47) - PAGE_SIZE with 4-level page tables and
+ * (1 << 56) - PAGE_SIZE with 5-level page tables.  The kernel does not report which
+ * one it uses, so on a processor that supports 5-level page tables we ask it once,
+ * with a base between the two limits, and remember.
+ */
+#    define SEG_BASE_LIMIT_4LEVEL ((reg_t)(1ULL << 47) - PAGE_SIZE)
+#    define SEG_BASE_LIMIT_5LEVEL ((reg_t)(1ULL << 56) - PAGE_SIZE)
+/* 1 if the kernel accepts bases below SEG_BASE_LIMIT_5LEVEL, 0 if only below
+ * SEG_BASE_LIMIT_4LEVEL, -1 if we have not asked yet.
+ */
+static int seg_base_limit_5level = -1;
+
+/* Sets the gs base to "base" with the kernel and returns its result.  On success the
+ * system call replaces our own TLS base, which we restore.
+ */
+static int
+probe_arch_set_gs(dcontext_t *dcontext, reg_t base)
+{
+    kernel_sigset_t oset;
+    /* Our signal handler needs our TLS base. */
+    block_all_noncrash_signals_except(&oset, 0);
+    int res = dynamorio_syscall(SYS_arch_prctl, 2, ARCH_SET_GS, base);
+    if (res == 0)
+        os_set_dr_seg(dcontext, SEG_GS);
+    dynamorio_syscall(SYS_rt_sigprocmask, 4, SIG_SETMASK, &oset, NULL, sizeof(oset));
+    return res;
+}
+
+/* Performs the app's arch_prctl(ARCH_SET_GS, base) without the system call, which
+ * would replace our own TLS base (i#1833).  Returns 0 or the negated errno value the
+ * kernel would return.
+ */
+int
+tls_handle_pre_arch_set_gs(dcontext_t *dcontext, reg_t base)
+{
+    os_local_state_t *os_tls = get_os_tls();
+    if (base >= SEG_BASE_LIMIT_5LEVEL)
+        return -EPERM;
+    if (base >= SEG_BASE_LIMIT_4LEVEL) {
+        if (seg_base_limit_5level < 0) {
+            int res = -EPERM;
+            if (proc_has_feature(FEATURE_LA57))
+                res = probe_arch_set_gs(dcontext, base);
+            if (res != 0 && res != -EPERM)
+                return res;
+            SELF_UNPROTECT_DATASEC(DATASEC_RARELY_PROT);
+            seg_base_limit_5level = (res == 0) ? 1 : 0;
+            SELF_PROTECT_DATASEC(DATASEC_RARELY_PROT);
+            LOG(GLOBAL, LOG_THREADS, 1, "kernel accepts gs bases below " PFX "\n",
+                res == 0 ? SEG_BASE_LIMIT_5LEVEL : SEG_BASE_LIMIT_4LEVEL);
+        }
+        if (seg_base_limit_5level == 0)
+            return -EPERM;
+    }
+    /* Since Linux 4.7 the kernel clears the selector and leaves the GDT TLS entries
+     * alone.
+     * XXX i#2088: new threads do not inherit the base we record here.
+     */
+    if (TLS_REG_LIB == SEG_GS) {
+        os_tls->app_lib_tls_reg = 0;
+        os_tls->app_lib_tls_base = (void *)base;
+    } else {
+        os_tls->app_alt_tls_reg = 0;
+        os_tls->app_alt_tls_base = (void *)base;
+    }
+    LOG(THREAD_GET, LOG_THREADS, 2, "thread " TIDFMT " app gs base => " PFX "\n",
+        d_r_get_thread_id(), base);
+    return 0;
+}
+
 void
 tls_handle_post_arch_prctl(dcontext_t *dcontext, int code, reg_t base)
 {
-    /* XXX: we can move it to pre_system_call to avoid system call. */
+    /* XXX: we can move the rest to pre_system_call to avoid system calls, as we did
+     * for ARCH_SET_GS.
+     */
     /* i#107 syscalls that might change/query app's segment */
     os_local_state_t *os_tls = get_os_tls();
     switch (code) {
     case ARCH_SET_FS: {
-        if (IF_CLIENT_INTERFACE_ELSE(INTERNAL_OPTION(private_loader), false)) {
+        if (INTERNAL_OPTION(private_loader)) {
             os_thread_data_t *ostd;
             our_modify_ldt_t *desc;
             /* update new value set by app */
@@ -904,29 +975,9 @@ tls_handle_post_arch_prctl(dcontext_t *dcontext, int code, reg_t base)
         break;
     }
     case ARCH_GET_FS: {
-        if (IF_CLIENT_INTERFACE_ELSE(INTERNAL_OPTION(private_loader), false)) {
+        if (INTERNAL_OPTION(private_loader)) {
             safe_write_ex((void *)base, sizeof(void *), &os_tls->app_lib_tls_base, NULL);
         }
-        break;
-    }
-    case ARCH_SET_GS: {
-        os_thread_data_t *ostd;
-        our_modify_ldt_t *desc;
-        /* update new value set by app */
-        if (TLS_REG_LIB == SEG_GS) {
-            os_tls->app_lib_tls_reg = read_thread_register(SEG_GS);
-            os_tls->app_lib_tls_base = (void *)base;
-        } else {
-            os_tls->app_alt_tls_reg = read_thread_register(SEG_GS);
-            os_tls->app_alt_tls_base = (void *)base;
-        }
-        /* update the app_thread_areas */
-        ostd = (os_thread_data_t *)dcontext->os_field;
-        desc = ostd->app_thread_areas;
-        desc[GS_TLS].entry_number = tls_min_index() + GS_TLS;
-        dynamorio_syscall(SYS_get_thread_area, 1, &desc[GS_TLS]);
-        /* set the value back to the value we are actually using */
-        os_set_dr_seg(dcontext, SEG_GS);
         break;
     }
     case ARCH_GET_GS: {

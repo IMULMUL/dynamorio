@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2012-2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2012-2026 Google, Inc.  All rights reserved.
  * Copyright (c) 2000-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -45,31 +45,23 @@
 #include "emit.h"
 #include "fcache.h"
 #include "monitor.h"
-#ifdef CUSTOM_TRACES
-#    include "instrument.h"
-#endif
+#include "instrument.h"
 #include "instr.h"
 #include "perscache.h"
 #include "disassemble.h"
 
-#ifdef CLIENT_INTERFACE
 /* in interp.c.  not declared in arch_exports.h to avoid having to go
  * make monitor_data_t opaque in globals.h.
  */
 extern bool
 mangle_trace(dcontext_t *dcontext, instrlist_t *ilist, monitor_data_t *md);
-#endif
 
 /* SPEC2000 applu has a trace head entry fragment of size 40K! */
 /* streamit's fft had a 944KB bb (ridiculous unrolling) */
 /* no reason to have giant traces, second half will become 2ndary trace */
 /* The instrumentation easily makes trace large,
  * so we should make the buffer size bigger, if a client is used.*/
-#ifdef CLIENT_INTERFACE
-#    define MAX_TRACE_BUFFER_SIZE MAX_FRAGMENT_SIZE
-#else
-#    define MAX_TRACE_BUFFER_SIZE (16 * 1024) /* in bytes */
-#endif
+#define MAX_TRACE_BUFFER_SIZE MAX_FRAGMENT_SIZE
 /* most traces are under 1024 bytes.
  * for x64, the rip-rel instrs prevent a memcpy on a resize
  */
@@ -87,13 +79,13 @@ mangle_trace(dcontext_t *dcontext, instrlist_t *ilist, monitor_data_t *md);
  * we don't support local unprotected so we use global
  */
 /* cannot use HEAPACCT here so we use ... */
-#define COUNTER_ALLOC(dc, ...)                         \
-    (TEST(SELFPROT_LOCAL, dynamo_options.protect_mask) \
-         ? global_unprotected_heap_alloc(__VA_ARGS__)  \
+#define COUNTER_ALLOC(dc, ...)                            \
+    (TESTANY(SELFPROT_LOCAL, dynamo_options.protect_mask) \
+         ? global_unprotected_heap_alloc(__VA_ARGS__)     \
          : heap_alloc(dc, __VA_ARGS__))
-#define COUNTER_FREE(dc, p, ...)                        \
-    (TEST(SELFPROT_LOCAL, dynamo_options.protect_mask)  \
-         ? global_unprotected_heap_free(p, __VA_ARGS__) \
+#define COUNTER_FREE(dc, p, ...)                          \
+    (TESTANY(SELFPROT_LOCAL, dynamo_options.protect_mask) \
+         ? global_unprotected_heap_free(p, __VA_ARGS__)   \
          : heap_free(dc, p, __VA_ARGS__))
 
 static void
@@ -123,7 +115,7 @@ delete_private_copy(dcontext_t *dcontext)
         }
         if (md->last_copy == dcontext->last_fragment)
             last_exit_deleted(dcontext);
-        if (TEST(FRAG_WAS_DELETED, md->last_copy->flags)) {
+        if (TESTANY(FRAG_WAS_DELETED, md->last_copy->flags)) {
             /* case 8083: private copy can't be deleted in trace_abort() since
              * needed for pc translation (at least until -safe_translate_flushed
              * is on by default), so if we come here later we must check
@@ -136,7 +128,7 @@ delete_private_copy(dcontext_t *dcontext)
             fragment_delete(dcontext, md->last_copy,
                             FRAGDEL_NO_MONITOR
                                 /* private fragments are invisible */
-                                IF_CLIENT_INTERFACE(| FRAGDEL_NO_HTABLE));
+                                | FRAGDEL_NO_HTABLE);
         }
         md->last_copy = NULL;
         STATS_INC(num_trace_private_deletions);
@@ -186,8 +178,7 @@ create_private_copy(dcontext_t *dcontext, fragment_t *f)
         /* for clients we make temp-private even when
          * thread-private versions already exist, so
          * we have to make them invisible */
-        IF_CLIENT_INTERFACE_ELSE(false, true) _IF_CLIENT(true /*for_trace*/)
-            _IF_CLIENT(md->pass_to_client ? &md->unmangled_bb_ilist : NULL));
+        false, true /*for_trace*/, md->pass_to_client ? &md->unmangled_bb_ilist : NULL);
     md->last_copy = md->last_fragment;
 
     STATS_INC(num_trace_private_copies);
@@ -198,23 +189,22 @@ create_private_copy(dcontext_t *dcontext, fragment_t *f)
         disassemble_fragment(dcontext, md->last_fragment, d_r_stats->loglevel <= 3);
     });
     KSTOP(temp_private_bb);
-    ASSERT(!TEST(FRAG_CANNOT_BE_TRACE, md->last_fragment->flags));
+    ASSERT(!TESTANY(FRAG_CANNOT_BE_TRACE, md->last_fragment->flags));
 }
 
-#ifdef CLIENT_INTERFACE
 static void
 extend_unmangled_ilist(dcontext_t *dcontext, fragment_t *f)
 {
     monitor_data_t *md = (monitor_data_t *)dcontext->monitor_field;
     if (md->pass_to_client) {
         instr_t *inst;
-        /* FIXME: pass out exit_type from build_basic_block_fragment instead
+        /* XXX: pass out exit_type from build_basic_block_fragment instead
          * of walking exit stubs here?
-         * FIXME: remove once we have PR 307284.
+         * XXX: remove once we have PR 307284.
          */
         linkstub_t *l;
         ASSERT(md->last_copy != NULL);
-        ASSERT(!TEST(FRAG_COARSE_GRAIN, md->last_copy->flags));
+        ASSERT(!TESTANY(FRAG_COARSE_GRAIN, md->last_copy->flags));
         for (l = FRAGMENT_EXIT_STUBS(md->last_copy); LINKSTUB_NEXT_EXIT(l) != NULL;
              l = LINKSTUB_NEXT_EXIT(l))
             ; /* nothing */
@@ -253,10 +243,9 @@ extend_unmangled_ilist(dcontext_t *dcontext, fragment_t *f)
     /* If any constituent block wants to store (or the final trace hook wants to),
      * then store for the trace.
      */
-    if (md->last_copy != NULL && TEST(FRAG_HAS_TRANSLATION_INFO, md->last_copy->flags))
+    if (md->last_copy != NULL && TESTANY(FRAG_HAS_TRANSLATION_INFO, md->last_copy->flags))
         md->trace_flags |= FRAG_HAS_TRANSLATION_INFO;
 }
-#endif
 
 bool
 mangle_trace_at_end(void)
@@ -265,17 +254,13 @@ mangle_trace_at_end(void)
      * unless there's a client bb or trace hook, for a for-cache trace
      * or a recreate-state trace.
      */
-#ifdef CLIENT_INTERFACE
     return (dr_bb_hook_exists() || dr_trace_hook_exists());
-#else
-    return false;
-#endif
 }
 
 /* Initialization */
 /* thread-shared init does nothing, thread-private init does it all */
 void
-d_r_monitor_init()
+d_r_monitor_init(void)
 {
     /* to reduce memory, we use ushorts for some offsets in fragment bodies,
      * so we have to stop a trace at that size
@@ -309,7 +294,7 @@ trace_abort_and_delete(dcontext_t *dcontext)
 }
 
 void
-d_r_monitor_exit()
+d_r_monitor_exit(void)
 {
     LOG(GLOBAL, LOG_MONITOR | LOG_STATS, 1, "Trace fragments generated: %d\n",
         GLOBAL_STAT(num_traces));
@@ -334,8 +319,8 @@ monitor_thread_init(dcontext_t *dcontext)
     reset_trace_state(dcontext, false /* link lock not needed */);
 
     /* case 7966: don't initialize un-needed things for hotp_only & thin_client
-     * FIXME: could set initial sizes to 0 for all configurations, instead
-     * FIXME: we can optimize even more to not allocate md at all, but would need
+     * XXX: could set initial sizes to 0 for all configurations, instead
+     * XXX: we can optimize even more to not allocate md at all, but would need
      * to have hotp_only checks in monitor_cache_exit(), etc.
      */
     if (RUNNING_WITHOUT_CODE_CACHE() || DYNAMO_OPTION(disable_traces))
@@ -440,14 +425,12 @@ reset_trace_state(dcontext_t *dcontext, bool grab_link_lock)
     uint i;
     /* reset the trace buffer */
     instrlist_init(&(md->trace));
-#ifdef CLIENT_INTERFACE
     if (instrlist_first(&md->unmangled_ilist) != NULL)
         instrlist_clear(dcontext, &md->unmangled_ilist);
     instrlist_init(&md->unmangled_ilist);
     if (md->unmangled_bb_ilist != NULL)
         instrlist_clear_and_destroy(dcontext, md->unmangled_bb_ilist);
     md->unmangled_bb_ilist = NULL;
-#endif
     md->trace_buf_top = 0;
     ASSERT(md->trace_vmlist == NULL);
     for (i = 0; i < md->num_blks; i++) {
@@ -462,7 +445,7 @@ reset_trace_state(dcontext_t *dcontext, bool grab_link_lock)
      * consistency). Unset the flag so that a trace can be built from it
      * in the future.
      */
-    if (TEST(FRAG_SHARED, md->trace_flags) && DYNAMO_OPTION(shared_bbs)) {
+    if (TESTANY(FRAG_SHARED, md->trace_flags) && DYNAMO_OPTION(shared_bbs)) {
         /* Look in the shared BB table only since we're only interested
          * if a shared BB is present. */
         fragment_t *bb = fragment_lookup_shared_bb(dcontext, md->trace_tag);
@@ -472,7 +455,7 @@ reset_trace_state(dcontext_t *dcontext, bool grab_link_lock)
          */
         if (grab_link_lock)
             acquire_recursive_lock(&change_linking_lock);
-        if (bb != NULL && TEST(FRAG_TRACE_BUILDING, bb->flags)) {
+        if (bb != NULL && TESTANY(FRAG_TRACE_BUILDING, bb->flags)) {
             /* The regenerate scenario is still racy w/respect to clearing the
              * flag. The regenerated fragment could have another thread building
              * a trace from it so the clear would be for the the wrong thread
@@ -495,7 +478,7 @@ reset_trace_state(dcontext_t *dcontext, bool grab_link_lock)
              * re-genned and so wouldn't be marked as FRAG_TRACE_BUILDING. It might
              * be marked as a trace head, though, so we don't assert anything about
              * that trait.
-             * FIXME We could add a strong ASSERT about the regen case if we added
+             * XXX We could add a strong ASSERT about the regen case if we added
              * a trace_head_id field to monitor_data_t. The field would store the id
              * of the shared BB trace head that caused trace building to begin. If
              * a shared trace head isn't found but a shared BB is, the shared BB
@@ -546,7 +529,7 @@ monitor_remove_fragment(dcontext_t *dcontext, fragment_t *f)
     monitor_data_t *md;
     /* may be a global fragment -- but we still want our local trace data */
     if (dcontext == GLOBAL_DCONTEXT) {
-        ASSERT(TEST(FRAG_SHARED, f->flags));
+        ASSERT(TESTANY(FRAG_SHARED, f->flags));
         dcontext = get_thread_private_dcontext();
         /* may still be null if exiting process -- in which case a nop for us */
         if (dcontext == NULL) {
@@ -568,15 +551,15 @@ monitor_remove_fragment(dcontext_t *dcontext, fragment_t *f)
      * Must check both last_fragment and last_exit.
      * May come here before last_exit is set, or may come here after
      * last_fragment is restored but before last_exit is used.
-     * FIXME: if we do manage to remove the check for last_fragment
+     * XXX: if we do manage to remove the check for last_fragment
      * here, remove the last_exit clear in end_and_emit_trace
      */
-    /* FIXME: case 5593 we may also unnecessarily abort a trace that
+    /* XXX: case 5593 we may also unnecessarily abort a trace that
      * starts at the next_tag and last_fragment is really not
      * related.
      */
     if ((md->last_fragment == f || dcontext->last_fragment == f) &&
-        !TEST(FRAG_TEMP_PRIVATE, f->flags)) {
+        !TESTANY(FRAG_TEMP_PRIVATE, f->flags)) {
         if (md->trace_tag != NULL) {
             LOG(THREAD, LOG_MONITOR, 2, "Aborting current trace since F%d was deleted\n",
                 f->id);
@@ -596,9 +579,9 @@ monitor_remove_fragment(dcontext_t *dcontext, fragment_t *f)
 static inline void
 unlink_ibt_trace_head(dcontext_t *dcontext, fragment_t *f)
 {
-    ASSERT(TEST(FRAG_IS_TRACE_HEAD, f->flags));
+    ASSERT(TESTANY(FRAG_IS_TRACE_HEAD, f->flags));
     if (DYNAMO_OPTION(shared_bb_ibt_tables)) {
-        ASSERT(TEST(FRAG_SHARED, f->flags));
+        ASSERT(TESTANY(FRAG_SHARED, f->flags));
         if (fragment_prepare_for_removal(GLOBAL_DCONTEXT, f)) {
             LOG(THREAD, LOG_FRAGMENT, 3, "  F%d(" PFX ") removed as trace head IBT\n",
                 f->id, f->tag);
@@ -633,7 +616,7 @@ unlink_ibt_trace_head(dcontext_t *dcontext, fragment_t *f)
                 i + 1, num_threads, threads[i]->id);
             ASSERT(is_thread_known(tgt_dcontext->owning_thread));
             fragment_prepare_for_removal(
-                TEST(FRAG_SHARED, f->flags) ? GLOBAL_DCONTEXT : tgt_dcontext, f);
+                TESTANY(FRAG_SHARED, f->flags) ? GLOBAL_DCONTEXT : tgt_dcontext, f);
         }
         global_heap_free(
             threads, num_threads * sizeof(thread_record_t *) HEAPACCT(ACCT_THREAD_MGT));
@@ -659,17 +642,16 @@ mark_trace_head(dcontext_t *dcontext_in, fragment_t *f, fragment_t *src_f,
     ASSERT(dcontext != NULL);
 
     LOG(THREAD, LOG_MONITOR, 3, "marking F%d (" PFX ") as trace head\n", f->id, f->tag);
-    ASSERT(!TEST(FRAG_IS_TRACE, f->flags));
+    ASSERT(!TESTANY(FRAG_IS_TRACE, f->flags));
     ASSERT(!NEED_SHARED_LOCK(f->flags) || self_owns_recursive_lock(&change_linking_lock));
 
     if (thcounter_lookup(dcontext, f->tag) == NULL) {
-    protected
-        = local_heap_protected(dcontext);
+        protected = local_heap_protected(dcontext);
         if (protected) {
             /* unprotect local heap */
             protect_local_heap(dcontext, WRITABLE);
         }
-        /* FIXME: private counter tables are used even for !shared_bbs since the
+        /* XXX: private counter tables are used even for !shared_bbs since the
          * counter field is not in fragment_t...
          * Move counters to Future for all uses, giving us persistent counters too!
          */
@@ -685,7 +667,7 @@ mark_trace_head(dcontext_t *dcontext_in, fragment_t *f, fragment_t *src_f,
     LOG(THREAD, LOG_MONITOR, 4, "unlinking incoming for new trace head F%d (" PFX ")\n",
         f->id, f->tag);
 
-    if (TEST(FRAG_COARSE_GRAIN, f->flags)) {
+    if (TESTANY(FRAG_COARSE_GRAIN, f->flags)) {
         /* For coarse trace heads, trace headness depends on the path taken
          * (more specifically, on the entrance stub taken).  If we don't have
          * any info on src_f we use f's unit.
@@ -699,12 +681,12 @@ mark_trace_head(dcontext_t *dcontext_in, fragment_t *f, fragment_t *src_f,
             /* See if there is an entrance stub for this target in the source unit */
             fragment_coarse_lookup_in_unit(dcontext, info, f->tag, &coarse_stub,
                                            &coarse_body);
-            /* FIXME: don't allow marking for frozen units w/ no src info:
-             * shouldn't happen, except perhaps CLIENT_INTERFACE
+            /* XXX: don't allow marking for frozen units w/ no src info:
+             * shouldn't happen, except perhaps with clients.
              */
             ASSERT(src_f != NULL || !info->frozen);
-            if (src_f != NULL && TEST(FRAG_COARSE_GRAIN, src_f->flags) && src_l != NULL &&
-                LINKSTUB_NORMAL_DIRECT(src_l->flags)) {
+            if (src_f != NULL && TESTANY(FRAG_COARSE_GRAIN, src_f->flags) &&
+                src_l != NULL && LINKSTUB_NORMAL_DIRECT(src_l->flags)) {
                 direct_linkstub_t *dl = (direct_linkstub_t *)src_l;
                 if (dl->stub_pc != NULL && coarse_is_entrance_stub(dl->stub_pc)) {
                     if (coarse_stub == NULL) {
@@ -721,7 +703,7 @@ mark_trace_head(dcontext_t *dcontext_in, fragment_t *f, fragment_t *src_f,
             }
             if (coarse_stub != NULL) {
                 ASSERT(coarse_is_entrance_stub(coarse_stub));
-                /* FIXME: our coarse lookups do not always mark trace headness
+                /* XXX: our coarse lookups do not always mark trace headness
                  * (in particular, fragment_coarse_link_wrapper() calling
                  * fragment_coarse_lookup_wrapper() does not), and we
                  * un-mark as trace heads when linking incoming (case 8907),
@@ -752,7 +734,7 @@ mark_trace_head(dcontext_t *dcontext_in, fragment_t *f, fragment_t *src_f,
                 /* id comparison could have a race w/ private frag gen so a curiosity */
                 ASSERT_CURIOSITY(
                     GLOBAL_STAT(num_fragments) == f->id ||
-                    (src_f != NULL && !TEST(FRAG_COARSE_GRAIN, src_f->flags)));
+                    (src_f != NULL && !TESTANY(FRAG_COARSE_GRAIN, src_f->flags)));
             }
         }
     } else
@@ -766,7 +748,7 @@ mark_trace_head(dcontext_t *dcontext_in, fragment_t *f, fragment_t *src_f,
      * steps w/ ok intermediate (go back to DR) is fine
      */
     /* must re-link incoming links to point to trace_head_incr routine
-     * FIXME: we get called in the middle of linking new fragments, so
+     * XXX: we get called in the middle of linking new fragments, so
      * we end up linking some incoming links twice (no harm done except
      * a waste of time) -- how fix it?
      * When fix it, change link_branch to assert that !already linked
@@ -794,8 +776,8 @@ should_be_trace_head_internal_unsafe(dcontext_t *dcontext, fragment_t *from_f,
     app_pc from_tag;
     uint from_flags;
 
-    if (DYNAMO_OPTION(disable_traces) || TEST(FRAG_IS_TRACE, to_flags) ||
-        TEST(FRAG_IS_TRACE_HEAD, to_flags) || TEST(FRAG_CANNOT_BE_TRACE, to_flags))
+    if (DYNAMO_OPTION(disable_traces) || TESTANY(FRAG_IS_TRACE, to_flags) ||
+        TESTANY(FRAG_IS_TRACE_HEAD, to_flags) || TESTANY(FRAG_CANNOT_BE_TRACE, to_flags))
         return false;
 
     /* We know that the to_flags pass the test. */
@@ -811,17 +793,17 @@ should_be_trace_head_internal_unsafe(dcontext_t *dcontext, fragment_t *from_f,
      * Watch out -- since we stop building traces at trace heads,
      * too many can hurt performance, especially if bbs do not follow
      * direct ctis.  We can use shadowed bbs to go through trace
-     * head and trace boundaries (CUSTOM_TRACES).
+     * head and trace boundaries for custom traces.
      */
     /* trace heads can be created across private/shared cache bounds */
-    if (TEST(FRAG_IS_TRACE, from_flags) ||
+    if (TESTANY(FRAG_IS_TRACE, from_flags) ||
         (to_tag <= from_tag && LINKSTUB_DIRECT(from_l->flags)))
         return true;
 
     DOSTATS({
-        if (!DYNAMO_OPTION(disable_traces) && !TEST(FRAG_IS_TRACE, to_flags) &&
-            !TEST(FRAG_IS_TRACE_HEAD, to_flags) &&
-            !TEST(FRAG_CANNOT_BE_TRACE, to_flags)) {
+        if (!DYNAMO_OPTION(disable_traces) && !TESTANY(FRAG_IS_TRACE, to_flags) &&
+            !TESTANY(FRAG_IS_TRACE_HEAD, to_flags) &&
+            !TESTANY(FRAG_CANNOT_BE_TRACE, to_flags)) {
             STATS_INC(num_wannabe_traces);
         }
     });
@@ -846,7 +828,7 @@ should_be_trace_head_internal_unsafe(dcontext_t *dcontext, fragment_t *from_f,
  * If the link stub is non-NULL, trace_sysenter_exit does NOT need to
  * be set.
  *
- * FIXME This is a stopgap soln. The long-term fix is to not count on
+ * XXX This is a stopgap soln. The long-term fix is to not count on
  * a link stub being passed in but rather pass in the most recent fragment's
  * flags & tag explicitly. The flags & tag can be stored in a dcontext-private
  * monitor structure, one that is not shared across call backs.
@@ -910,9 +892,9 @@ check_for_trace_head(dcontext_t *dcontext, fragment_t *from_f, linkstub_t *from_
         uint th = should_be_trace_head_internal(dcontext, from_f, from_l, to_f->tag,
                                                 to_f->flags, have_link_lock,
                                                 trace_sysenter_exit);
-        if (TEST(TRACE_HEAD_YES, th)) {
+        if (TESTANY(TRACE_HEAD_YES, th)) {
             mark_trace_head(dcontext, to_f, from_f, from_l);
-            if (TEST(TRACE_HEAD_OBTAINED_LOCK, th))
+            if (TESTANY(TRACE_HEAD_OBTAINED_LOCK, th))
                 release_recursive_lock(&change_linking_lock);
             return true;
         }
@@ -931,21 +913,21 @@ monitor_is_linkable(dcontext_t *dcontext, fragment_t *from_f, linkstub_t *from_l
                     fragment_t *to_f, bool have_link_lock, bool mark_new_trace_head)
 {
     /* common case: both traces */
-    if (TEST(FRAG_IS_TRACE, from_f->flags) && TEST(FRAG_IS_TRACE, to_f->flags))
+    if (TESTANY(FRAG_IS_TRACE, from_f->flags) && TESTANY(FRAG_IS_TRACE, to_f->flags))
         return true;
     if (DYNAMO_OPTION(disable_traces))
         return true;
 #ifndef TRACE_HEAD_CACHE_INCR
     /* no link case -- block is a trace head */
-    if (TEST(FRAG_IS_TRACE_HEAD, to_f->flags) && !DYNAMO_OPTION(disable_traces))
+    if (TESTANY(FRAG_IS_TRACE_HEAD, to_f->flags) && !DYNAMO_OPTION(disable_traces))
         return false;
 #endif
     if (mark_new_trace_head) {
         uint th = should_be_trace_head(dcontext, from_f, from_l, to_f->tag, to_f->flags,
                                        have_link_lock);
-        if (TEST(TRACE_HEAD_YES, th)) {
+        if (TESTANY(TRACE_HEAD_YES, th)) {
             mark_trace_head(dcontext, to_f, from_f, from_l);
-            if (TEST(TRACE_HEAD_OBTAINED_LOCK, th))
+            if (TESTANY(TRACE_HEAD_OBTAINED_LOCK, th))
                 release_recursive_lock(&change_linking_lock);
 #ifdef TRACE_HEAD_CACHE_INCR
             /* fine to link to trace head
@@ -964,7 +946,7 @@ monitor_is_linkable(dcontext_t *dcontext, fragment_t *from_f, linkstub_t *from_l
  * hold add_size more bytes.
  * If the resulting size will exceed the maximum trace
  * buffer size, returns false, else returns true.
- * FIXME: now that we have a real max limit on emitted trace size,
+ * XXX: now that we have a real max limit on emitted trace size,
  * should we have an unbounded trace buffer size?
  * Also increases the size of the block array if necessary.
  */
@@ -1101,8 +1083,8 @@ get_and_check_add_size(dcontext_t *dcontext, fragment_t *f, uint *res_add_size,
     uint total_size = md->emitted_size + add_size + prev_mangle_size;
     /* check whether adding f will push the trace over the edge */
     bool ok = (total_size <= MAX_FRAGMENT_SIZE);
-    ASSERT(!TEST(FRAG_SELFMOD_SANDBOXED, f->flags)); /* no support for selfmod */
-    ASSERT(!TEST(FRAG_IS_TRACE, f->flags));          /* no support for traces */
+    ASSERT(!TESTANY(FRAG_SELFMOD_SANDBOXED, f->flags)); /* no support for selfmod */
+    ASSERT(!TESTANY(FRAG_IS_TRACE, f->flags));          /* no support for traces */
     LOG(THREAD, LOG_MONITOR, 4,
         "checking trace size: currently %d, add estimate %d\n"
         "\t(body: %d, stubs: %d, pad: %d, mangle est: %d)\n"
@@ -1127,7 +1109,10 @@ get_and_check_add_size(dcontext_t *dcontext, fragment_t *f, uint *res_add_size,
 static inline uint
 trace_flags_from_component_flags(uint flags)
 {
-    return (flags & (FRAG_HAS_SYSCALL | FRAG_HAS_DIRECT_CTI IF_X86_64(| FRAG_32_BIT)));
+    return (flags &
+            (FRAG_HAS_SYSCALL |
+             FRAG_HAS_DIRECT_CTI IF_X86_64(
+                 | FRAG_32_BIT IF_LINUX(| FRAG_HAS_RSEQ_ENDPOINT))));
 }
 
 static inline uint
@@ -1163,10 +1148,8 @@ end_and_emit_trace(dcontext_t *dcontext, fragment_t *cur_f)
     bool replace_trace_head = false;
     fragment_t wrapper;
     uint i;
-#if defined(DEBUG) || defined(INTERNAL) || defined(CLIENT_INTERFACE)
     /* was the trace passed through optimizations or the client interface? */
-    bool externally_mangled = false;
-#endif
+    DEBUG_DECLARE(bool externally_mangled = false;)
     /* we cannot simply upgrade a basic block fragment
      * to a trace b/c traces have prefixes that basic blocks don't!
      */
@@ -1183,21 +1166,20 @@ end_and_emit_trace(dcontext_t *dcontext, fragment_t *cur_f)
                     STATS_INC(num_traces_end_at_ibl_syscall);
                 else
                     STATS_INC(num_traces_end_at_ibl_ind_jump);
-            } else if (TEST(LINK_RETURN, dcontext->last_exit->flags)) {
+            } else if (TESTANY(LINK_RETURN, dcontext->last_exit->flags)) {
                 STATS_INC(num_traces_end_at_ibl_return);
             };
         }
     });
 
-#ifdef CLIENT_INTERFACE
     if (md->pass_to_client) {
         /* PR 299808: we pass the unmangled ilist we've been maintaining to the
          * client, and we have to then re-mangle and re-connect.
          */
         dr_emit_flags_t emitflags =
             instrument_trace(dcontext, tag, &md->unmangled_ilist, false /*!recreating*/);
-        externally_mangled = true;
-        if (TEST(DR_EMIT_STORE_TRANSLATIONS, emitflags)) {
+        DODEBUG(externally_mangled = true;);
+        if (TESTANY(DR_EMIT_STORE_TRANSLATIONS, emitflags)) {
             /* PR 214962: let client request storage instead of recreation */
             md->trace_flags |= FRAG_HAS_TRANSLATION_INFO;
         } /* else, leave translation flag if any bb requested it */
@@ -1213,7 +1195,6 @@ end_and_emit_trace(dcontext_t *dcontext, fragment_t *cur_f)
         md->trace = md->unmangled_ilist;
         instrlist_init(&md->unmangled_ilist);
     }
-#endif
 
     if (INTERNAL_OPTION(cbr_single_stub) &&
         final_exit_shares_prev_stub(dcontext, trace, md->trace_flags)) {
@@ -1227,25 +1208,29 @@ end_and_emit_trace(dcontext_t *dcontext, fragment_t *cur_f)
         md->emitted_size -= local_exit_stub_size(dcontext, target, md->trace_flags);
     }
 
+    /* XXX i#5062 In the future this call should be placed inside mangle_trace() */
+    IF_AARCH64(md->emitted_size += fixup_indirect_trace_exit(dcontext, trace));
+    IF_RISCV64(ASSERT_NOT_IMPLEMENTED(false));
+
     if (DYNAMO_OPTION(speculate_last_exit)
 #ifdef HASHTABLE_STATISTICS
         || INTERNAL_OPTION(speculate_last_exit_stats) ||
         INTERNAL_OPTION(stay_on_trace_stats)
 #endif
     ) {
-        /* FIXME: speculation of last exit (case 4817) is currently
+        /* XXX: speculation of last exit (case 4817) is currently
          * only implemented for traces.  If we have a sharable version
          * of fixup_last_cti() to pass that information based on instr
          * list information about last exit we can use in
          * emit_fragment_common().  That way both bb's and traces may
          * have speculation added.
          */
-        if (TEST(FRAG_MUST_END_TRACE, cur_f->flags)) {
+        if (TESTANY(FRAG_MUST_END_TRACE, cur_f->flags)) {
             /* This routine may be also reached on MUST_END_TRACE
              * and in that case we haven't executed yet the last
              * bb, so don't really know how to fix the last IBL
              */
-            /* FIXME: add a stat when such are ending at an IBL */
+            /* XXX: add a stat when such are ending at an IBL */
 
             ASSERT_CURIOSITY(dcontext->next_tag == cur_f->tag);
             STATS_INC(num_traces_at_must_end_trace);
@@ -1308,7 +1293,7 @@ end_and_emit_trace(dcontext_t *dcontext, fragment_t *cur_f)
 #    endif
     ) {
         optimize_trace(dcontext, tag, trace);
-        externally_mangled = true;
+        DODEBUG(externally_mangled = true;);
     }
 #endif /* INTERNAL */
 
@@ -1321,7 +1306,7 @@ end_and_emit_trace(dcontext_t *dcontext, fragment_t *cur_f)
 
 #ifdef SIDELINE
     if (dynamo_options.sideline) {
-        /* FIXME: add size to emitted_size when start building trace to
+        /* XXX: add size to emitted_size when start building trace to
          * ensure room in buffer and in cache
          */
         add_sideline_prefix(dcontext, trace);
@@ -1332,7 +1317,7 @@ end_and_emit_trace(dcontext_t *dcontext, fragment_t *cur_f)
      * for private traces:
      *   this way we use the head of FIFO for all our private copies, and
      *   then replace w/ the trace, avoiding any fragmentation from the copies.
-     * for shared traces: FIXME: case 5137: move temps to private bb cache?
+     * for shared traces: XXX: case 5137: move temps to private bb cache?
      */
     if (md->last_copy != NULL) {
         if (cur_f == md->last_copy)
@@ -1346,21 +1331,21 @@ end_and_emit_trace(dcontext_t *dcontext, fragment_t *cur_f)
      * moment and if there's a conflict the loser tosses his trace.
      * We hold the lock across the trace head removal as well to avoid races there.
      */
-    if (TEST(FRAG_SHARED, md->trace_flags)) {
+    if (TESTANY(FRAG_SHARED, md->trace_flags)) {
         ASSERT(DYNAMO_OPTION(shared_traces));
         d_r_mutex_lock(&trace_building_lock);
         /* we left the bb there, so we rely on any shared trace shadowing it */
         trace_f = fragment_lookup_trace(dcontext, tag);
         if (trace_f != NULL) {
             /* someone beat us to it!  tough luck -- throw it all away */
-            ASSERT(TEST(FRAG_IS_TRACE, trace_f->flags));
+            ASSERT(TESTANY(FRAG_IS_TRACE, trace_f->flags));
             d_r_mutex_unlock(&trace_building_lock);
             trace_abort(dcontext);
             STATS_INC(num_aborted_traces_race);
 #ifdef DEBUG
             /* We expect to see this very rarely since we expect to detect
              * practically all races (w/shared BBs anyway) much earlier.
-             * FIXME case 8769: we may need another way to prevent races w/
+             * XXX case 8769: we may need another way to prevent races w/
              * -coarse_units!
              */
             if (DYNAMO_OPTION(shared_bbs) && !DYNAMO_OPTION(coarse_units))
@@ -1378,13 +1363,13 @@ end_and_emit_trace(dcontext_t *dcontext, fragment_t *cur_f)
      * over to the new trace (and if the trace is deleted we transfer the
      * links back).  We leave them alone otherwise, shadowed in both the DR
      * lookup tables and ibl tables.
-     * FIXME: trace head left w/ no incoming -- will this break assumptions?
+     * XXX: trace head left w/ no incoming -- will this break assumptions?
      * What if someone who held ptr before trace emit, or does a different
      * lookup, tries to mess w/ trace head's links?
      */
     if (cur_f != NULL && cur_f->tag == tag) {
         /* Optimization: could repeat for shared as well but we don't bother */
-        if (!TEST(FRAG_SHARED, cur_f->flags))
+        if (!TESTANY(FRAG_SHARED, cur_f->flags))
             trace_head_f = cur_f;
         /* Yipes, we're deleting the fragment we're supposed to execute next.
          * Set cur_f to NULL even if not deleted, since we want to
@@ -1405,24 +1390,20 @@ end_and_emit_trace(dcontext_t *dcontext, fragment_t *cur_f)
          */
         if (trace_head_f == dcontext->last_fragment)
             last_exit_deleted(dcontext);
-#ifdef CUSTOM_TRACES
         /* If the trace is private, don't delete the head: the trace will simply
          * shadow it.  If the trace is shared, we have to delete it.  We'll re-create
          * the head as a shared bb if we ever do build a custom trace through it.
          */
-        if (!TEST(FRAG_SHARED, md->trace_flags)) {
+        if (!TESTANY(FRAG_SHARED, md->trace_flags)) {
             replace_trace_head = true;
             /* we can't have our trace_head_f clobbered below */
             CLIENT_ASSERT(!DYNAMO_OPTION(shared_bbs),
                           "invalid private trace head and "
-                          "private traces but -shared_bbs for CUSTOM_TRACES");
+                          "private traces but -shared_bbs for custom traces");
         } else {
-#endif
             fragment_delete(dcontext, trace_head_f,
                             FRAGDEL_NO_OUTPUT | FRAGDEL_NO_MONITOR);
-#ifdef CUSTOM_TRACES
         }
-#endif
         if (!replace_trace_head) {
             trace_head_f = NULL;
             STATS_INC(num_fragments_deleted_trace_heads);
@@ -1432,15 +1413,15 @@ end_and_emit_trace(dcontext_t *dcontext, fragment_t *cur_f)
     if (DYNAMO_OPTION(shared_bbs)) {
         trace_head_f = fragment_lookup_fine_and_coarse_sharing(dcontext, tag, &wrapper,
                                                                NULL, FRAG_SHARED);
-        if (!TEST(FRAG_SHARED, md->trace_flags)) {
+        if (!TESTANY(FRAG_SHARED, md->trace_flags)) {
             /* trace is private, so we can emit as a shadow of trace head */
         } else if (trace_head_f != NULL) {
             /* we don't remove until after emitting a shared trace to avoid races
              * with trace head being re-created before the trace is visible
              */
             replace_trace_head = true;
-            if (!TEST(FRAG_IS_TRACE_HEAD, trace_head_f->flags)) {
-                ASSERT(TEST(FRAG_COARSE_GRAIN, trace_head_f->flags));
+            if (!TESTANY(FRAG_IS_TRACE_HEAD, trace_head_f->flags)) {
+                ASSERT(TESTANY(FRAG_COARSE_GRAIN, trace_head_f->flags));
                 /* local wrapper so change_linking_lock not needed to change flags */
                 trace_head_f->flags |= FRAG_IS_TRACE_HEAD;
             }
@@ -1450,7 +1431,7 @@ end_and_emit_trace(dcontext_t *dcontext, fragment_t *cur_f)
     /* Prevent deletion of last_fragment, which may be in the same
      * cache as our trace (esp. w/ a MUST_END_TRACE trace head, since then the
      * last_fragment can be another trace) from clobbering our trace!
-     * FIXME: would be cleaner to remove the need to abort the trace if
+     * XXX: would be cleaner to remove the need to abort the trace if
      * last_fragment is deleted, but tricky to do that (see
      * monitor_remove_fragment).  Could also use a special monitor_data_t field
      * saying "ignore last_exit, I'm emitting now."
@@ -1464,9 +1445,6 @@ end_and_emit_trace(dcontext_t *dcontext, fragment_t *cur_f)
 
     /* emit trace fragment into fcache with tag value */
     if (replace_trace_head) {
-#ifndef CUSTOM_TRACES
-        ASSERT(TEST(FRAG_SHARED, md->trace_flags));
-#endif
         trace_f = emit_fragment_as_replacement(dcontext, tag, trace, md->trace_flags,
                                                md->trace_vmlist, trace_head_f);
     } else {
@@ -1476,7 +1454,7 @@ end_and_emit_trace(dcontext_t *dcontext, fragment_t *cur_f)
     ASSERT(trace_f != NULL);
     /* our estimate should be conservative
      * if externally mangled, all bets are off for now --
-     * FIXME: would be nice to gracefully handle opt or client
+     * XXX: would be nice to gracefully handle opt or client
      * making the trace too big, and pass back an error msg?
      * Perhaps have lower size bounds when optimization or client
      * interface are on.
@@ -1486,7 +1464,7 @@ end_and_emit_trace(dcontext_t *dcontext, fragment_t *cur_f)
     ASSERT(trace_f->size <= md->emitted_size || externally_mangled);
     /* our calculations should be exact, actually */
     /* with -pad_jmps not exact anymore, we should be able to figure out
-     * by how much though FIXME */
+     * by how much though XXX */
     ASSERT_CURIOSITY(trace_f->size == md->emitted_size || externally_mangled ||
                      PAD_FRAGMENT_JMPS(trace_f->flags));
     trace_tr = TRACE_FIELDS(trace_f);
@@ -1497,7 +1475,7 @@ end_and_emit_trace(dcontext_t *dcontext, fragment_t *cur_f)
     for (i = 0; i < md->num_blks; i++)
         trace_tr->bbs[i] = md->blk_info[i].info;
 
-    if (TEST(FRAG_SHARED, md->trace_flags))
+    if (TESTANY(FRAG_SHARED, md->trace_flags))
         d_r_mutex_unlock(&trace_building_lock);
 
     RSTATS_INC(num_traces);
@@ -1534,15 +1512,14 @@ end_and_emit_trace(dcontext_t *dcontext, fragment_t *cur_f)
      */
     /* remove shared trace head fragment */
     if (trace_head_f != NULL && DYNAMO_OPTION(shared_bbs) &&
-        TEST(FRAG_SHARED, md->trace_flags) &&
+        TESTANY(FRAG_SHARED, md->trace_flags) &&
         /* We leave the head in the coarse table and let the trace shadow it.
          * If we were to remove it we would need a solution to finding it for
          * pc translation, which currently walks the htable.
          */
-        !TEST(FRAG_COARSE_GRAIN, trace_head_f->flags) &&
+        !TESTANY(FRAG_COARSE_GRAIN, trace_head_f->flags) &&
         /* if both shared only remove if option on, and no custom tracing */
-        IF_CUSTOM_TRACES(!dr_end_trace_hook_exists() &&)
-            INTERNAL_OPTION(remove_shared_trace_heads)) {
+        !dr_end_trace_hook_exists() && INTERNAL_OPTION(remove_shared_trace_heads)) {
         fragment_remove_shared_no_flush(dcontext, trace_head_f);
         trace_head_f = NULL;
     }
@@ -1553,8 +1530,9 @@ end_and_emit_trace(dcontext_t *dcontext, fragment_t *cur_f)
         for (i = 1 /*skip trace head*/; i < md->num_blks; i++) {
             f = fragment_lookup_bb(dcontext, md->blk_info[i].info.tag);
             if (f != NULL) {
-                if (TEST(FRAG_SHARED, f->flags) && !TEST(FRAG_COARSE_GRAIN, f->flags)) {
-                    /* FIXME: grab locks up front instead of on each delete */
+                if (TESTANY(FRAG_SHARED, f->flags) &&
+                    !TESTANY(FRAG_COARSE_GRAIN, f->flags)) {
+                    /* XXX: grab locks up front instead of on each delete */
                     fragment_remove_shared_no_flush(dcontext, f);
                     trace_head_f = NULL; /* be safe */
                 } else
@@ -1578,7 +1556,7 @@ end_and_emit_trace(dcontext_t *dcontext, fragment_t *cur_f)
      * to reset_trace_state() just above.
      */
     if (trace_head_f != NULL)
-        ASSERT(!TEST(FRAG_TRACE_BUILDING, trace_head_f->flags));
+        ASSERT(!TESTANY(FRAG_TRACE_BUILDING, trace_head_f->flags));
 #endif
 
 end_and_emit_trace_return:
@@ -1607,9 +1585,7 @@ internal_extend_trace(dcontext_t *dcontext, fragment_t *f, linkstub_t *prev_l,
     bool have_locks = false;
     DEBUG_DECLARE(uint pre_emitted_size = md->emitted_size;)
 
-#ifdef CLIENT_INTERFACE
     extend_unmangled_ilist(dcontext, f);
-#endif
 
     /* if prev_l is fake, NULL it out */
     if (is_ibl_sourceless_linkstub((const linkstub_t *)prev_l)) {
@@ -1620,7 +1596,7 @@ internal_extend_trace(dcontext_t *dcontext, fragment_t *f, linkstub_t *prev_l,
            /* we track the ordinal of the del linkstub so it's ok */
            prev_l == get_deleted_linkstub(dcontext));
 
-    if (TEST(FRAG_SHARED, f->flags)) {
+    if (TESTANY(FRAG_SHARED, f->flags)) {
         /* Case 8419: we must hold a lock to ensure f is not
          * fragment_remove_shared_no_flush()-ed underneath us, eliminating its
          * also fields needed for vm_area_add_to_list() (plus w/ the also field
@@ -1631,7 +1607,7 @@ internal_extend_trace(dcontext_t *dcontext, fragment_t *f, linkstub_t *prev_l,
         SHARED_FLAGS_RECURSIVE_LOCK(f->flags, acquire, change_linking_lock);
         acquire_vm_areas_lock(dcontext, f->flags);
     }
-    if (TEST(FRAG_WAS_DELETED, f->flags)) {
+    if (TESTANY(FRAG_WAS_DELETED, f->flags)) {
         /* We cannot continue if f is FRAG_WAS_DELETED (case 8419) since
          * fragment_t.also is now invalid!
          */
@@ -1649,7 +1625,7 @@ internal_extend_trace(dcontext_t *dcontext, fragment_t *f, linkstub_t *prev_l,
      * of the previous block (thus including only f->size and the exit stub
      * size changes), which we calculate in extend_trace.
      * Existing custom stub code should already be in f->size.
-     * FIXME: if we ever have decode_fragment() convert, say, dcontext
+     * XXX: if we ever have decode_fragment() convert, say, dcontext
      * save/restore to tls, then we'll have to add in its size increases
      * as well.
      */
@@ -1683,7 +1659,7 @@ internal_extend_trace(dcontext_t *dcontext, fragment_t *f, linkstub_t *prev_l,
     /* For FRAG_MUST_END_TRACE fragments emit trace immediately to prevent
      * trace aborts due to syscalls and callbacks.  See case 3541.
      */
-    if (TEST(FRAG_MUST_END_TRACE, f->flags)) {
+    if (TESTANY(FRAG_MUST_END_TRACE, f->flags)) {
         /* We don't need to unlink f, but we would need to set FRAG_CANNOT_DELETE to
          * prevent its deletion during emitting from clobbering the trace in the case
          * that last_fragment==f (requires that f targets itself, and f is
@@ -1695,8 +1671,8 @@ internal_extend_trace(dcontext_t *dcontext, fragment_t *f, linkstub_t *prev_l,
         return end_and_emit_trace(dcontext, f);
     }
 
-    ASSERT(!TEST(FRAG_SHARED, f->flags));
-    if (TEST(FRAG_TEMP_PRIVATE, f->flags)) {
+    ASSERT(!TESTANY(FRAG_SHARED, f->flags));
+    if (TESTANY(FRAG_TEMP_PRIVATE, f->flags)) {
         /* We make a private copy earlier for everything other than a normal
          * thread private fragment.
          */
@@ -1725,17 +1701,13 @@ internal_extend_trace(dcontext_t *dcontext, fragment_t *f, linkstub_t *prev_l,
             f->id, f->tag);
     }
 
-#ifdef CUSTOM_TRACES
     /* may end up going through trace head, etc. that isn't linked */
     if ((f->flags & FRAG_LINKED_OUTGOING) != 0) {
-#endif
         /* unlink so monitor invoked on fragment exit */
         unlink_fragment_outgoing(dcontext, f);
         LOG(THREAD, LOG_MONITOR | LOG_LINKS, 4, "monitor unlinked F%d (" PFX ")\n", f->id,
             f->tag);
-#ifdef CUSTOM_TRACES
     }
-#endif
 
     SHARED_FLAGS_RECURSIVE_LOCK(f->flags, release, change_linking_lock);
 
@@ -1783,7 +1755,7 @@ internal_restore_last(dcontext_t *dcontext)
      * Do NOT reset last_fragment_flags as that field is needed prior to the
      * cache entry and is referenced in monitor_cache_enter().
      */
-    if (!TEST(FRAG_TEMP_PRIVATE, md->last_fragment->flags))
+    if (!TESTANY(FRAG_TEMP_PRIVATE, md->last_fragment->flags))
         md->last_fragment = NULL;
 }
 
@@ -1816,14 +1788,14 @@ monitor_cache_exit(dcontext_t *dcontext)
          * We need to set trace_sysenter_exit to true or false to prevent a
          * stale value from reaching a later read of the flag.
          *
-         * FIXME Rework this to store the last (pre-syscall) exit's fragment flags & tag
+         * XXX Rework this to store the last (pre-syscall) exit's fragment flags & tag
          * in a dcontext-private place such as non-shared monitor data.
          * Such a general mechanism will permit us to capture all
          * trace head marking within should_be_trace_head().
          */
         dcontext->trace_sysenter_exit =
-            (TEST(FRAG_IS_TRACE, dcontext->last_fragment->flags) &&
-             TEST(LINK_NI_SYSCALL, dcontext->last_exit->flags));
+            (TESTANY(FRAG_IS_TRACE, dcontext->last_fragment->flags) &&
+             TESTANY(LINK_NI_SYSCALL, dcontext->last_exit->flags));
     }
     dcontext->whereami = DR_WHERE_DISPATCH;
 }
@@ -1836,10 +1808,10 @@ check_fine_to_coarse_trace_head(dcontext_t *dcontext, fragment_t *f)
      * fragments, as once the coarse unit is frozen we can't use its
      * entrance stub).  So we assume that an exit is due to trace headness
      * discovered at link time iff it would now be considered a trace head.
-     * FIXME: any cleaner way?
+     * XXX: any cleaner way?
      */
-    if (TEST(FRAG_COARSE_GRAIN, f->flags) && !TEST(FRAG_IS_TRACE_HEAD, f->flags) &&
-        /* FIXME: We rule out empty fragments -- but in so doing we rule out deleted
+    if (TESTANY(FRAG_COARSE_GRAIN, f->flags) && !TESTANY(FRAG_IS_TRACE_HEAD, f->flags) &&
+        /* XXX: We rule out empty fragments -- but in so doing we rule out deleted
          * fragments.  Oh well.
          */
         !TESTANY(FRAG_COARSE_GRAIN | FRAG_FAKE, dcontext->last_fragment->flags)) {
@@ -1868,9 +1840,7 @@ monitor_cache_enter(dcontext_t *dcontext, fragment_t *f)
     monitor_data_t *md = (monitor_data_t *)dcontext->monitor_field;
     bool start_trace = false;
     bool end_trace = false;
-#ifdef CUSTOM_TRACES
     dr_custom_trace_action_t client = CUSTOM_TRACE_DR_DECIDES;
-#endif
     trace_head_counter_t *ctr;
     uint add_size = 0, prev_mangle_size = 0; /* NOTE these aren't set if end_trace */
 
@@ -1899,12 +1869,11 @@ monitor_cache_enter(dcontext_t *dcontext, fragment_t *f)
         SELF_PROTECT_LOCAL(dcontext, WRITABLE);
         /* should have restored last fragment on cache exit */
         ASSERT(md->last_fragment == NULL ||
-               TEST(FRAG_TEMP_PRIVATE, md->last_fragment->flags));
+               TESTANY(FRAG_TEMP_PRIVATE, md->last_fragment->flags));
 
         /* check for trace ending conditions that can be overridden by client */
-        end_trace = (end_trace || TEST(FRAG_IS_TRACE, f->flags) ||
-                     TEST(FRAG_IS_TRACE_HEAD, f->flags));
-#ifdef CUSTOM_TRACES
+        end_trace = (end_trace || TESTANY(FRAG_IS_TRACE, f->flags) ||
+                     TESTANY(FRAG_IS_TRACE_HEAD, f->flags));
         if (dr_end_trace_hook_exists()) {
             client = instrument_end_trace(dcontext, md->trace_tag, f->tag);
             /* Return values:
@@ -1936,20 +1905,18 @@ monitor_cache_enter(dcontext_t *dcontext, fragment_t *f)
             LOG(THREAD, LOG_MONITOR, 4, "Client instrument_end_trace returned %d\n",
                 client);
         }
-#endif
         /* check for conditions signaling end of trace regardless of client */
-        end_trace = end_trace || TEST(FRAG_CANNOT_BE_TRACE, f->flags);
+        end_trace = end_trace || TESTANY(FRAG_CANNOT_BE_TRACE, f->flags);
 
 #if defined(X86) && defined(X64)
         /* no traces that mix 32 and 64: decode_fragment not set up for it */
-        if (TEST(FRAG_32_BIT, f->flags) != TEST(FRAG_32_BIT, md->trace_flags))
+        if (TESTANY(FRAG_32_BIT, f->flags) != TESTANY(FRAG_32_BIT, md->trace_flags))
             end_trace = true;
 #endif
 
         if (!end_trace) {
-#ifdef CUSTOM_TRACES
             /* we need a regular bb here, not a trace */
-            if (TEST(FRAG_IS_TRACE, f->flags)) {
+            if (TESTANY(FRAG_IS_TRACE, f->flags)) {
                 /* We create an official, shared bb (we DO want to call the client bb
                  * hook, right?).  We do not link the new, shadowed bb.
                  */
@@ -1975,20 +1942,20 @@ monitor_cache_enter(dcontext_t *dcontext, fragment_t *f)
                      */
                     head = build_basic_block_fragment(
                         dcontext, f->tag, FRAG_IS_TRACE_HEAD, false /*do not link*/,
-                        true /*visible*/ _IF_CLIENT(true /*for trace*/) _IF_CLIENT(NULL));
+                        true /*visible*/, true /*for trace*/, NULL);
                     SELF_PROTECT_LOCAL(dcontext, READONLY);
                     STATS_INC(custom_traces_bbs_built);
                     ASSERT(head != NULL);
                     /* If it's not shadowing we should have linked before htable add.
                      * We shouldn't end up w/ a bb of different sharing than the
-                     * trace: CUSTOM_TRACES rules out private traces and shared bbs,
+                     * trace: custom traces rule out private traces and shared bbs,
                      * and if circumstances changed since the original trace head bb
                      * was made then the trace should have been flushed.
                      */
                     ASSERT((head->flags & FRAG_SHARED) == (f->flags & FRAG_SHARED));
-                    if (TEST(FRAG_COARSE_GRAIN, head->flags)) {
+                    if (TESTANY(FRAG_COARSE_GRAIN, head->flags)) {
                         /* we need a local copy before releasing the lock.
-                         * FIXME: share this code sequence w/ d_r_dispatch().
+                         * XXX: share this code sequence w/ d_r_dispatch().
                          */
                         ASSERT(USE_BB_BUILDING_LOCK());
                         fragment_coarse_wrapper(&md->wrapper, f->tag,
@@ -2002,9 +1969,8 @@ monitor_cache_enter(dcontext_t *dcontext, fragment_t *f)
                 /* use the bb from here on out */
                 f = head;
             }
-#endif
-            if (TEST(FRAG_COARSE_GRAIN, f->flags) ||
-                TEST(FRAG_SHARED, f->flags) IF_CLIENT_INTERFACE(|| md->pass_to_client)) {
+            if (TESTANY(FRAG_COARSE_GRAIN, f->flags) || TESTANY(FRAG_SHARED, f->flags) ||
+                md->pass_to_client) {
                 /* We need linkstub_t info for trace_exit_stub_size_diff() so we go
                  * ahead and make a private copy here.
                  * For shared fragments, we make a private copy of f to avoid
@@ -2029,6 +1995,7 @@ monitor_cache_enter(dcontext_t *dcontext, fragment_t *f)
                      * to last_copy, must re-clear!
                      */
                     md->last_fragment = NULL;
+                    KSTOP(trace_building);
                     return f;
                 }
                 f = md->last_fragment;
@@ -2050,7 +2017,6 @@ monitor_cache_enter(dcontext_t *dcontext, fragment_t *f)
              /* mangling may never use trace buffer memory but just in case */
              !make_room_in_trace_buffer(dcontext, add_size + prev_mangle_size, f));
 
-#ifdef CUSTOM_TRACES
         if (end_trace && client == CUSTOM_TRACE_CONTINUE) {
             /* had to overide client, log */
             LOG(THREAD, LOG_MONITOR, 2,
@@ -2059,7 +2025,6 @@ monitor_cache_enter(dcontext_t *dcontext, fragment_t *f)
                 "continue trace (cannot trace through next fragment), ending trace "
                 "now\n");
         }
-#endif
 
         if (end_trace) {
             LOG(THREAD, LOG_MONITOR, 3,
@@ -2086,13 +2051,13 @@ monitor_cache_enter(dcontext_t *dcontext, fragment_t *f)
 
     /* searching for a hot trace head */
 
-    if (TEST(FRAG_IS_TRACE, f->flags)) {
+    if (TESTANY(FRAG_IS_TRACE, f->flags)) {
         /* nothing to do */
         dcontext->whereami = DR_WHERE_DISPATCH;
         return f;
     }
 
-    if (!TEST(FRAG_IS_TRACE_HEAD, f->flags)) {
+    if (!TESTANY(FRAG_IS_TRACE_HEAD, f->flags)) {
 
         bool trace_head;
 
@@ -2101,7 +2066,7 @@ monitor_cache_enter(dcontext_t *dcontext, fragment_t *f)
          * - an exit from a trace that ends just before a SYSENTER.
          * - private secondary trace heads targeted by shared traces
          *
-         * FIXME Rework this to use the last exit's fragment flags & tag that were
+         * XXX Rework this to use the last exit's fragment flags & tag that were
          * stored in a dcontext-private place such as non-shared monitor data.
          */
         if (LINKSTUB_INDIRECT(dcontext->last_exit->flags) ||
@@ -2164,21 +2129,21 @@ monitor_cache_enter(dcontext_t *dcontext, fragment_t *f)
     if (ctr->counter >= INTERNAL_OPTION(trace_threshold)) {
         /* if cannot delete fragment, do not start trace -- wait until
          * can delete it (w/ exceptions, deletion status changes). */
-        if (!TEST(FRAG_CANNOT_DELETE, f->flags)) {
+        if (!TESTANY(FRAG_CANNOT_DELETE, f->flags)) {
             if (!DYNAMO_OPTION(shared_traces))
                 start_trace = true;
-            /* FIXME To detect a trace building race w/private BBs at this point,
+            /* XXX To detect a trace building race w/private BBs at this point,
              * we need a presence table to mark that a tag is being used for trace
              * building. Generic hashtables can help with this (case 6206).
              */
-            else if (!DYNAMO_OPTION(shared_bbs) || !TEST(FRAG_SHARED, f->flags))
+            else if (!DYNAMO_OPTION(shared_bbs) || !TESTANY(FRAG_SHARED, f->flags))
                 start_trace = true;
             else {
                 /* Check if trace building is in progress and act accordingly. */
-                ASSERT(TEST(FRAG_SHARED, f->flags));
+                ASSERT(TESTANY(FRAG_SHARED, f->flags));
                 /* Hold the change linking lock for flags changes. */
                 acquire_recursive_lock(&change_linking_lock);
-                if (TEST(FRAG_TRACE_BUILDING, f->flags)) {
+                if (TESTANY(FRAG_TRACE_BUILDING, f->flags)) {
                     /* trace_t building w/this tag is already in-progress. */
                     LOG(THREAD, LOG_MONITOR, 3,
                         "Not going to start trace with already-in-trace-progress F%d "
@@ -2196,7 +2161,6 @@ monitor_cache_enter(dcontext_t *dcontext, fragment_t *f)
         }
     }
 
-#ifdef CLIENT_INTERFACE
     if (start_trace) {
         /* We need to set pass_to_client before cloning */
         /* PR 299808: cache whether we need to re-build bbs for clients up front,
@@ -2208,11 +2172,10 @@ monitor_cache_enter(dcontext_t *dcontext, fragment_t *f)
         /* should already be initialized */
         ASSERT(instrlist_first(&md->unmangled_ilist) == NULL);
     }
-#endif
     if (start_trace &&
-        (TEST(FRAG_COARSE_GRAIN, f->flags) ||
-         TEST(FRAG_SHARED, f->flags) IF_CLIENT_INTERFACE(|| md->pass_to_client))) {
-        ASSERT(TEST(FRAG_IS_TRACE_HEAD, f->flags));
+        (TESTANY(FRAG_COARSE_GRAIN, f->flags) || TESTANY(FRAG_SHARED, f->flags) ||
+         md->pass_to_client)) {
+        ASSERT(TESTANY(FRAG_IS_TRACE_HEAD, f->flags));
         /* We need linkstub_t info for trace_exit_stub_size_diff() so we go
          * ahead and make a private copy here.
          * For shared fragments, we make a private copy of f to avoid
@@ -2267,10 +2230,8 @@ monitor_cache_enter(dcontext_t *dcontext, fragment_t *f)
             f->tag);
         LOG(THREAD, LOG_MONITOR, 3, "Entering trace selection mode\n");
         /* allocate trace buffer space */
-#ifdef CUSTOM_TRACES
         /* we should have a bb here, since if a trace can't also be a trace head */
-        ASSERT(!TEST(FRAG_IS_TRACE, f->flags));
-#endif
+        ASSERT(!TESTANY(FRAG_IS_TRACE, f->flags));
         if (!get_and_check_add_size(dcontext, f, &add_size, &prev_mangle_size) ||
             /* mangling may never use trace buffer memory but just in case */
             !make_room_in_trace_buffer(
@@ -2292,7 +2253,7 @@ monitor_cache_enter(dcontext_t *dcontext, fragment_t *f)
              * may manipulate frag flags */
             reset_trace_state(dcontext, false /* already own change_linking_lock */);
             SHARED_FLAGS_RECURSIVE_LOCK(f->flags, release, change_linking_lock);
-            /* FIXME: set CANNOT_BE_TRACE when first create a too-big fragment?
+            /* XXX: set CANNOT_BE_TRACE when first create a too-big fragment?
              * export the size expansion factors considered?
              */
             /* now return */
@@ -2322,7 +2283,7 @@ monitor_cache_enter(dcontext_t *dcontext, fragment_t *f)
 /* This routine internally calls enter_couldbelinking, thus it is safe
  * to call from any linking state. Restores linking to previous state at exit.
  * If calling on another thread, caller should be synchronized with that thread
- * (either via flushing synch or thread_synch methods) FIXME : verify all users
+ * (either via flushing synch or thread_synch methods) XXX : verify all users
  * on other threads are properly synchronized
  */
 void
@@ -2391,7 +2352,7 @@ get_trace_exit_component_tag(dcontext_t *dcontext, fragment_t *f, linkstub_t *l)
     app_pc tag = f->tag;
     bool found = false;
     trace_only_t *t = TRACE_FIELDS(f);
-    ASSERT(TEST(FRAG_IS_TRACE, f->flags));
+    ASSERT(TESTANY(FRAG_IS_TRACE, f->flags));
     ASSERT(linkstub_fragment(dcontext, l) == f);
     for (stub = FRAGMENT_EXIT_STUBS(f); stub != NULL; stub = LINKSTUB_NEXT_EXIT(stub)) {
         if (stub == l) {

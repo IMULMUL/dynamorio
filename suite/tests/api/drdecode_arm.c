@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2015 Google, Inc.  All rights reserved.
+ * Copyright (c) 2015-2026 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -34,8 +34,10 @@
 
 #include "configure.h"
 #include "dr_api.h"
+#include "dr_project_wide_defines.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define GD GLOBAL_DCONTEXT
 
@@ -43,9 +45,6 @@
     ((void)((!(x)) ? (printf("ASSERT FAILURE: %s:%d: %s\n", __FILE__, __LINE__, #x), \
                       abort(), 0)                                                    \
                    : 0))
-
-#define BUFFER_SIZE_BYTES(buf) sizeof(buf)
-#define BUFFER_SIZE_ELEMENTS(buf) (BUFFER_SIZE_BYTES(buf) / sizeof(buf[0]))
 
 #define ORIG_PC ((byte *)0x10000)
 
@@ -110,12 +109,86 @@ test_noalloc(void)
      */
 }
 
+static void
+test_store_source(void)
+{
+    instr_t *in = XINST_CREATE_store(GD, OPND_CREATE_MEMPTR(DR_REG_R0, 42),
+                                     opnd_create_reg(DR_REG_R1));
+    ASSERT(!instr_is_opnd_store_source(in, -1)); /* Out of bounds. */
+    ASSERT(instr_is_opnd_store_source(in, 0));   /* r1. */
+    ASSERT(!instr_is_opnd_store_source(in, 1));  /* Out of bounds. */
+    instr_destroy(GD, in);
+
+    in = INSTR_CREATE_push(GD, opnd_create_reg(DR_REG_R1));
+    ASSERT(instr_is_opnd_store_source(in, 0));  /* r1. */
+    ASSERT(!instr_is_opnd_store_source(in, 1)); /* immed. */
+    ASSERT(!instr_is_opnd_store_source(in, 2)); /* sp. */
+    instr_destroy(GD, in);
+
+    in = INSTR_CREATE_str_wbimm(GD, OPND_CREATE_MEMPTR(DR_REG_R0, 42),
+                                opnd_create_reg(DR_REG_R0), OPND_CREATE_INT(16));
+    ASSERT(instr_is_opnd_store_source(in, 0));  /* r0. */
+    ASSERT(!instr_is_opnd_store_source(in, 1)); /* immed. */
+    ASSERT(!instr_is_opnd_store_source(in, 2)); /* r0 address. */
+    instr_destroy(GD, in);
+
+    in = INSTR_CREATE_stmdb_wb(GD, OPND_CREATE_MEMLIST(DR_REG_R3), 10,
+                               opnd_create_reg(DR_REG_R0), opnd_create_reg(DR_REG_R1),
+                               opnd_create_reg(DR_REG_R2), opnd_create_reg(DR_REG_R3),
+                               opnd_create_reg(DR_REG_R4), opnd_create_reg(DR_REG_R5),
+                               opnd_create_reg(DR_REG_R6), opnd_create_reg(DR_REG_R7),
+                               opnd_create_reg(DR_REG_R8), opnd_create_reg(DR_REG_R9));
+    ASSERT(instr_is_opnd_store_source(in, 0));   /* r0. */
+    ASSERT(instr_is_opnd_store_source(in, 1));   /* r1. */
+    ASSERT(instr_is_opnd_store_source(in, 2));   /* r2. */
+    ASSERT(instr_is_opnd_store_source(in, 3));   /* r3. */
+    ASSERT(instr_is_opnd_store_source(in, 4));   /* r4. */
+    ASSERT(instr_is_opnd_store_source(in, 5));   /* r5. */
+    ASSERT(instr_is_opnd_store_source(in, 6));   /* r6. */
+    ASSERT(instr_is_opnd_store_source(in, 7));   /* r7. */
+    ASSERT(instr_is_opnd_store_source(in, 8));   /* r8. */
+    ASSERT(instr_is_opnd_store_source(in, 9));   /* r9. */
+    ASSERT(!instr_is_opnd_store_source(in, 10)); /* r3 addr. */
+    instr_destroy(GD, in);
+}
+
+static void
+test_isa_features(void)
+{
+    /* TODO i#7842: Until instr_get_isa_feature() and instr_get_isa_feature_name() are
+     * implemented for ARM, we can only test ISA_FEAT_UNKNOWN.
+     */
+    uint unused_buf = 0;
+    instr_t *instr = NULL;
+    uint isa_feat = ISA_FEAT_INVALID;
+
+    instr = XINST_CREATE_load(GD, opnd_create_reg(DR_REG_R0),
+                              OPND_CREATE_MEMPTR(DR_REG_R0, 0));
+    isa_feat = instr_get_isa_feature((byte *)&unused_buf, instr);
+    ASSERT(isa_feat == ISA_FEAT_UNKNOWN);
+    ASSERT(strncmp(instr_get_isa_feature_name(isa_feat), "<unknown>",
+                   strlen("<unknown>")) == 0);
+    instr_destroy(GD, instr);
+
+    instr = XINST_CREATE_store(GD, OPND_CREATE_MEMPTR(DR_REG_R0, 42),
+                               opnd_create_reg(DR_REG_R1));
+    isa_feat = instr_get_isa_feature((byte *)&unused_buf, instr);
+    ASSERT(isa_feat == ISA_FEAT_UNKNOWN);
+    ASSERT(strncmp(instr_get_isa_feature_name(isa_feat), "<unknown>",
+                   strlen("<unknown>")) == 0);
+    instr_destroy(GD, instr);
+}
+
 int
-main()
+main(int argc, const char *argv[])
 {
     test_LSB();
 
     test_noalloc();
+
+    test_store_source();
+
+    test_isa_features();
 
     printf("done\n");
 

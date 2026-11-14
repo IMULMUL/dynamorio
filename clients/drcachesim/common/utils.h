@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2015-2019 Google, Inc.  All rights reserved.
+ * Copyright (c) 2015-2026 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -33,26 +33,50 @@
 /* utils.h: utilities for cache simulator */
 
 #ifndef _UTILS_H_
-#define _UTILS_H_ 1
+#define _UTILS_H_
 
+#include <stdint.h>
 #include <stdio.h>
 #include <iomanip>
 #include <sstream>
 #include <string>
+#include <vector>
+
+#if defined(_WIN32) || defined(_WIN64) || defined(WINDOWS)
+#    define WIN32_LEAN_AND_MEAN
+#    define UNICODE  // For Windows headers.
+#    define _UNICODE // For C headers.
+#    define NOMINMAX // Avoid windows.h messing up std::min.
+#    include <windows.h>
+#else
+#    include <sys/time.h>
+#endif
+
+#include "dr_project_wide_defines.h"
+
+namespace dynamorio {
+namespace drmemtrace {
+
+// TODO i#8001: Unify with DR's defines and move to dr_project_wide_defines.h.
+#define INVALID_THREAD_ID 0
+// We avoid collisions with DR's INVALID_PROCESS_ID by using our own name.
+#define INVALID_PID -1
 
 // XXX: perhaps we should use a C++-ish stream approach instead
 // This cannot be named ERROR as that conflicts with Windows headers.
 #define ERRMSG(msg, ...) fprintf(stderr, msg, ##__VA_ARGS__)
 
 // XXX: can we share w/ core DR?
-#define IS_POWER_OF_2(x) ((x) != 0 && ((x) & ((x)-1)) == 0)
+#define IS_POWER_OF_2(x) ((x) != 0 && ((x) & ((x) - 1)) == 0)
 
-#define BUFFER_SIZE_BYTES(buf) sizeof(buf)
-#define BUFFER_SIZE_ELEMENTS(buf) (BUFFER_SIZE_BYTES(buf) / sizeof(buf[0]))
-#define BUFFER_LAST_ELEMENT(buf) buf[BUFFER_SIZE_ELEMENTS(buf) - 1]
-#define NULL_TERMINATE_BUFFER(buf) BUFFER_LAST_ELEMENT(buf) = 0
-#define TESTALL(mask, var) (((mask) & (var)) == (mask))
-#define TESTANY(mask, var) (((mask) & (var)) != 0)
+// XXX i#4399: DR should define a DEBUG-only assert.
+#ifdef DEBUG
+#    define ASSERT(x, msg) DR_ASSERT_MSG(x, msg)
+#    define IF_DEBUG(x) x
+#else
+#    define ASSERT(x, msg) /* Nothing. */
+#    define IF_DEBUG(x)    /* Nothing. */
+#endif
 
 #if defined(X64) || defined(ARM)
 #    define IF_REL_ADDRS(x) x
@@ -60,15 +84,18 @@
 #    define IF_REL_ADDRS(x)
 #endif
 
-#define ALIGN_FORWARD(x, alignment) \
-    ((((ptr_uint_t)x) + ((alignment)-1)) & (~((ptr_uint_t)(alignment)-1)))
+#define NOTIFY(level, ...)                     \
+    do {                                       \
+        if (op_verbose.get_value() >= (level)) \
+            dr_fprintf(STDERR, __VA_ARGS__);   \
+    } while (0)
 
 #define BOOLS_MATCH(b1, b2) (!!(b1) == !!(b2))
 
 #ifdef WINDOWS
 /* Use special C99 operator _Pragma to generate a pragma from a macro */
 #    if _MSC_VER <= 1200
-#        define ACTUAL_PRAGMA(p) _Pragma(#        p)
+#        define ACTUAL_PRAGMA(p) _Pragma(#p)
 #    else
 #        define ACTUAL_PRAGMA(p) __pragma(p)
 #    endif
@@ -80,13 +107,6 @@
 #else
 #    define START_PACKED_STRUCTURE /* nothing */
 #    define END_PACKED_STRUCTURE __attribute__((__packed__))
-#endif
-
-/* TODO(i#2924): Remove this and others like it once we stop supporting VS2013. */
-#if defined(WINDOWS) && _MSC_VER < 1900
-#    define CONSTEXPR const /* 'constexpr' not supported */
-#else
-#    define CONSTEXPR constexpr
 #endif
 
 #ifndef __has_cpp_attribute
@@ -113,12 +133,17 @@
 #    define IF_UNIX(x) x
 #endif
 
+// This value is selected so that offline_entry_t.pc never has canonical
+// (all 0 or all 1) bits 48..55.  See the offline_type_t comment.
+#define MAX_BB_INSTRS_NAME "max_bb_instrs"
+#define MAX_BB_INSTRS 126
+
 static inline int
-compute_log2(int value)
+compute_log2(int64_t value)
 {
     int i;
-    for (i = 0; i < 31; i++) {
-        if (value == 1 << i)
+    for (i = 0; i < 63; i++) {
+        if (value == int64_t(1) << i)
             return i;
     }
     // returns -1 if value is not a power of 2.
@@ -134,5 +159,62 @@ to_hex_string(T integer)
             << integer;
     return sstream.str();
 }
+
+static inline bool
+ends_with(const std::string &str, const std::string &with)
+{
+    size_t pos = str.rfind(with);
+    if (pos == std::string::npos)
+        return false;
+    return (pos + with.size() == str.size());
+}
+
+static inline bool
+starts_with(const std::string &str, const std::string &with)
+{
+    size_t pos = str.find(with);
+    if (pos == std::string::npos)
+        return false;
+    return pos == 0;
+}
+
+static inline std::vector<std::string>
+split_by(std::string s, const std::string &sep)
+{
+    size_t pos;
+    std::vector<std::string> vec;
+    if (s.empty())
+        return vec;
+    do {
+        pos = s.find(sep);
+        vec.push_back(s.substr(0, pos));
+        s.erase(0, pos + sep.length());
+    } while (pos != std::string::npos);
+    return vec;
+}
+
+// Returns a timestamp with at least microsecond granularity.
+// On UNIX this is an absolute timestamp; but on Windows where we had
+// trouble with the GetSystemTime* functions not being granular enough
+// it's the timestamp counter from the processor.
+// (We avoid dr_get_microseconds() because not all targets link
+// in the DR library.)
+static inline uint64_t
+get_microsecond_timestamp()
+{
+#if defined(_WIN32) || defined(_WIN64) || defined(WINDOWS)
+    uint64_t res;
+    QueryPerformanceCounter((LARGE_INTEGER *)&res);
+    return res;
+#else
+    struct timeval time;
+    if (gettimeofday(&time, nullptr) != 0)
+        return 0;
+    return time.tv_sec * 1000000 + time.tv_usec;
+#endif
+}
+
+} // namespace drmemtrace
+} // namespace dynamorio
 
 #endif /* _UTILS_H_ */

@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2021 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2026 Google, Inc.  All rights reserved.
  * Copyright (c) 2008-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -35,86 +35,8 @@
 #define MODULE_SHARED_H
 
 #include "heap.h" /* for HEAPACCT */
-
-/* DR_API EXPORT TOFILE dr_tools.h */
-/* DR_API EXPORT BEGIN */
-/**************************************************
- * MODULE INFORMATION TYPES
- */
-
-/**
- * Type used for dr_get_proc_address().  This can be obtained from the
- * #_module_data_t structure.  It is equivalent to the base address of
- * the module on both Windows and Linux.
- */
-#ifdef AVOID_API_EXPORT
-/* Rather than using a void * for the module base, we forward declare a struct
- * that we never define.  This prevents usage errors such as passing a
- * module_data_t* to dr_get_proc_address().
- */
-#endif
-struct _module_handle_t;
-typedef struct _module_handle_t *module_handle_t;
-
-#ifdef WINDOWS
-
-#    define MODULE_FILE_VERSION_INVALID ULLONG_MAX
-
-/**
- * Used to hold .rsrc section version number information. This number is usually
- * presented as p1.p2.p3.p4 by PE parsing tools.
- */
-typedef union _version_number_t {
-    uint64 version; /**< Representation as a 64-bit integer. */
-    struct {
-        uint ms;    /**< */
-        uint ls;    /**< */
-    } version_uint; /**< Representation as 2 32-bit integers. */
-    struct {
-        ushort p2;   /**< */
-        ushort p1;   /**< */
-        ushort p4;   /**< */
-        ushort p3;   /**< */
-    } version_parts; /**< Representation as 4 16-bit integers. */
-} version_number_t;
-
-#endif
-
-/* DR_API EXPORT END */
-
+#include "module_api.h"
 #include "module.h" /* include os_specific header */
-
-/* DR_API EXPORT TOFILE dr_tools.h */
-/* DR_API EXPORT BEGIN */
-
-/**
- * Holds the names of a module.  This structure contains multiple
- * fields corresponding to different sources of a module name.  Note
- * that some of these names may not exist for certain modules.  It is
- * highly likely, however, that at least one name is available.  Use
- * dr_module_preferred_name() on the parent _module_data_t to get the
- * preferred name of the module.
- */
-typedef struct _module_names_t {
-    const char *module_name; /**< On windows this name comes from the PE header exports
-                              * section (NULL if the module has no exports section).  On
-                              * Linux the name will come from the ELF DYNAMIC program
-                              * header (NULL if the module has no SONAME entry). */
-    const char *file_name; /**< The file name used to load this module. Note - on Windows
-                            * this is not always available. */
-#ifdef WINDOWS
-    const char *exe_name;  /**< If this module is the main executable of this process then
-                            * this is the executable name used to launch the process (NULL
-                            * for all other modules). */
-    const char *rsrc_name; /**< The internal name given to the module in its resource
-                            * section. Will be NULL if the module has no resource section
-                            * or doesn't set this field within it. */
-#else                      /* UNIX */
-    uint64 inode; /**< The inode of the module file mapped in. */
-#endif
-} module_names_t;
-
-/* DR_API EXPORT END */
 
 #ifdef WINDOWS
 /* Introduced as part of case 9842; see module_names_t above.  Shouldn't
@@ -203,11 +125,9 @@ enum {
     /* do not created a persistent cache from this module */
     MODULE_DO_NOT_PERSIST = 0x00000040,
 #endif
-#ifdef CLIENT_INTERFACE
     MODULE_NULL_INSTRUMENT = 0x00000080,
     /* we use this to send just one module load event on 1st exec (i#884) */
     MODULE_LOAD_EVENT = 0x00000100,
-#endif
 };
 
 /**************** init/exit routines *****************/
@@ -336,7 +256,7 @@ module_copy_os_data(os_module_data_t *dst, os_module_data_t *src);
  * Should clean up and see if these can be shared/obsoleted by the os shared mod list. */
 bool
 os_get_module_info_all_names(const app_pc pc,
-                             /* FIXME PR 215890: does ELF64 use 64-bit timestamp
+                             /* XXX PR 215890: does ELF64 use 64-bit timestamp
                               * or checksum?
                               */
                              uint *checksum, uint *timestamp, size_t *size,
@@ -359,25 +279,26 @@ d_r_get_proc_address(module_base_t lib, const char *name);
  * and use it here
  */
 generic_func_t
-get_proc_address_ex(module_base_t lib, const char *name, bool *is_indirect_code OUT);
+get_proc_address_ex(module_base_t lib, const char *name,
+                    bool *is_indirect_code DR_PARAM_OUT);
 #else /* WINDOWS */
 
 generic_func_t
-get_proc_address_ex(module_base_t lib, const char *name, const char **forwarder OUT);
+get_proc_address_ex(module_base_t lib, const char *name,
+                    const char **forwarder DR_PARAM_OUT);
 
 generic_func_t
-get_proc_address_by_ordinal(module_base_t lib, uint ordinal, const char **forwarder OUT);
+get_proc_address_by_ordinal(module_base_t lib, uint ordinal,
+                            const char **forwarder DR_PARAM_OUT);
 
-#    ifdef CLIENT_INTERFACE
 generic_func_t
 get_proc_address_resolve_forward(module_base_t lib, const char *name);
-#    endif
 
 #endif /* WINDOWS */
 
 #ifdef WINDOWS
 uint64
-get_remote_process_entry(HANDLE process_handle, OUT bool *x86_code);
+get_remote_process_entry(HANDLE process_handle, DR_PARAM_OUT bool *x86_code);
 #endif
 
 void
@@ -454,12 +375,12 @@ typedef struct {
      * specified by aslr_short_digest */
     byte short_MD5[MD5_RAW_BYTES];
 
-    /* FIXME: case 4678 about possible NYI subregion checksums
+    /* TODO: case 4678 about possible NYI subregion checksums
      * amenable to lazy evaluation.  Such digests which will be of
      * dynamic size and file offset which will have to be specified
      * here. */
 } module_digest_t;
-/* FIXME: rename since being used for module-independent purposes? */
+/* XXX: rename since being used for module-independent purposes? */
 
 void
 module_calculate_digest(/*OUT*/ module_digest_t *digest, app_pc module_base,
@@ -492,9 +413,9 @@ typedef struct _privmod_t {
     char path[MAXIMUM_PATH];
     uint ref_count;
     bool externally_loaded;
-#ifdef CLIENT_INTERFACE
-    bool is_client; /* or Extension */
-#endif
+    /* XXX i#6982: Perhaps replace is_client with is_top_level_client. */
+    bool is_top_level_client; /* set for command-line clients */
+    bool is_client;           /* set for command-line client or extension */
     bool called_proc_entry;
     bool called_proc_exit;
     struct _privmod_t *next;
@@ -552,7 +473,8 @@ typedef enum {
 
 /* This function is used for loading non-private libs as well as private. */
 app_pc
-privload_map_and_relocate(const char *filename, size_t *size OUT, modload_flags_t flags);
+privload_map_and_relocate(const char *filename, size_t *size DR_PARAM_OUT,
+                          modload_flags_t flags);
 
 /* returns whether they all fit */
 bool
@@ -628,9 +550,10 @@ privmod_t *
 privload_first_module(void);
 
 bool
-privload_fill_os_module_info(app_pc base, OUT app_pc *out_base /* relative pc */,
-                             OUT app_pc *out_max_end /* relative pc */,
-                             OUT char **out_soname, OUT os_module_data_t *out_data);
+privload_fill_os_module_info(app_pc base, DR_PARAM_OUT app_pc *out_base /* relative pc */,
+                             DR_PARAM_OUT app_pc *out_max_end /* relative pc */,
+                             DR_PARAM_OUT char **out_soname,
+                             DR_PARAM_OUT os_module_data_t *out_data);
 
 /* os specific loader initialization prologue before finalize the load,
  * will also acquire privload_lock.
@@ -642,7 +565,7 @@ os_loader_init_prologue(void);
  * will release privload_lock.
  */
 void
-os_loader_init_epilogue();
+os_loader_init_epilogue(void);
 
 void
 os_loader_exit(void);
@@ -709,6 +632,9 @@ redirect_strdup(const char *str);
 
 size_t
 redirect_malloc_requested_size(void *mem);
+
+void *
+redirect_aligned_alloc(size_t alignment, size_t size);
 
 #ifdef DEBUG
 void *

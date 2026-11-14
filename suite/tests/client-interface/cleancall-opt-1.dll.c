@@ -1,4 +1,5 @@
 /* *******************************************************************************
+ * Copyright (c) 2021-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2017 ARM Limited. All rights reserved.
  * Copyright (c) 2011 Massachusetts Institute of Technology  All rights reserved.
  * *******************************************************************************/
@@ -79,7 +80,7 @@ event_basic_block(void *dc, void *tag, instrlist_t *bb, bool for_trace, bool tra
     before_label = INSTR_CREATE_label(dc);
     after_label = INSTR_CREATE_label(dc);
 
-    /* FIXME i#1569: passing instruction operands is NYI on AArch64.
+    /* TODO i#1569: passing instruction operands is NYI on AArch64.
      * We use a workaround involving ADR. */
     IF_AARCH64(save_current_pc(dc, bb, entry, &cleancall_start_pc, before_label));
     PRE(bb, entry, before_label);
@@ -101,13 +102,14 @@ event_basic_block(void *dc, void *tag, instrlist_t *bb, bool for_trace, bool tra
     case FN_out_of_line: out_of_line_expected = true; break;
     }
 
-    dr_insert_clean_call(dc, bb, entry, (void *)after_callee, false, IF_X86_ELSE(6, 4),
+    dr_insert_clean_call_ex(
+        dc, bb, entry, (void *)after_callee, DR_CLEANCALL_READS_APP_CONTEXT,
+        IF_X86_ELSE(6, 4),
 #ifdef X86
-                         opnd_create_instr(before_label), opnd_create_instr(after_label),
+        opnd_create_instr(before_label), opnd_create_instr(after_label),
 #endif
-                         OPND_CREATE_INT32(inline_expected),
-                         OPND_CREATE_INT32(out_of_line_expected), OPND_CREATE_INT32(i),
-                         OPND_CREATE_INTPTR(func_names[i]));
+        OPND_CREATE_INT32(inline_expected), OPND_CREATE_INT32(out_of_line_expected),
+        OPND_CREATE_INT32(i), OPND_CREATE_INTPTR(func_names[i]));
 
     return DR_EMIT_DEFAULT;
 }
@@ -130,7 +132,7 @@ codegen_out_of_line(void *dc)
         APP(ilist,
             XINST_CREATE_load_int(dc, opnd_create_reg(reg), OPND_CREATE_INTPTR(0xf1f1)));
     }
-    /* FIXME i#1569: FMOV support is NYI on AArch64 */
+    /* TODO i#1569: FMOV support is NYI on AArch64 */
 #ifdef X86
     for (i = 0; i < proc_num_simd_registers(); i++) {
         reg_id_t reg = DR_REG_XMM0 + (reg_id_t)i;

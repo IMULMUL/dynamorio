@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2014-2021 Google, Inc.  All rights reserved.
+ * Copyright (c) 2014-2026 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -31,7 +31,7 @@
  */
 
 /* ARM encoder */
-/* FIXME i#1569: add A64 support: for now just A32 */
+/* XXX i#1569: add A64 support: for now just A32 */
 
 #include "../globals.h"
 #include "arch.h"
@@ -461,6 +461,238 @@ const reg_id_t dr_reg_fixer[] = {
     DR_REG_TPIDRURO,
 };
 
+/* Maps real ISA registers to their corresponding virtual DR_ISA_REGDEPS register.
+ * Note that we map real sub-registers to their corresponding containing virtual register.
+ * Same size as dr_reg_fixer[], keep them synched.
+ */
+const reg_id_t d_r_reg_id_to_virtual[] = {
+    DR_REG_NULL, /* DR_REG_NULL */
+    DR_REG_NULL, /* DR_REG_NULL */
+
+    /* from DR_REG_R0 to DR_REG_R15 */
+    DR_REG_VIRT0,  /* DR_REG_R0 */
+    DR_REG_VIRT1,  /* DR_REG_R1 */
+    DR_REG_VIRT2,  /* DR_REG_R2 */
+    DR_REG_VIRT3,  /* DR_REG_R3 */
+    DR_REG_VIRT4,  /* DR_REG_R4 */
+    DR_REG_VIRT5,  /* DR_REG_R5 */
+    DR_REG_VIRT6,  /* DR_REG_R6 */
+    DR_REG_VIRT7,  /* DR_REG_R7 */
+    DR_REG_VIRT8,  /* DR_REG_R8 */
+    DR_REG_VIRT9,  /* DR_REG_R9 */
+    DR_REG_VIRT10, /* DR_REG_R10 */
+    DR_REG_VIRT11, /* DR_REG_R11 */
+    DR_REG_VIRT12, /* DR_REG_R12 */
+    DR_REG_VIRT13, /* DR_REG_R13 or DR_REG_SP */
+    DR_REG_VIRT14, /* DR_REG_R14 or DR_REG_LR */
+    DR_REG_VIRT15, /* DR_REG_R15 or DR_REG_PC */
+
+    /* from DR_REG_Q0 to DR_REG_Q31 */
+    DR_REG_VIRT16, /* DR_REG_Q0 */
+    DR_REG_VIRT17, /* DR_REG_Q1 */
+    DR_REG_VIRT18, /* DR_REG_Q2 */
+    DR_REG_VIRT19, /* DR_REG_Q3 */
+    DR_REG_VIRT20, /* DR_REG_Q4 */
+    DR_REG_VIRT21, /* DR_REG_Q5 */
+    DR_REG_VIRT22, /* DR_REG_Q6 */
+    DR_REG_VIRT23, /* DR_REG_Q7 */
+    DR_REG_VIRT24, /* DR_REG_Q8 */
+    DR_REG_VIRT25, /* DR_REG_Q9 */
+    DR_REG_VIRT26, /* DR_REG_Q10 */
+    DR_REG_VIRT27, /* DR_REG_Q11 */
+    DR_REG_VIRT28, /* DR_REG_Q12 */
+    DR_REG_VIRT29, /* DR_REG_Q13 */
+    DR_REG_VIRT30, /* DR_REG_Q14 */
+    DR_REG_VIRT31, /* DR_REG_Q15 */
+    /* The following are x64-only but simpler code to not ifdef it.
+     */
+    DR_REG_VIRT32, /* DR_REG_Q16 */
+    DR_REG_VIRT33, /* DR_REG_Q17 */
+    DR_REG_VIRT34, /* DR_REG_Q18 */
+    DR_REG_VIRT35, /* DR_REG_Q19 */
+    DR_REG_VIRT36, /* DR_REG_Q20 */
+    DR_REG_VIRT37, /* DR_REG_Q21 */
+    DR_REG_VIRT38, /* DR_REG_Q22 */
+    DR_REG_VIRT39, /* DR_REG_Q23 */
+    DR_REG_VIRT40, /* DR_REG_Q24 */
+    DR_REG_VIRT41, /* DR_REG_Q25 */
+    DR_REG_VIRT42, /* DR_REG_Q26 */
+    DR_REG_VIRT43, /* DR_REG_Q27 */
+    DR_REG_VIRT44, /* DR_REG_Q28 */
+    DR_REG_VIRT45, /* DR_REG_Q29 */
+    DR_REG_VIRT46, /* DR_REG_Q30 */
+    DR_REG_VIRT47, /* DR_REG_Q31 */
+
+    /* For AArch64, the smaller SIMD names refer to the lower
+     * bits of the corresponding same-number larger SIMD register.
+     * But for AArch32, the smaller ones are compressed such that
+     * they refer to the top and bottom.  B and H are AArch64-only.
+     */
+    /* from DR_REG_D0 to DR_REG_D31 */
+    DR_REG_VIRT16, /* DR_REG_D0 */
+    DR_REG_VIRT16, /* DR_REG_D1 */
+    DR_REG_VIRT17, /* DR_REG_D2 */
+    DR_REG_VIRT17, /* DR_REG_D3 */
+    DR_REG_VIRT18, /* DR_REG_D4 */
+    DR_REG_VIRT18, /* DR_REG_D5 */
+    DR_REG_VIRT19, /* DR_REG_D6 */
+    DR_REG_VIRT19, /* DR_REG_D7 */
+    DR_REG_VIRT20, /* DR_REG_D8 */
+    DR_REG_VIRT20, /* DR_REG_D9 */
+    DR_REG_VIRT21, /* DR_REG_D10 */
+    DR_REG_VIRT21, /* DR_REG_D11 */
+    DR_REG_VIRT22, /* DR_REG_D12 */
+    DR_REG_VIRT22, /* DR_REG_D13 */
+    DR_REG_VIRT23, /* DR_REG_D14 */
+    DR_REG_VIRT23, /* DR_REG_D15 */
+    DR_REG_VIRT24, /* DR_REG_D16 */
+    DR_REG_VIRT24, /* DR_REG_D17 */
+    DR_REG_VIRT25, /* DR_REG_D18 */
+    DR_REG_VIRT25, /* DR_REG_D19 */
+    DR_REG_VIRT26, /* DR_REG_D20 */
+    DR_REG_VIRT26, /* DR_REG_D21 */
+    DR_REG_VIRT27, /* DR_REG_D22 */
+    DR_REG_VIRT27, /* DR_REG_D23 */
+    DR_REG_VIRT28, /* DR_REG_D24 */
+    DR_REG_VIRT28, /* DR_REG_D25 */
+    DR_REG_VIRT29, /* DR_REG_D26 */
+    DR_REG_VIRT29, /* DR_REG_D27 */
+    DR_REG_VIRT30, /* DR_REG_D28 */
+    DR_REG_VIRT30, /* DR_REG_D29 */
+    DR_REG_VIRT31, /* DR_REG_D30 */
+    DR_REG_VIRT31, /* DR_REG_D31 */
+
+    /* from DR_REG_S0 to DR_REG_S31 */
+    DR_REG_VIRT16, /* DR_REG_S0 */
+    DR_REG_VIRT16, /* DR_REG_S1 */
+    DR_REG_VIRT16, /* DR_REG_S2 */
+    DR_REG_VIRT16, /* DR_REG_S3 */
+    DR_REG_VIRT17, /* DR_REG_S4 */
+    DR_REG_VIRT17, /* DR_REG_S5 */
+    DR_REG_VIRT17, /* DR_REG_S6 */
+    DR_REG_VIRT17, /* DR_REG_S7 */
+    DR_REG_VIRT18, /* DR_REG_S8 */
+    DR_REG_VIRT18, /* DR_REG_S9 */
+    DR_REG_VIRT18, /* DR_REG_S10 */
+    DR_REG_VIRT18, /* DR_REG_S11 */
+    DR_REG_VIRT19, /* DR_REG_S12 */
+    DR_REG_VIRT19, /* DR_REG_S13 */
+    DR_REG_VIRT19, /* DR_REG_S14 */
+    DR_REG_VIRT19, /* DR_REG_S15 */
+    DR_REG_VIRT20, /* DR_REG_S16 */
+    DR_REG_VIRT20, /* DR_REG_S17 */
+    DR_REG_VIRT20, /* DR_REG_S18 */
+    DR_REG_VIRT20, /* DR_REG_S19 */
+    DR_REG_VIRT21, /* DR_REG_S20 */
+    DR_REG_VIRT21, /* DR_REG_S21 */
+    DR_REG_VIRT21, /* DR_REG_S22 */
+    DR_REG_VIRT21, /* DR_REG_S23 */
+    DR_REG_VIRT22, /* DR_REG_S24 */
+    DR_REG_VIRT22, /* DR_REG_S25 */
+    DR_REG_VIRT22, /* DR_REG_S26 */
+    DR_REG_VIRT22, /* DR_REG_S27 */
+    DR_REG_VIRT23, /* DR_REG_S28 */
+    DR_REG_VIRT23, /* DR_REG_S29 */
+    DR_REG_VIRT23, /* DR_REG_S30 */
+    DR_REG_VIRT23, /* DR_REG_S31 */
+
+    /* AArch64-only.
+     * from DR_REG_H0 to DR_REG_H31
+     */
+    DR_REG_VIRT16, /* DR_REG_H0 */
+    DR_REG_VIRT17, /* DR_REG_H1 */
+    DR_REG_VIRT18, /* DR_REG_H2 */
+    DR_REG_VIRT19, /* DR_REG_H3 */
+    DR_REG_VIRT20, /* DR_REG_H4 */
+    DR_REG_VIRT21, /* DR_REG_H5 */
+    DR_REG_VIRT22, /* DR_REG_H6 */
+    DR_REG_VIRT23, /* DR_REG_H7 */
+    DR_REG_VIRT24, /* DR_REG_H8 */
+    DR_REG_VIRT25, /* DR_REG_H9 */
+    DR_REG_VIRT26, /* DR_REG_H10 */
+    DR_REG_VIRT27, /* DR_REG_H11 */
+    DR_REG_VIRT28, /* DR_REG_H12 */
+    DR_REG_VIRT29, /* DR_REG_H13 */
+    DR_REG_VIRT30, /* DR_REG_H14 */
+    DR_REG_VIRT31, /* DR_REG_H15 */
+    DR_REG_VIRT48, /* DR_REG_H16 */
+    DR_REG_VIRT49, /* DR_REG_H17 */
+    DR_REG_VIRT50, /* DR_REG_H18 */
+    DR_REG_VIRT51, /* DR_REG_H19 */
+    DR_REG_VIRT52, /* DR_REG_H20 */
+    DR_REG_VIRT53, /* DR_REG_H21 */
+    DR_REG_VIRT54, /* DR_REG_H22 */
+    DR_REG_VIRT55, /* DR_REG_H23 */
+    DR_REG_VIRT56, /* DR_REG_H24 */
+    DR_REG_VIRT57, /* DR_REG_H25 */
+    DR_REG_VIRT58, /* DR_REG_H26 */
+    DR_REG_VIRT59, /* DR_REG_H27 */
+    DR_REG_VIRT60, /* DR_REG_H28 */
+    DR_REG_VIRT61, /* DR_REG_H29 */
+    DR_REG_VIRT62, /* DR_REG_H30 */
+    DR_REG_VIRT63, /* DR_REG_H31 */
+
+    /* AArch64-only.
+     * from DR_REG_B0 to DR_REG_B31
+     */
+    DR_REG_VIRT16, /* DR_REG_B0 */
+    DR_REG_VIRT17, /* DR_REG_B1 */
+    DR_REG_VIRT18, /* DR_REG_B2 */
+    DR_REG_VIRT19, /* DR_REG_B3 */
+    DR_REG_VIRT20, /* DR_REG_B4 */
+    DR_REG_VIRT21, /* DR_REG_B5 */
+    DR_REG_VIRT22, /* DR_REG_B6 */
+    DR_REG_VIRT23, /* DR_REG_B7 */
+    DR_REG_VIRT24, /* DR_REG_B8 */
+    DR_REG_VIRT25, /* DR_REG_B9 */
+    DR_REG_VIRT26, /* DR_REG_B10 */
+    DR_REG_VIRT27, /* DR_REG_B11 */
+    DR_REG_VIRT28, /* DR_REG_B12 */
+    DR_REG_VIRT29, /* DR_REG_B13 */
+    DR_REG_VIRT30, /* DR_REG_B14 */
+    DR_REG_VIRT31, /* DR_REG_B15 */
+    DR_REG_VIRT48, /* DR_REG_B16 */
+    DR_REG_VIRT49, /* DR_REG_B17 */
+    DR_REG_VIRT50, /* DR_REG_B18 */
+    DR_REG_VIRT51, /* DR_REG_B19 */
+    DR_REG_VIRT52, /* DR_REG_B20 */
+    DR_REG_VIRT53, /* DR_REG_B21 */
+    DR_REG_VIRT54, /* DR_REG_B22 */
+    DR_REG_VIRT55, /* DR_REG_B23 */
+    DR_REG_VIRT56, /* DR_REG_B24 */
+    DR_REG_VIRT57, /* DR_REG_B25 */
+    DR_REG_VIRT58, /* DR_REG_B26 */
+    DR_REG_VIRT59, /* DR_REG_B27 */
+    DR_REG_VIRT60, /* DR_REG_B28 */
+    DR_REG_VIRT61, /* DR_REG_B29 */
+    DR_REG_VIRT62, /* DR_REG_B30 */
+    DR_REG_VIRT63, /* DR_REG_B31 */
+
+    /* from DR_REG_C0 to DR_REG_C15 */
+    DR_REG_VIRT64, /* DR_REG_C0 */
+    DR_REG_VIRT65, /* DR_REG_C1 */
+    DR_REG_VIRT66, /* DR_REG_C2 */
+    DR_REG_VIRT67, /* DR_REG_C3 */
+    DR_REG_VIRT68, /* DR_REG_C4 */
+    DR_REG_VIRT69, /* DR_REG_C5 */
+    DR_REG_VIRT70, /* DR_REG_C6 */
+    DR_REG_VIRT71, /* DR_REG_C7 */
+    DR_REG_VIRT72, /* DR_REG_C8 */
+    DR_REG_VIRT73, /* DR_REG_C9 */
+    DR_REG_VIRT74, /* DR_REG_C10 */
+    DR_REG_VIRT75, /* DR_REG_C11 */
+    DR_REG_VIRT76, /* DR_REG_C12 */
+    DR_REG_VIRT77, /* DR_REG_C13 */
+    DR_REG_VIRT78, /* DR_REG_C14 */
+    DR_REG_VIRT79, /* DR_REG_C15 */
+
+    DR_REG_VIRT80, /* DR_REG_CPSR */
+    DR_REG_VIRT81, /* DR_REG_SPSR */
+    DR_REG_VIRT82, /* DR_REG_FPSCR */
+    DR_REG_VIRT83, /* DR_REG_TPIDRURW */
+    DR_REG_VIRT84, /* DR_REG_TPIDRURO */
+};
+
 const char *const type_names[] = {
     "TYPE_NONE",
     "TYPE_R_A",
@@ -604,7 +836,7 @@ const char *const type_names[] = {
 
 /* Global data structure to track the decode state,
  * it should be only used for drdecodelib or early init/late exit.
- * FIXME i#1595: add multi-dcontext support to drdecodelib.
+ * XXX i#1595: add multi-dcontext support to drdecodelib.
  */
 static encode_state_t global_encode_state;
 
@@ -787,9 +1019,13 @@ encode_instr_freed_event(dcontext_t *dcontext, instr_t *instr)
 void
 encode_debug_checks(void)
 {
-    CLIENT_ASSERT(sizeof(dr_reg_fixer) / sizeof(dr_reg_fixer[0]) == DR_REG_LAST_ENUM + 1,
+    CLIENT_ASSERT(sizeof(dr_reg_fixer) / sizeof(dr_reg_fixer[0]) ==
+                      DR_REG_AFTER_LAST_VALID_ENUM,
                   "internal register enum error");
-    CLIENT_ASSERT(sizeof(reg_names) / sizeof(reg_names[0]) == DR_REG_LAST_ENUM + 1,
+    CLIENT_ASSERT(sizeof(d_r_reg_id_to_virtual) == sizeof(dr_reg_fixer),
+                  "register to virtual register map size error");
+    CLIENT_ASSERT(sizeof(reg_names) / sizeof(reg_names[0]) ==
+                      DR_REG_AFTER_LAST_VALID_ENUM,
                   "reg_names missing an entry");
     CLIENT_ASSERT(sizeof(type_names) / sizeof(type_names[0]) == TYPE_BEYOND_LAST_ENUM,
                   "type_names missing an entry");
@@ -865,8 +1101,8 @@ reg_simd_start(reg_id_t reg)
 }
 
 static bool
-encode_shift_values(dr_shift_type_t shift, uint amount, ptr_int_t *sh2 OUT,
-                    ptr_int_t *val OUT)
+encode_shift_values(dr_shift_type_t shift, uint amount, ptr_int_t *sh2 DR_PARAM_OUT,
+                    ptr_int_t *val DR_PARAM_OUT)
 {
     if (shift == DR_SHIFT_NONE) {
         *sh2 = 0;
@@ -899,7 +1135,7 @@ encode_shift_values(dr_shift_type_t shift, uint amount, ptr_int_t *sh2 OUT,
 /* 0 stride means no stride */
 static bool
 encode_reglist_ok(decode_info_t *di, opnd_size_t size_temp, instr_t *in, bool is_dst,
-                  uint *counter INOUT, uint min_num, uint max_num, bool is_simd,
+                  uint *counter DR_PARAM_INOUT, uint min_num, uint max_num, bool is_simd,
                   uint stride, uint prior, reg_id_t excludeA, reg_id_t excludeB,
                   reg_id_t base_reg)
 {
@@ -1034,12 +1270,12 @@ get_immed_val_shared(decode_info_t *di, opnd_t opnd, bool relative, bool selecte
             CLIENT_ASSERT(opnd_get_shift(opnd) == 0,
                           "relative shifted instr not supported");
             /* For A32, "cur PC" is "PC + 8"; "PC + 4" for Thumb, sometimes aligned */
-            return (ptr_int_t)opnd_get_instr(opnd)->note -
-                (di->cur_note +
+            return (ptr_int_t)opnd_get_instr(opnd)->offset -
+                (di->cur_offs +
                  decode_cur_pc(di->final_pc, di->isa_mode, di->opcode, NULL) -
                  di->final_pc);
         } else {
-            ptr_int_t val = (ptr_int_t)opnd_get_instr(opnd)->note - (di->cur_note) +
+            ptr_int_t val = (ptr_int_t)opnd_get_instr(opnd)->offset - (di->cur_offs) +
                 (ptr_int_t)di->final_pc;
             /* Support insert_mov_instr_addr() by truncating to opnd size */
             uint bits = opnd_size_in_bits(opnd_get_size(opnd));
@@ -1053,9 +1289,9 @@ get_immed_val_shared(decode_info_t *di, opnd_t opnd, bool relative, bool selecte
     } else if (opnd_is_near_pc(opnd)) {
         if (relative) {
             /* For A32, "cur PC" is "PC + 8"; "PC + 4" for Thumb, sometimes aligned */
-            return (ptr_int_t)(
-                opnd_get_pc(opnd) -
-                decode_cur_pc(di->final_pc, di->isa_mode, di->opcode, NULL));
+            return (
+                ptr_int_t)(opnd_get_pc(opnd) -
+                           decode_cur_pc(di->final_pc, di->isa_mode, di->opcode, NULL));
         } else {
             return (ptr_int_t)opnd_get_pc(opnd);
         }
@@ -1197,7 +1433,7 @@ encode_T32_modified_immed_ok(decode_info_t *di, opnd_size_t size_temp, opnd_t op
     /* 4) ROR of 1bcdefgh */
     first_one = -1;
     for (i = 31; i >= 0; i--) {
-        if (TEST(1 << i, val)) {
+        if (TESTANY(1 << i, val)) {
             if (first_one == -1)
                 first_one = i;
             else if (first_one - i >= 8)
@@ -1353,8 +1589,8 @@ get_abspc_delta(decode_info_t *di, opnd_t opnd)
 {
     /* For A32, "cur PC" is really "PC + 8"; "PC + 4" for Thumb, sometimes aligned */
     if (opnd_is_mem_instr(opnd)) {
-        return (ptr_int_t)opnd_get_instr(opnd)->note -
-            (di->cur_note + decode_cur_pc(di->final_pc, di->isa_mode, di->opcode, NULL) -
+        return (ptr_int_t)opnd_get_instr(opnd)->offset -
+            (di->cur_offs + decode_cur_pc(di->final_pc, di->isa_mode, di->opcode, NULL) -
              di->final_pc) +
             opnd_get_mem_instr_disp(opnd);
     } else {
@@ -1373,12 +1609,14 @@ encode_abspc_ok(decode_info_t *di, opnd_size_t size_immed, opnd_t opnd, bool is_
         bool res = false;
         if (negated) {
             res = (delta < 0 &&
-                   encode_immed_ok(di, size_immed, -delta, scale, false /*unsigned*/,
-                                   negated));
+                   (!di->check_reachable ||
+                    encode_immed_ok(di, size_immed, -delta, scale, false /*unsigned*/,
+                                    negated)));
         } else {
             res = (delta >= 0 &&
-                   encode_immed_ok(di, size_immed, delta, scale, false /*unsigned*/,
-                                   negated));
+                   (!di->check_reachable ||
+                    encode_immed_ok(di, size_immed, delta, scale, false /*unsigned*/,
+                                    negated)));
         }
         if (res) {
             di->check_wb_base = DR_REG_PC;
@@ -1394,7 +1632,7 @@ static int
 opnd_get_signed_disp(opnd_t opnd)
 {
     int disp = opnd_get_disp(opnd);
-    if (TEST(DR_OPND_NEGATED, opnd_get_flags(opnd)))
+    if (TESTANY(DR_OPND_NEGATED, opnd_get_flags(opnd)))
         return -disp;
     else
         return disp;
@@ -1402,7 +1640,7 @@ opnd_get_signed_disp(opnd_t opnd)
 
 static bool
 encode_opnd_ok(decode_info_t *di, byte optype, opnd_size_t size_temp, instr_t *in,
-               bool is_dst, uint *counter INOUT)
+               bool is_dst, uint *counter DR_PARAM_OUT)
 {
     uint opnum = (*counter)++;
     opnd_t opnd;
@@ -1831,11 +2069,11 @@ encode_opnd_ok(decode_info_t *di, byte optype, opnd_size_t size_temp, instr_t *i
         if (opnd_is_base_disp(opnd) && opnd_get_base(opnd) != REG_NULL &&
             opnd_get_index(opnd) == REG_NULL &&
             opnd_get_index_shift(opnd, NULL) == DR_SHIFT_NONE &&
-            (BOOLS_MATCH(TEST(DR_OPND_NEGATED, opnd_get_flags(opnd)),
+            (BOOLS_MATCH(TESTANY(DR_OPND_NEGATED, opnd_get_flags(opnd)),
                          optype == TYPE_M_NEG_I12) ||
              opnd_get_disp(opnd) == 0) &&
             encode_immed_ok(di, OPSZ_12b, opnd_get_disp(opnd), 1, false /*unsigned*/,
-                            TEST(DR_OPND_NEGATED, opnd_get_flags(opnd))) &&
+                            TESTANY(DR_OPND_NEGATED, opnd_get_flags(opnd))) &&
             size_op == size_temp) {
             di->check_wb_base = opnd_get_base(opnd);
             di->check_wb_disp_sz = OPSZ_12b;
@@ -1852,7 +2090,7 @@ encode_opnd_ok(decode_info_t *di, byte optype, opnd_size_t size_temp, instr_t *i
             opnd_get_index(opnd) != REG_NULL &&
             !(di->T32_16 && opnd_get_index(opnd) > DR_REG_R7) &&
             opnd_get_index_shift(opnd, NULL) == DR_SHIFT_NONE &&
-            BOOLS_MATCH(TEST(DR_OPND_NEGATED, opnd_get_flags(opnd)),
+            BOOLS_MATCH(TESTANY(DR_OPND_NEGATED, opnd_get_flags(opnd)),
                         optype == TYPE_M_NEG_REG) &&
             opnd_get_disp(opnd) == 0 && size_op == size_temp) {
             di->check_wb_base = opnd_get_base(opnd);
@@ -1864,7 +2102,7 @@ encode_opnd_ok(decode_info_t *di, byte optype, opnd_size_t size_temp, instr_t *i
     case TYPE_M_NEG_SHREG:
         if (opnd_is_base_disp(opnd) && opnd_get_base(opnd) != REG_NULL &&
             opnd_get_index(opnd) != REG_NULL &&
-            BOOLS_MATCH(TEST(DR_OPND_NEGATED, opnd_get_flags(opnd)),
+            BOOLS_MATCH(TESTANY(DR_OPND_NEGATED, opnd_get_flags(opnd)),
                         optype == TYPE_M_NEG_SHREG) &&
             opnd_get_disp(opnd) == 0 && size_op == size_temp) {
             ptr_int_t sh2, val;
@@ -1884,7 +2122,7 @@ encode_opnd_ok(decode_info_t *di, byte optype, opnd_size_t size_temp, instr_t *i
     case TYPE_M_POS_LSH1REG:
         if (opnd_is_base_disp(opnd) && opnd_get_base(opnd) != REG_NULL &&
             opnd_get_index(opnd) != REG_NULL &&
-            !TEST(DR_OPND_NEGATED, opnd_get_flags(opnd)) && opnd_get_disp(opnd) == 0 &&
+            !TESTANY(DR_OPND_NEGATED, opnd_get_flags(opnd)) && opnd_get_disp(opnd) == 0 &&
             size_op == size_temp) {
             ptr_int_t sh2, val;
             uint amount;
@@ -1923,7 +2161,7 @@ encode_opnd_ok(decode_info_t *di, byte optype, opnd_size_t size_temp, instr_t *i
         return (opnd_is_base_disp(opnd) && opnd_get_base(opnd) == DR_REG_SP &&
                 opnd_get_index(opnd) == REG_NULL &&
                 opnd_get_index_shift(opnd, NULL) == DR_SHIFT_NONE &&
-                !TEST(DR_OPND_NEGATED, opnd_get_flags(opnd)) &&
+                !TESTANY(DR_OPND_NEGATED, opnd_get_flags(opnd)) &&
                 encode_immed_ok(di, OPSZ_1, opnd_get_disp(opnd), 4, false /*unsigned*/,
                                 false /*pos*/) &&
                 size_op == size_temp);
@@ -1932,11 +2170,11 @@ encode_opnd_ok(decode_info_t *di, byte optype, opnd_size_t size_temp, instr_t *i
         if (opnd_is_base_disp(opnd) && opnd_get_base(opnd) != REG_NULL &&
             opnd_get_index(opnd) == REG_NULL &&
             opnd_get_index_shift(opnd, NULL) == DR_SHIFT_NONE &&
-            (BOOLS_MATCH(TEST(DR_OPND_NEGATED, opnd_get_flags(opnd)),
+            (BOOLS_MATCH(TESTANY(DR_OPND_NEGATED, opnd_get_flags(opnd)),
                          optype == TYPE_M_NEG_I8) ||
              opnd_get_disp(opnd) == 0) &&
             encode_immed_ok(di, OPSZ_1, opnd_get_disp(opnd), 1, false /*unsigned*/,
-                            TEST(DR_OPND_NEGATED, opnd_get_flags(opnd))) &&
+                            TESTANY(DR_OPND_NEGATED, opnd_get_flags(opnd))) &&
             size_op == size_temp) {
             di->check_wb_base = opnd_get_base(opnd);
             di->check_wb_disp_sz = OPSZ_1;
@@ -1951,11 +2189,11 @@ encode_opnd_ok(decode_info_t *di, byte optype, opnd_size_t size_temp, instr_t *i
         if (opnd_is_base_disp(opnd) && opnd_get_base(opnd) != REG_NULL &&
             opnd_get_index(opnd) == REG_NULL &&
             opnd_get_index_shift(opnd, NULL) == DR_SHIFT_NONE &&
-            (BOOLS_MATCH(TEST(DR_OPND_NEGATED, opnd_get_flags(opnd)),
+            (BOOLS_MATCH(TESTANY(DR_OPND_NEGATED, opnd_get_flags(opnd)),
                          optype == TYPE_M_NEG_I8x4) ||
              opnd_get_disp(opnd) == 0) &&
             encode_immed_ok(di, OPSZ_1, opnd_get_disp(opnd), 4, false /*unsigned*/,
-                            TEST(DR_OPND_NEGATED, opnd_get_flags(opnd))) &&
+                            TESTANY(DR_OPND_NEGATED, opnd_get_flags(opnd))) &&
             size_op == size_temp) {
             di->check_wb_base = opnd_get_base(opnd);
             di->check_wb_disp_sz = OPSZ_1;
@@ -1970,11 +2208,11 @@ encode_opnd_ok(decode_info_t *di, byte optype, opnd_size_t size_temp, instr_t *i
         if (opnd_is_base_disp(opnd) && opnd_get_base(opnd) != REG_NULL &&
             opnd_get_index(opnd) == REG_NULL &&
             opnd_get_index_shift(opnd, NULL) == DR_SHIFT_NONE &&
-            (BOOLS_MATCH(TEST(DR_OPND_NEGATED, opnd_get_flags(opnd)),
+            (BOOLS_MATCH(TESTANY(DR_OPND_NEGATED, opnd_get_flags(opnd)),
                          optype == TYPE_M_NEG_I4_4) ||
              opnd_get_disp(opnd) == 0) &&
             encode_immed_ok(di, OPSZ_1, opnd_get_disp(opnd), 1, false /*unsigned*/,
-                            TEST(DR_OPND_NEGATED, opnd_get_flags(opnd))) &&
+                            TESTANY(DR_OPND_NEGATED, opnd_get_flags(opnd))) &&
             size_op == size_temp) {
             di->check_wb_base = opnd_get_base(opnd);
             di->check_wb_disp_sz = OPSZ_1;
@@ -1989,7 +2227,7 @@ encode_opnd_ok(decode_info_t *di, byte optype, opnd_size_t size_temp, instr_t *i
             opnd_get_base(opnd) <= DR_REG_R7 /* T32.16 only */ &&
             opnd_get_base(opnd) != REG_NULL && opnd_get_index(opnd) == REG_NULL &&
             opnd_get_index_shift(opnd, NULL) == DR_SHIFT_NONE &&
-            !TEST(DR_OPND_NEGATED, opnd_get_flags(opnd)) &&
+            !TESTANY(DR_OPND_NEGATED, opnd_get_flags(opnd)) &&
             encode_immed_ok(di, OPSZ_5b, opnd_get_disp(opnd), 1, false /*unsigned*/,
                             false /*pos*/) &&
             size_op == size_temp) {
@@ -2004,7 +2242,7 @@ encode_opnd_ok(decode_info_t *di, byte optype, opnd_size_t size_temp, instr_t *i
             opnd_get_base(opnd) <= DR_REG_R7 /* T32.16 only */ &&
             opnd_get_base(opnd) != REG_NULL && opnd_get_index(opnd) == REG_NULL &&
             opnd_get_index_shift(opnd, NULL) == DR_SHIFT_NONE &&
-            !TEST(DR_OPND_NEGATED, opnd_get_flags(opnd)) &&
+            !TESTANY(DR_OPND_NEGATED, opnd_get_flags(opnd)) &&
             encode_immed_ok(di, OPSZ_5b, opnd_get_disp(opnd), 2, false /*unsigned*/,
                             false /*pos*/) &&
             size_op == size_temp) {
@@ -2019,7 +2257,7 @@ encode_opnd_ok(decode_info_t *di, byte optype, opnd_size_t size_temp, instr_t *i
             opnd_get_base(opnd) <= DR_REG_R7 /* T32.16 only */ &&
             opnd_get_base(opnd) != REG_NULL && opnd_get_index(opnd) == REG_NULL &&
             opnd_get_index_shift(opnd, NULL) == DR_SHIFT_NONE &&
-            !TEST(DR_OPND_NEGATED, opnd_get_flags(opnd)) &&
+            !TESTANY(DR_OPND_NEGATED, opnd_get_flags(opnd)) &&
             encode_immed_ok(di, OPSZ_5b, opnd_get_disp(opnd), 4, false /*unsigned*/,
                             false /*pos*/) &&
             size_op == size_temp) {
@@ -2033,7 +2271,7 @@ encode_opnd_ok(decode_info_t *di, byte optype, opnd_size_t size_temp, instr_t *i
         if (opnd_is_base_disp(opnd) && opnd_get_base(opnd) == DR_REG_PC &&
             opnd_get_index(opnd) == REG_NULL &&
             opnd_get_index_shift(opnd, NULL) == DR_SHIFT_NONE &&
-            !TEST(DR_OPND_NEGATED, opnd_get_flags(opnd)) &&
+            !TESTANY(DR_OPND_NEGATED, opnd_get_flags(opnd)) &&
             encode_immed_ok(di, OPSZ_1, opnd_get_disp(opnd), 4, false /*unsigned*/,
                             false /*pos*/) &&
             size_op == size_temp) {
@@ -2049,11 +2287,11 @@ encode_opnd_ok(decode_info_t *di, byte optype, opnd_size_t size_temp, instr_t *i
         if (opnd_is_base_disp(opnd) && opnd_get_base(opnd) == DR_REG_PC &&
             opnd_get_index(opnd) == REG_NULL &&
             opnd_get_index_shift(opnd, NULL) == DR_SHIFT_NONE &&
-            (BOOLS_MATCH(TEST(DR_OPND_NEGATED, opnd_get_flags(opnd)),
+            (BOOLS_MATCH(TESTANY(DR_OPND_NEGATED, opnd_get_flags(opnd)),
                          optype == TYPE_M_PCREL_NEG_I12) ||
              opnd_get_disp(opnd) == 0) &&
             encode_immed_ok(di, OPSZ_12b, opnd_get_disp(opnd), 1, false /*unsigned*/,
-                            TEST(DR_OPND_NEGATED, opnd_get_flags(opnd))) &&
+                            TESTANY(DR_OPND_NEGATED, opnd_get_flags(opnd))) &&
             size_op == size_temp) {
             di->check_wb_base = opnd_get_base(opnd);
             di->check_wb_disp_sz = OPSZ_12b;
@@ -2122,7 +2360,7 @@ encoding_possible(decode_info_t *di, instr_t *in, const instr_info_t *ii)
         if (pred == DR_PRED_OP) {
             di->errmsg = "DR_PRED_OP is an illegal predicate request";
             return false;
-        } else if (TEST(DECODE_PREDICATE_28_AL, ii->flags)) {
+        } else if (TESTANY(DECODE_PREDICATE_28_AL, ii->flags)) {
             if (pred != DR_PRED_AL && pred != DR_PRED_NONE) {
                 di->errmsg = "DR_PRED_AL is the only valid predicate";
                 return false;
@@ -2156,9 +2394,10 @@ encoding_possible(decode_info_t *di, instr_t *in, const instr_info_t *ii)
         }
         if (ii->dst2_type != TYPE_NONE) {
             if (!encode_opnd_ok(di, ii->dst2_type, ii->dst2_size, in,
-                                !TEST(DECODE_4_SRCS, ii->flags),
-                                TEST(DECODE_4_SRCS, ii->flags) ? &num_srcs : &num_dsts)) {
-                if (TEST(DECODE_4_SRCS, ii->flags)) {
+                                !TESTANY(DECODE_4_SRCS, ii->flags),
+                                TESTANY(DECODE_4_SRCS, ii->flags) ? &num_srcs
+                                                                  : &num_dsts)) {
+                if (TESTANY(DECODE_4_SRCS, ii->flags)) {
                     di->errmsg = "Source operand #%d has wrong type/size";
                     di->errmsg_param = num_srcs - 1;
                 } else {
@@ -2170,9 +2409,10 @@ encoding_possible(decode_info_t *di, instr_t *in, const instr_info_t *ii)
         }
         if (ii->src1_type != TYPE_NONE) {
             if (!encode_opnd_ok(di, ii->src1_type, ii->src1_size, in,
-                                TEST(DECODE_3_DSTS, ii->flags),
-                                TEST(DECODE_3_DSTS, ii->flags) ? &num_dsts : &num_srcs)) {
-                if (TEST(DECODE_3_DSTS, ii->flags)) {
+                                TESTANY(DECODE_3_DSTS, ii->flags),
+                                TESTANY(DECODE_3_DSTS, ii->flags) ? &num_dsts
+                                                                  : &num_srcs)) {
+                if (TESTANY(DECODE_3_DSTS, ii->flags)) {
                     di->errmsg = "Destination operand #%d has wrong type/size";
                     di->errmsg_param = num_dsts - 1;
                 } else {
@@ -2322,7 +2562,7 @@ encode_index_shift(decode_info_t *di, opnd_t opnd, bool encode_type)
 
 static void
 encode_operand(decode_info_t *di, byte optype, opnd_size_t size_temp, instr_t *in,
-               bool is_dst, uint *counter INOUT)
+               bool is_dst, uint *counter DR_PARAM_OUT)
 {
     uint opnum = (*counter)++;
     opnd_size_t size_temp_up = resolve_size_upward(size_temp);
@@ -2999,13 +3239,13 @@ encode_operands(decode_info_t *di, instr_t *in, const instr_info_t *ii)
             encode_operand(di, ii->dst1_type, ii->dst1_size, in, true, &num_dsts);
         if (ii->dst2_type != TYPE_NONE) {
             encode_operand(di, ii->dst2_type, ii->dst2_size, in,
-                           !TEST(DECODE_4_SRCS, ii->flags),
-                           TEST(DECODE_4_SRCS, ii->flags) ? &num_srcs : &num_dsts);
+                           !TESTANY(DECODE_4_SRCS, ii->flags),
+                           TESTANY(DECODE_4_SRCS, ii->flags) ? &num_srcs : &num_dsts);
         }
         if (ii->src1_type != TYPE_NONE) {
             encode_operand(di, ii->src1_type, ii->src1_size, in,
-                           TEST(DECODE_3_DSTS, ii->flags),
-                           TEST(DECODE_3_DSTS, ii->flags) ? &num_dsts : &num_srcs);
+                           TESTANY(DECODE_3_DSTS, ii->flags),
+                           TESTANY(DECODE_3_DSTS, ii->flags) ? &num_dsts : &num_srcs);
         }
         if (ii->src2_type != TYPE_NONE)
             encode_operand(di, ii->src2_type, ii->src2_size, in, false, &num_srcs);
@@ -3031,17 +3271,16 @@ instr_encode_arch(dcontext_t *dcontext, instr_t *instr, byte *copy_pc, byte *fin
     }
 
     decode_info_init_for_instr(&di, instr);
-    di.opcode = instr_get_opcode(instr);
     di.check_reachable = check_reachable;
     di.start_pc = copy_pc;
     di.final_pc = final_pc;
-    di.cur_note = (ptr_int_t)instr->note;
+    di.cur_offs = (ptr_int_t)instr->offset;
     di.encode_state = *get_encode_state(dcontext);
 
     /* We need to track the IT block state even for raw-bits-valid instrs.
      * Unlike x86, we have no fast decoder that skips opcodes, so we should
      * always have the opcode, except for decode_fragment cases:
-     * FIXME i#1551: investigate handling for decode_fragment for a branch inside
+     * XXX i#1551: investigate handling for decode_fragment for a branch inside
      * an IT block.  We should probably change decode_fragment() to fully
      * and separately decode all IT block instrs.
      */
@@ -3058,6 +3297,11 @@ instr_encode_arch(dcontext_t *dcontext, instr_t *instr, byte *copy_pc, byte *fin
         return copy_and_re_relativize_raw_instr(dcontext, instr, copy_pc, final_pc);
     }
     CLIENT_ASSERT(instr_operands_valid(instr), "instr_encode error: operands invalid");
+
+    /* We delay this until after handling raw instrs to avoid trying to get the opcode
+     * of a data-only instr.
+     */
+    di.opcode = instr_get_opcode(instr);
 
     info = instr_get_instr_info(instr);
     if (info == NULL) {
@@ -3095,15 +3339,15 @@ instr_encode_arch(dcontext_t *dcontext, instr_t *instr, byte *copy_pc, byte *fin
 
     /* Encode into di.instr_word */
     di.instr_word = info->opcode;
-    if (TEST(DECODE_PREDICATE_28, info->flags)) {
+    if (TESTANY(DECODE_PREDICATE_28, info->flags)) {
         dr_pred_type_t pred = instr_get_predicate(instr);
         if (pred == DR_PRED_NONE)
             pred = DR_PRED_AL;
         di.instr_word |= (pred - DR_PRED_EQ) << 28;
-    } else if (TEST(DECODE_PREDICATE_22, info->flags)) {
+    } else if (TESTANY(DECODE_PREDICATE_22, info->flags)) {
         dr_pred_type_t pred = instr_get_predicate(instr);
         di.instr_word |= (pred - DR_PRED_EQ) << 22;
-    } else if (TEST(DECODE_PREDICATE_8, info->flags)) {
+    } else if (TESTANY(DECODE_PREDICATE_8, info->flags)) {
         dr_pred_type_t pred = instr_get_predicate(instr);
         di.instr_word |= (pred - DR_PRED_EQ) << 8;
     }
@@ -3170,7 +3414,7 @@ encode_raw_jmp(dr_isa_mode_t isa_mode, byte *target_pc, byte *dst_pc, byte *fina
         *(ushort *)(dst_pc + 2) = valB;
         return dst_pc + THUMB_LONG_INSTR_SIZE;
     }
-    /* FIXME i#1569: add AArch64 support */
+    /* XXX i#1569: add AArch64 support */
     ASSERT_NOT_IMPLEMENTED(false);
     return NULL;
 }

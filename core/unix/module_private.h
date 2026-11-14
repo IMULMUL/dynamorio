@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2021 Google, Inc.  All rights reserved.
  * Copyright (c) 2008-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -35,6 +35,14 @@
 #define MODULE_PRIVATE_H
 
 #include "configure.h"
+#include "module.h"
+
+#ifndef ANDROID
+struct tlsdesc_t {
+    ptr_int_t (*entry)(struct tlsdesc_t *);
+    void *arg;
+};
+#endif
 
 struct _os_privmod_data_t;
 typedef struct _os_privmod_data_t os_privmod_data_t;
@@ -66,6 +74,8 @@ struct _os_privmod_data_t {
     ELF_RELA_TYPE *rela;
     size_t relasz;
     size_t relaent;
+    ELF_WORD *relr;
+    size_t relrsz;
     app_pc verneed;
     int verneednum;
     int relcount;
@@ -88,6 +98,8 @@ struct _os_privmod_data_t {
     uint tls_image_size; /* tls variables size in the file */
     uint tls_first_byte; /* aligned addr of the first tls variable */
     app_pc tls_image;    /* tls block address in memory */
+    /* This is used to get libunwind walking app libraries. */
+    bool use_app_imports;
 };
 
 #ifdef MACOS
@@ -112,17 +124,17 @@ is_macho_header(app_pc base, size_t size);
 
 void
 module_get_os_privmod_data(app_pc base, size_t size, bool relocated,
-                           OUT os_privmod_data_t *pd);
+                           DR_PARAM_OUT os_privmod_data_t *pd);
 
 ptr_uint_t
 module_get_text_section(app_pc file_map, size_t file_size);
 
 app_pc
 get_proc_address_from_os_data(os_module_data_t *os_data, ptr_int_t delta,
-                              const char *name, bool *is_indirect_code OUT);
+                              const char *name, bool *is_indirect_code DR_PARAM_OUT);
 
 bool
-privload_redirect_sym(ptr_uint_t *r_addr, const char *name);
+privload_redirect_sym(os_privmod_data_t *opd, ptr_uint_t *r_addr, const char *name);
 
 #ifdef LINUX
 void

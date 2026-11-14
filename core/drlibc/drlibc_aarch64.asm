@@ -37,6 +37,15 @@
 #include "../asm_defines.asm"
 START_FILE
 
+#ifdef LINUX
+#include "include/syscall.h"
+#endif
+
+DECL_EXTERN(unexpected_return)
+
+        DECLARE_FUNC(dynamorio_syscall)
+GLOBAL_LABEL(dynamorio_syscall:)
+#ifdef LINUX
 /*
  * ptr_int_t dynamorio_syscall(uint sysnum, uint num_args, ...);
  *
@@ -44,8 +53,6 @@ START_FILE
  * - x8: syscall number
  * - x0..x6: syscall arguments
  */
-        DECLARE_FUNC(dynamorio_syscall)
-GLOBAL_LABEL(dynamorio_syscall:)
         cmp      w1, #7
         mov      x8,x0
         mov      x0,x2
@@ -62,15 +69,104 @@ GLOBAL_LABEL(dynamorio_syscall:)
 1:
         svc      #0
         ret
+#elif defined(MACOS)
+/*
+ * x0 = syscall number
+ * x1 = number of arguments
+ * sp+8*n = argument n
+ */
+        mov      x16, x0 /* syscall number goes in x16 */
+        mov      x17, x1
+        cbz      x17, do_svc
+        ldr      x0, [sp]
+        sub      x17, x17, 1
+        cbz      x17, do_svc
+        ldr      x1, [sp, #8]
+        sub      x17, x17, 1
+        cbz      x17, do_svc
+        ldr      x2, [sp, #16]
+        sub      x17, x17, 1
+        cbz      x17, do_svc
+        ldr      x3, [sp, #24]
+        sub      x17, x17, 1
+        cbz      x17, do_svc
+        ldr      x4, [sp, #32]
+        sub      x17, x17, 1
+        cbz      x17, do_svc
+        ldr      x5, [sp, #40]
+        sub      x17, x17, 1
+        cbz      x17, do_svc
+        ldr      x6, [sp, #48]
+        sub      x17, x17, 1
+        cbz      x17, do_svc
+        ldr      x7, [sp, #56]
+do_svc:
+        svc      #0x80
+        b.cs     err_cf
+        ret
+err_cf:
+        mov      x1, x0
+        mov      x0, #-1
+        ret
+#endif
+        END_FUNC(dynamorio_syscall)
 
-#define FUNCNAME dr_fpu_exception_init
-        DECLARE_FUNC(FUNCNAME)
-GLOBAL_LABEL(FUNCNAME:)
+        DECLARE_FUNC(dr_fpu_exception_init)
+GLOBAL_LABEL(dr_fpu_exception_init:)
         mov      x0, #0
         msr      fpcr, x0
         msr      fpsr, x0
         ret
-        END_FUNC(FUNCNAME)
-#undef FUNCNAME
+        END_FUNC(dr_fpu_exception_init)
+
+#ifdef MACOS
+        DECLARE_FUNC(dynamorio_mach_dep_syscall)
+GLOBAL_LABEL(dynamorio_mach_dep_syscall:)
+        /* machine-dependent syscalls use x16=0x80000000 and x3=num, we'll assume
+         * up to 3 args
+         */
+        mov      x3, x0
+        mov      x16, #0x80000000
+        mov      x17, x1
+        cbz      x17, mach_dep_svc
+        ldr      x0, [sp]
+        sub      x17, x17, 1
+        cbz      x17, mach_dep_svc
+        ldr      x1, [sp, #8]
+        sub      x17, x17, 1
+        cbz      x17, mach_dep_svc
+        ldr      x2, [sp, #16]
+mach_dep_svc:
+        svc #0x80
+        ret
+        END_FUNC(dynamorio_mach_dep_syscall)
+
+        DECLARE_FUNC(dynamorio_mach_syscall)
+GLOBAL_LABEL(dynamorio_mach_syscall:)
+        sub x0, xzr, x0 /* On ARM64 the mach syscalls use negated numbers */
+        b _dynamorio_syscall
+        END_FUNC(dynamorio_mach_syscall)
+#endif
+
+#ifdef LINUX
+/* thread_id_t dynamorio_clone(uint flags, byte *newsp, void *ptid, void *tls,
+ *                             void *ctid, void (*func)(void))
+ * TODO i#6514: Add support for passing NULL for newsp.
+ */
+        DECLARE_FUNC(dynamorio_clone)
+GLOBAL_LABEL(dynamorio_clone:)
+        and      ARG2, ARG2, #-FRAME_ALIGNMENT /* Ensure stack alignment. */
+        stp      ARG6, x0, [ARG2, #-16]! /* func is now on TOS of newsp */
+        /* All args are already in syscall registers. */
+        mov      SYSNUM_REG, #SYS_clone
+        svc      #0
+        cbnz     x0, dynamorio_clone_parent
+        ldp      x0, x1, [sp], #16
+        blr      x0
+        bl       GLOBAL_REF(unexpected_return)
+dynamorio_clone_parent:
+        ret
+        END_FUNC(dynamorio_clone)
+#endif
 
 END_FILE

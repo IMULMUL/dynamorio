@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2012-2013 Google, Inc.  All rights reserved.
+ * Copyright (c) 2012-2026 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -33,7 +33,7 @@
 /* Containers DynamoRIO Extension: DrTable */
 
 #ifndef _DRTABLE_H_
-#define _DRTABLE_H_ 1
+#define _DRTABLE_H_
 
 /**
  * @file drtable.h
@@ -51,7 +51,7 @@ extern "C" {
 /**
  * \addtogroup drcontainers Container Data Structures
  */
-/*@{*/ /* begin doxygen group */
+/**@{*/ /* begin doxygen group */
 
 /**
  * Flags used for drtable_create
@@ -72,7 +72,7 @@ typedef enum {
 } drtable_flags_t;
 
 /** Invalid index of drtable */
-#define DRTABLE_INVALID_INDEX ((ptr_uint_t)-1)
+#define DRTABLE_INVALID_INDEX ((ptr_uint_t) - 1)
 
 /**
  * Creates a drtable with the given parameters.
@@ -155,7 +155,7 @@ drtable_num_entries(void *tab);
 ptr_uint_t
 drtable_dump_entries(void *tab, file_t log);
 
-/*@}*/ /* end doxygen group */
+/**@}*/ /* end doxygen group */
 
 #ifdef __cplusplus
 }

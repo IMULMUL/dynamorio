@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2013-2019 Google, Inc.  All rights reserved.
+ * Copyright (c) 2013-2026 Google, Inc.  All rights reserved.
  * Copyright (c) 2000-2008 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -41,10 +41,10 @@
 
 #include "../globals.h"
 #include "proc.h"
-#include "instr.h"        /* for dr_insert_{save,restore}_fpstate */
-#include "instrument.h"   /* for dr_insert_{save,restore}_fpstate */
-#include "instr_create.h" /* for dr_insert_{save,restore}_fpstate */
-#include "decode.h"       /* for dr_insert_{save,restore}_fpstate */
+#include "instr.h"               /* for dr_insert_{save,restore}_fpstate */
+#include "instrument.h"          /* for dr_insert_{save,restore}_fpstate */
+#include "instr_create_shared.h" /* for dr_insert_{save,restore}_fpstate */
+#include "decode.h"              /* for dr_insert_{save,restore}_fpstate */
 
 #ifdef DEBUG
 /* case 10450: give messages to clients */
@@ -90,13 +90,13 @@ get_cache_sizes_amd(uint max_ext_val)
 
     if (max_ext_val >= 0x80000005) {
         our_cpuid((int *)cpuid_res_local, 0x80000005, 0);
-        set_cache_size((cpuid_res_local[2] /*ecx*/ >> 24), &cpu_info.L1_icache_size);
-        set_cache_size((cpuid_res_local[3] /*edx*/ >> 24), &cpu_info.L1_dcache_size);
+        proc_set_cache_size((cpuid_res_local[2] /*ecx*/ >> 24), &cpu_info.L1_icache_size);
+        proc_set_cache_size((cpuid_res_local[3] /*edx*/ >> 24), &cpu_info.L1_dcache_size);
     }
 
     if (max_ext_val >= 0x80000006) {
         our_cpuid((int *)cpuid_res_local, 0x80000006, 0);
-        set_cache_size((cpuid_res_local[2] /*ecx*/ >> 16), &cpu_info.L2_cache_size);
+        proc_set_cache_size((cpuid_res_local[2] /*ecx*/ >> 16), &cpu_info.L2_cache_size);
     }
 }
 
@@ -212,7 +212,7 @@ get_processor_specific_info(void)
     /* First check for existence of the cpuid instruction
      * by attempting to modify bit 21 of eflags
      */
-    /* FIXME: Perhaps we should abort when the cpuid instruction
+    /* XXX: Perhaps we should abort when the cpuid instruction
      * doesn't exist since the cache_line_size may be incorrect.
      * (see case 463 for discussion)
      */
@@ -263,7 +263,9 @@ get_processor_specific_info(void)
     if (max_val >= 0x7) {
         our_cpuid(cpuid_res_local, 0x7, 0);
         res_ebx = cpuid_res_local[1];
+        res_ecx = cpuid_res_local[2];
         cpu_info.features.sext_flags_ebx = res_ebx;
+        cpu_info.features.sext_flags_ecx = res_ecx;
     }
 
     /* now get processor info */
@@ -333,6 +335,21 @@ get_processor_specific_info(void)
         our_cpuid((int *)&cpu_info.brand_string[4], 0x80000003, 0);
         our_cpuid((int *)&cpu_info.brand_string[8], 0x80000004, 0);
     }
+
+    if (standalone_library) {
+        /* For separate decoding, keep a base default and do not target the
+         * underlying processor (xref i#431, i#6420, i#5725).
+         * The user can use proc_set_vendor() to override.
+         * This affects various decoding corner cases and is important to set.
+         * We leave all the other cache info, etc. pointing to the current hardware.
+         * We set this at the end here to avoid errors in getting other
+         * cpuid values with the wrong magic parameters.
+         * XXX: This is still potentially fragile; should the decoder have
+         * a separate vendor value?
+         */
+        LOG(GLOBAL, LOG_TOP, 1, "For standalone decoding, assuming Intel target.\n");
+        cpu_info.vendor = VENDOR_INTEL;
+    }
 }
 
 /* arch specific proc info */
@@ -353,7 +370,7 @@ proc_init_arch(void)
 #endif
 
 #ifdef DEBUG
-    /* FIXME: This is a small subset of processor features.  If we
+    /* XXX: This is a small subset of processor features.  If we
      * care enough to add more, it would probably be best to loop
      * through a const array of feature names.
      */
@@ -362,8 +379,8 @@ proc_init_arch(void)
             cpu_info.features.flags_edx, cpu_info.features.flags_ecx);
         LOG(GLOBAL, LOG_TOP, 1, "\text_edx = 0x%08x\n\text_ecx = 0x%08x\n",
             cpu_info.features.ext_flags_edx, cpu_info.features.ext_flags_ecx);
-        LOG(GLOBAL, LOG_TOP, 1, "\tsext_ebx = 0x%08x\n",
-            cpu_info.features.sext_flags_ebx);
+        LOG(GLOBAL, LOG_TOP, 1, "\tsext_ebx = 0x%08x\n\tsext_ecx = 0x%08x\n",
+            cpu_info.features.sext_flags_ebx, cpu_info.features.sext_flags_ecx);
         if (proc_has_feature(FEATURE_XD_Bit))
             LOG(GLOBAL, LOG_TOP, 1, "\tProcessor has XD Bit\n");
         if (proc_has_feature(FEATURE_MMX))
@@ -428,7 +445,7 @@ proc_init_arch(void)
         if (proc_has_feature(FEATURE_AVX512F)) {
             if (TESTALL(XCR0_HI16_ZMM | XCR0_ZMM_HI256 | XCR0_OPMASK, bv_low)) {
 #if !defined(UNIX)
-                /* FIXME i#1312: AVX-512 is not fully supported and is untested on all
+                /* XXX i#1312: AVX-512 is not fully supported and is untested on all
                  * non-UNIX builds. A SYSLOG_INTERNAL_ERROR_ONCE is issued on Windows
                  * if AVX-512 code is encountered. Setting DynamoRIO to a state that
                  * partially supports AVX-512 is causing problems, xref i#3949. We
@@ -455,9 +472,9 @@ proc_init_arch(void)
             } else {
                 LOG(GLOBAL, LOG_TOP, 1, "\tOS does NOT support AVX-512\n");
             }
-            get_xstate_area_offsets(TEST(XCR0_OPMASK, bv_low),
-                                    TEST(XCR0_ZMM_HI256, bv_low),
-                                    TEST(XCR0_HI16_ZMM, bv_low));
+            get_xstate_area_offsets(TESTANY(XCR0_OPMASK, bv_low),
+                                    TESTANY(XCR0_ZMM_HI256, bv_low),
+                                    TESTANY(XCR0_HI16_ZMM, bv_low));
         }
     }
     for (i = 0; i < DEBUG_REGISTERS_NB; i++) {
@@ -482,12 +499,14 @@ proc_has_feature(feature_bit_t f)
         val = cpu_info.features.ext_flags_ecx;
     } else if (f >= 128 && f <= 159) {
         val = cpu_info.features.sext_flags_ebx;
+    } else if (f >= 160 && f <= 191) {
+        val = cpu_info.features.sext_flags_ecx;
     } else {
         CLIENT_ASSERT(false, "proc_has_feature: invalid parameter");
     }
 
     bit = f % 32;
-    return TEST((1 << bit), val);
+    return TESTANY((1 << bit), val);
 }
 
 /* No synchronization routines necessary.  The Pentium hardware
@@ -533,7 +552,7 @@ void
 proc_set_num_simd_saved(int num)
 {
 #if !defined(UNIX)
-    /* FIXME i#1312: support and test. */
+    /* XXX i#1312: support and test. */
 #else
     SELF_UNPROTECT_DATASEC(DATASEC_RARELY_PROT);
     ATOMIC_4BYTE_WRITE(&num_simd_saved, num, false);
@@ -650,7 +669,7 @@ dr_insert_save_fpstate(void *drcontext, instrlist_t *ilist, instr_t *where, opnd
         /* auto-adjust opnd size so it will encode */
         if (opnd_get_size(buf) == OPSZ_512)
             opnd_set_size(&buf, OPSZ_108);
-        /* FIXME: why is this appending fwait, vs "fsave" which prepends? */
+        /* XXX: why is this appending fwait, vs "fsave" which prepends? */
         instrlist_meta_preinsert(ilist, where, INSTR_CREATE_fnsave(dcontext, buf));
         instrlist_meta_preinsert(ilist, where, INSTR_CREATE_fwait(dcontext));
     }

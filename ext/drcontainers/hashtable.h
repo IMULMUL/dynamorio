@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2007-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -34,7 +34,7 @@
 /* Containers DynamoRIO Extension: Hashtable */
 
 #ifndef _HASHTABLE_H_
-#define _HASHTABLE_H_ 1
+#define _HASHTABLE_H_
 
 /**
  * @file hashtable.h
@@ -52,7 +52,7 @@ extern "C" {
 /**
  * \addtogroup drcontainers Container Data Structures
  */
-/*@{*/ /* begin doxygen group */
+/**@{*/ /* begin doxygen group */
 
 /** The type of hash key */
 typedef enum {
@@ -87,6 +87,7 @@ typedef struct _hashtable_config_t {
     void (*free_key_func)(void *);
 } hashtable_config_t;
 
+/** The storage for a hashtable. */
 typedef struct _hashtable_t {
     hash_entry_t **table;
     hash_type_t hashtype;
@@ -153,6 +154,9 @@ hashtable_init(hashtable_t *table, uint num_bits, hash_type_t hashtype, bool str
  * @param[in]  cmp_key_func        A callback for comparing two keys.
  *   Leave it NULL if no callback is needed and the default is to be used.
  *   For HASH_CUSTOM, a callback must be provided.
+ *
+ * This hashtable uses closed addressing.
+ * For an open-address hashtable, consider dr_hashtable_create().
  */
 void
 hashtable_init_ex(hashtable_t *table, uint num_bits, hash_type_t hashtype, bool str_dup,
@@ -202,17 +206,19 @@ hashtable_remove_range(hashtable_t *table, void *start, void *end);
  * Calls the \p apply_func for each payload.
  * @param table The hashtable to apply the function.
  * @param apply_func A pointer to a function that is called for all payloads
- * stored in the map.
+ * stored in the map. The function is not allowed to add or remove elements to/from the
+ * hashtable being iterated.
  */
 void
 hashtable_apply_to_all_payloads(hashtable_t *table, void (*apply_func)(void *payload));
 
 /**
- * Calls the \p apply_func for each payload with user data. Similar to
- * hashtable_apply_to_all_payloads().
+ * Calls the \p apply_func for each payload with user data.
+ * Similar to hashtable_apply_to_all_payloads().
  * @param table The hashtable to apply the function.
  * @param apply_func A pointer to a function that is called for all payloads
- * stored in the map. It also takes user data as a parameter.
+ * stored in the map. It also takes user data as a parameter. The function is not allowed
+ * to add or remove elements to/from the hashtable being iterated.
  * @param user_data User data that is available when iterating through payloads.
  */
 void
@@ -220,6 +226,20 @@ hashtable_apply_to_all_payloads_user_data(hashtable_t *table,
                                           void (*apply_func)(void *payload,
                                                              void *user_data),
                                           void *user_data);
+
+/**
+ * Calls the \p apply_func for each key-payload pair with user data.
+ * Similar to hashtable_apply_to_all_payloads_user_data().
+ * @param table The hashtable to apply the function.
+ * @param apply_func A pointer to a function that is called for all key-payload pairs
+ * stored in the map. It also takes user data as a parameter. The function is not allowed
+ * to add or remove elements to/from the hashtable being iterated.
+ * @param user_data User data that is available when iterating through payloads.
+ */
+void
+hashtable_apply_to_all_key_payload_pairs_user_data(
+    hashtable_t *table, void (*apply_func)(void *key, void *payload, void *user_data),
+    void *user_data);
 
 /**
  * Removes all entries from the table.  If free_payload_func was specified
@@ -360,7 +380,7 @@ hashtable_resurrect(void *drcontext, byte **map /*INOUT*/, hashtable_t *table,
                     size_t entry_size, void *perscxt, hasthable_persist_flags_t flags,
                     bool (*process_payload)(void *key, void *payload, ptr_int_t shift));
 
-/*@}*/ /* end doxygen group */
+/**@}*/ /* end doxygen group */
 
 #ifdef __cplusplus
 }

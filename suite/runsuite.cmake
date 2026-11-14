@@ -1,5 +1,5 @@
 # **********************************************************
-# Copyright (c) 2010-2020 Google, Inc.    All rights reserved.
+# Copyright (c) 2010-2026 Google, Inc.    All rights reserved.
 # Copyright (c) 2009-2010 VMware, Inc.    All rights reserved.
 # **********************************************************
 
@@ -29,7 +29,7 @@
 # OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
 # DAMAGE.
 
-cmake_minimum_required(VERSION 3.7)
+cmake_minimum_required(VERSION 3.14)
 
 set(CTEST_PROJECT_NAME "DynamoRIO")
 set(cpack_project_name "DynamoRIO")
@@ -37,7 +37,7 @@ set(run_tests ON)
 set(CTEST_SOURCE_DIRECTORY "${CTEST_SCRIPT_DIRECTORY}/..")
 if (APPLE)
   # For now we run just a quarter of the tests, using a test label.
-  # FIXME i#1815: get all the tests working.
+  # XXX i#1815: get all the tests working.
   set(extra_ctest_args INCLUDE_LABEL OSX)
 endif ()
 include("${CTEST_SCRIPT_DIRECTORY}/runsuite_common_pre.cmake")
@@ -49,13 +49,18 @@ set(arg_package OFF)
 set(arg_require_format OFF)
 set(cross_aarchxx_linux_only OFF)
 set(cross_android_only OFF)
+set(cross_riscv64_linux_only OFF)
 set(arg_debug_only OFF) # Only build the main debug builds.
 set(arg_nontest_only OFF) # Only build configs with no tests.
+set(arg_branch "master") # branch to diff this patch against
 foreach (arg ${CTEST_SCRIPT_ARG})
   if (${arg} STREQUAL "automated_ci")
     set(arg_automated_ci ON)
     if ($ENV{DYNAMORIO_CROSS_AARCHXX_LINUX_ONLY} MATCHES "yes")
       set(cross_aarchxx_linux_only ON)
+    endif()
+    if ($ENV{DYNAMORIO_CROSS_RISCV64_LINUX_ONLY} MATCHES "yes")
+      set(cross_riscv64_linux_only ON)
     endif()
     if ($ENV{DYNAMORIO_CROSS_ANDROID_ONLY} MATCHES "yes")
       set(cross_android_only ON)
@@ -74,17 +79,38 @@ foreach (arg ${CTEST_SCRIPT_ARG})
     set(arg_debug_only ON)
   elseif (${arg} STREQUAL "nontest_only")
     set(arg_nontest_only ON)
+  elseif (${arg} MATCHES "^branch=")
+    string(REGEX REPLACE "^branch=" "" arg_branch "${arg}")
   endif ()
 endforeach (arg)
+
+if (UNIX AND NOT APPLE AND NOT ANDROID AND NOT cross_riscv64_linux_only)
+  execute_process(COMMAND ldd --version
+    RESULT_VARIABLE ldd_result ERROR_VARIABLE ldd_err OUTPUT_VARIABLE ldd_out)
+  message("ldd --version: ${ldd_out}")
+  if (arg_32_only AND NOT cross_aarchxx_linux_only AND NOT cross_android_only)
+    # TODO i#6417: The switch to AMD VM's for GA CI has broken many of our tests.
+    # This includes timeouts which increases suite length.
+    # Until we get ths x86-32 job back green, we drop back to a small set of tests.
+    set(extra_ctest_args EXCLUDE_LABEL AMD_X32_DENYLIST)
+  endif ()
+endif ()
 
 set(build_tests "BUILD_TESTS:BOOL=ON")
 
 if (arg_automated_ci)
   # XXX i#1801, i#1962: under clang we have several failing tests.  Until those are
   # fixed, our CI clang suite only builds and does not run tests.
-  if (UNIX AND NOT APPLE AND "$ENV{CC}" MATCHES "clang")
-    set(run_tests OFF)
-    message("Detected a CI clang suite: disabling running of tests")
+  # TODO i#1973: our musl port passes only half of the tests. Enable tests in CI
+  # when it's ready.
+  if (UNIX AND NOT APPLE)
+    if ("$ENV{DYNAMORIO_CLANG}" MATCHES "yes")
+        set(run_tests OFF)
+        message("Detected a CI clang suite: disabling running of tests")
+    elseif ("$ENV{DYNAMORIO_MUSL}" MATCHES "yes")
+        set(run_tests OFF)
+        message("Detected a CI musl suite: disabling running of tests")
+    endif ()
   endif ()
   if ("$ENV{CI_TARGET}" STREQUAL "package")
     # We don't want flaky tests to derail package deployment.  We've already run
@@ -101,19 +127,30 @@ if (arg_automated_ci)
     # to be off, ruining the samples for interactive use.
     set(build_tests "")
     message("Detected a cron package build: disabling running of tests")
+    # We want the same Github Actions settings for building as we have for continuous
+    # testing so we set AUTOMATED_TESTING.
+    set(base_cache "${base_cache}
+AUTOMATED_TESTING:BOOL=ON")
   else ()
     # Disable -msgbox_mask by default to avoid hangs on cases where DR hits errors
     # prior to option parsing.
-    set(build_tests "${build_tests}
+    set(base_cache "${base_cache}
 AUTOMATED_TESTING:BOOL=ON")
+    # We assume our GitHub Actions automated CI has password-less sudo.
+    # Our Jenkins tester does not.  CI_TRIGGER is only set for Actions.
+    if (NOT "$ENV{CI_TRIGGER}" STREQUAL "")
+      set(build_tests "${build_tests}
+RUN_SUDO_TESTS:BOOL=ON")
+    endif ()
   endif()
 endif()
 
 if (TEST_LONG)
   set(DO_ALL_BUILDS ON)
-  # i#2974: We skip tests marked _FLAKY since we have no other mechanism to
-  # have CDash ignore them and avoid going red and sending emails.
-  # We rely on our CI for a history of _FLAKY results.
+  # i#2974: Skip tests marked _FLAKY to avoid test runs going red.
+  # This is the less preferred way of marking flaky tests, and is for use for
+  # lower priority tests. The preferred mechanism is to use the ignored section
+  # in runsuite_wrapper.pl. We rely on our CI for a history of _FLAKY results.
   set(base_cache "${base_cache}
     ${build_tests}
     TEST_LONG:BOOL=ON
@@ -167,9 +204,10 @@ else ()
     find_program(GIT git DOC "git client")
     if (GIT)
       # Included committed, staged, and unstaged changes.
-      # We assume "origin/master" contains the top-of-trunk.
+      # We assume "origin/master" contains the top-of-trunk, unless the "branch"
+      # parameter has been set.
       # We pass -U0 so clang-format-diff only complains about touched lines.
-      execute_process(COMMAND ${GIT} diff -U0 origin/master
+      execute_process(COMMAND ${GIT} diff -U0 origin/${arg_branch}
         WORKING_DIRECTORY "${CTEST_SOURCE_DIRECTORY}"
         RESULT_VARIABLE git_result
         ERROR_VARIABLE git_err
@@ -217,53 +255,63 @@ endif ()
 # However, there's no simple way to do that.  For now we punt until someone
 # changes one of those.
 #
-# Prefer named version 6.0 from apt.llvm.org.
-find_program(CLANG_FORMAT_DIFF clang-format-diff-6.0 DOC "clang-format-diff")
-if (NOT CLANG_FORMAT_DIFF)
-  find_program(CLANG_FORMAT_DIFF clang-format-diff DOC "clang-format-diff")
-endif ()
-if (NOT CLANG_FORMAT_DIFF)
-  find_program(CLANG_FORMAT_DIFF clang-format-diff.py DOC "clang-format-diff")
-endif ()
-if (CLANG_FORMAT_DIFF)
-  get_filename_component(CUR_DIR "." ABSOLUTE)
-  set(diff_file "${CUR_DIR}/runsuite_diff.patch")
-  file(WRITE ${diff_file} "${diff_contents}")
-  execute_process(COMMAND ${CLANG_FORMAT_DIFF} -p1
-    WORKING_DIRECTORY "${CTEST_SOURCE_DIRECTORY}"
-    INPUT_FILE ${diff_file}
-    RESULT_VARIABLE format_result
-    ERROR_VARIABLE format_err
-    OUTPUT_VARIABLE format_out)
-  if (format_result OR format_err)
-    message(FATAL_ERROR
-      "Error (${format_result}) running clang-format-diff: ${format_err}")
-  endif ()
-  if (format_out)
-    # The WARNING and FATAL_ERROR message types try to format the diff and it
-    # looks bad w/ extra newlines, so we use STATUS for a more verbatim printout.
-    message(STATUS
-      "Changes are not formatted properly:\n${format_out}")
-    message(FATAL_ERROR
-      "FATAL ERROR: Changes are not formatted properly (see diff above)!")
-  else ()
-    message("clang-format check passed")
-  endif ()
+# Prefer named version 21 from apt.llvm.org.
+if (DEFINED ENV{DISABLE_FORMAT_CHECKS} AND "$ENV{DISABLE_FORMAT_CHECKS}" STREQUAL "yes")
+  message("format check disabled")
 else ()
-  if (arg_require_format)
-    message(FATAL_ERROR "FATAL ERROR: clang-format is required but not found!")
-  else ()
-    message("clang-format-diff not found: skipping format checks")
+  find_program(CLANG_FORMAT_DIFF clang-format-diff-21 DOC "clang-format-diff")
+  if (NOT CLANG_FORMAT_DIFF)
+    find_program(CLANG_FORMAT_DIFF clang-format-diff DOC "clang-format-diff")
   endif ()
-endif ()
+  if (NOT CLANG_FORMAT_DIFF)
+    find_program(CLANG_FORMAT_DIFF clang-format-diff.py DOC "clang-format-diff")
+  endif ()
+  find_package(Python3)
+  if (CLANG_FORMAT_DIFF AND Python3_FOUND)
+    get_filename_component(CUR_DIR "." ABSOLUTE)
+    set(diff_file "${CUR_DIR}/runsuite_diff.patch")
+    file(WRITE ${diff_file} "${diff_contents}")
+    execute_process(COMMAND ${Python3_EXECUTABLE} ${CLANG_FORMAT_DIFF} -p1
+      WORKING_DIRECTORY "${CTEST_SOURCE_DIRECTORY}"
+      INPUT_FILE ${diff_file}
+      RESULT_VARIABLE format_result
+      ERROR_VARIABLE format_err
+      OUTPUT_VARIABLE format_out)
+    if (format_err)
+      message(FATAL_ERROR
+        "Error (${format_result}) running clang-format-diff: ${format_err}")
+    endif ()
+    if (format_out)
+      # The WARNING and FATAL_ERROR message types try to format the diff and it
+      # looks bad w/ extra newlines, so we use STATUS for a more verbatim printout.
+      message(STATUS
+        "Changes are not formatted properly:\n${format_out}")
+      message(FATAL_ERROR
+        "FATAL ERROR: Changes are not formatted properly (see diff above)!")
+    elseif (format_result)
+      message(FATAL_ERROR
+        "Error (${format_result}) running clang-format-diff")
+    else ()
+      message("clang-format check passed")
+    endif ()
+  else ()
+    if (arg_require_format)
+      message(FATAL_ERROR "FATAL ERROR: clang-format is required but not found!")
+    else ()
+      message("clang-format-diff not found: skipping format checks")
+    endif ()
+  endif ()
 
-# Check for tabs other than on the revision lines.
-# The clang-format check will now find these in C files, but not non-C files.
-string(REGEX REPLACE "\n(---|\\+\\+\\+)[^\n]*\t" "" diff_notabs "${diff_contents}")
-string(REGEX MATCH "\t" match "${diff_notabs}")
-if (NOT "${match}" STREQUAL "")
-  string(REGEX MATCH "\n[^\n]*\t[^\n]*" match "${diff_notabs}")
-  message(FATAL_ERROR "ERROR: diff contains tabs: ${match}")
+  # Check for tabs other than on the revision lines.
+  # The clang-format check will now find these in C files, but not non-C files.
+  string(REGEX REPLACE "\n(---|\\+\\+\\+)[^\n]*\t" "" diff_notabs "${diff_contents}")
+  # Allow tabs to be removed from existing lines.
+  string(REGEX REPLACE "\n-[^\n]*\t" "" diff_notabs "${diff_notabs}")
+  string(REGEX MATCH "\t" match "${diff_notabs}")
+  if (NOT "${match}" STREQUAL "")
+    string(REGEX MATCH "\n[^\n]*\t[^\n]*" match "${diff_notabs}")
+    message(FATAL_ERROR "ERROR: diff contains tabs: ${match}")
+  endif ()
 endif ()
 
 # Check for NOCHECKIN
@@ -278,12 +326,14 @@ endif ()
 # to get the diff and check it.  The vera++ rules do check C/C++ code.
 
 # Check for trailing space.  This is a diff with an initial column for +-,
-# so a blank line will have one space: thus we rule that out.
+# so we need to exclude the following cases:
+# 1. existing blank line will now have one space;
+# 2. lines starting with -.
+# We do this by matching lines that start with + or a space and end with a space.
 # The clang-format check will now find these in C files, but not non-C files.
-string(REGEX MATCH "[^\n] \n" match "${diff_contents}")
+# The first line is always the diff header and can be safely skipped.
+string(REGEX MATCH "\n[+ ][^\n]* \n" match "${diff_contents}")
 if (NOT "${match}" STREQUAL "")
-  # Get more context
-  string(REGEX MATCH "\n[^\n]+ \n" match "${diff_contents}")
   message(FATAL_ERROR "ERROR: diff contains trailing spaces: ${match}")
 endif ()
 
@@ -295,7 +345,8 @@ endif ()
 # also turned on for release-external-64, but ctest will run with label
 # RUN_IN_RELEASE.
 
-if (NOT cross_aarchxx_linux_only AND NOT cross_android_only AND NOT a64_on_x86_only)
+if (NOT cross_riscv64_linux_only AND NOT cross_aarchxx_linux_only AND
+  NOT cross_android_only AND NOT a64_on_x86_only)
   # For cross-arch execve test we need to "make install"
   if (NOT arg_nontest_only)
     testbuild_ex("debug-internal-32" OFF "
@@ -384,40 +435,6 @@ if (NOT cross_aarchxx_linux_only AND NOT cross_android_only AND NOT a64_on_x86_o
   if (ARCH_IS_X86 AND NOT APPLE)
     # we do not bother to support these on ARM
     if (DO_ALL_BUILDS)
-      testbuild("vmsafe-debug-internal-32" OFF "
-        VMAP:BOOL=OFF
-        VMSAFE:BOOL=ON
-        DEBUG:BOOL=ON
-        INTERNAL:BOOL=ON
-        ${install_path_cache}
-        ")
-    endif ()
-    if (DO_ALL_BUILDS)
-      testbuild("vmsafe-release-external-32" OFF "
-        VMAP:BOOL=OFF
-        VMSAFE:BOOL=ON
-        DEBUG:BOOL=OFF
-        INTERNAL:BOOL=OFF
-        ${install_path_cache}
-        ")
-    endif (DO_ALL_BUILDS)
-    if (NOT arg_debug_only)
-      testbuild("vps-debug-internal-32" OFF "
-        VMAP:BOOL=OFF
-        VPS:BOOL=ON
-        DEBUG:BOOL=ON
-        INTERNAL:BOOL=ON
-        ${install_path_cache}
-        ")
-    endif ()
-    if (DO_ALL_BUILDS)
-      testbuild("vps-release-external-32" OFF "
-        VMAP:BOOL=OFF
-        VPS:BOOL=ON
-        DEBUG:BOOL=OFF
-        INTERNAL:BOOL=OFF
-        ${install_path_cache}
-        ")
       # Builds we'll keep from breaking but not worth running many tests
       testbuild("callprof-32" OFF "
         CALLPROF:BOOL=ON
@@ -427,11 +444,16 @@ if (NOT cross_aarchxx_linux_only AND NOT cross_android_only AND NOT a64_on_x86_o
         ")
     endif (DO_ALL_BUILDS)
   endif (ARCH_IS_X86 AND NOT APPLE)
-endif (NOT cross_aarchxx_linux_only AND NOT cross_android_only AND NOT a64_on_x86_only)
+endif (NOT cross_riscv64_linux_only AND NOT cross_aarchxx_linux_only AND
+  NOT cross_android_only AND NOT a64_on_x86_only)
 
 if (UNIX AND ARCH_IS_X86)
   # Optional cross-compilation for ARM/Linux and ARM/Android if the cross
   # compilers are on the PATH.
+  set(orig_extra_ctest_args ${extra_ctest_args})
+  if (cross_aarchxx_linux_only)
+    set(extra_ctest_args ${extra_ctest_args} INCLUDE_LABEL RUNS_ON_QEMU)
+  endif ()
   set(prev_optional_cross_compile ${optional_cross_compile})
   if (NOT cross_aarchxx_linux_only)
     # For CI cross_aarchxx_linux_only builds, we want to fail on config failures.
@@ -442,31 +464,43 @@ if (UNIX AND ARCH_IS_X86)
   set(ENV{CFLAGS} "") # environment vars do not obey the normal scope rules--must reset
   set(ENV{CXXFLAGS} "")
   set(prev_run_tests ${run_tests})
-  set(run_tests OFF) # build tests but don't run them
-  testbuild_ex("arm-debug-internal-32" OFF "
+  if (optional_cross_compile)
+    find_program(QEMU_ARM_BINARY qemu-arm "QEMU emulation tool")
+    if (NOT QEMU_ARM_BINARY)
+      set(run_tests OFF) # build tests but don't run them
+    endif ()
+  endif ()
+  testbuild_ex("arm-debug-internal" OFF "
     DEBUG:BOOL=ON
     INTERNAL:BOOL=ON
     ${build_tests}
     CMAKE_TOOLCHAIN_FILE:PATH=${CTEST_SOURCE_DIRECTORY}/make/toolchain-arm32.cmake
     " OFF ${arg_package} "")
-  testbuild_ex("arm-release-external-32" OFF "
+  testbuild_ex("arm-release-external" OFF "
     DEBUG:BOOL=OFF
     INTERNAL:BOOL=OFF
     CMAKE_TOOLCHAIN_FILE:PATH=${CTEST_SOURCE_DIRECTORY}/make/toolchain-arm32.cmake
     " OFF ${arg_package} "")
-  testbuild_ex("arm-debug-internal-64" ON "
+  if (optional_cross_compile)
+    find_program(QEMU_AARCH64_BINARY qemu-aarch64 "QEMU emulation tool")
+    if (NOT QEMU_AARCH64_BINARY)
+      set(run_tests OFF) # build tests but don't run them
+    endif ()
+  endif ()
+  testbuild_ex("aarch64-debug-internal" ON "
     DEBUG:BOOL=ON
     INTERNAL:BOOL=ON
     ${build_tests}
-    CMAKE_TOOLCHAIN_FILE:PATH=${CTEST_SOURCE_DIRECTORY}/make/toolchain-arm64.cmake
+    CMAKE_TOOLCHAIN_FILE:PATH=${CTEST_SOURCE_DIRECTORY}/make/toolchain-aarch64.cmake
     " OFF ${arg_package} "")
-  testbuild_ex("arm-release-external-64" ON "
+  testbuild_ex("aarch64-release-external" ON "
     DEBUG:BOOL=OFF
     INTERNAL:BOOL=OFF
-    CMAKE_TOOLCHAIN_FILE:PATH=${CTEST_SOURCE_DIRECTORY}/make/toolchain-arm64.cmake
+    CMAKE_TOOLCHAIN_FILE:PATH=${CTEST_SOURCE_DIRECTORY}/make/toolchain-aarch64.cmake
     " OFF ${arg_package} "")
 
   set(run_tests ${prev_run_tests})
+  set(extra_ctest_args ${orig_extra_ctest_args})
   set(optional_cross_compile ${prev_optional_cross_compile})
 
   # Android cross-compilation and running of tests using "adb shell"
@@ -502,6 +536,18 @@ if (UNIX AND ARCH_IS_X86)
     set(android_extra_rel "${android_extra_dbg}
                            ANDROID_TOOLCHAIN:PATH=$ENV{DYNAMORIO_ANDROID_TOOLCHAIN}")
   endif()
+  if (DEFINED ENV{DYNAMORIO_ANDROID_NDK})
+    set(android_extra_dbg "${android_extra_dbg}
+                           ANDROID_NDK:PATH=$ENV{DYNAMORIO_ANDROID_NDK}")
+    set(android_extra_rel "${android_extra_dbg}
+                           ANDROID_NDK:PATH=$ENV{DYNAMORIO_ANDROID_NDK}")
+  endif()
+  if (DEFINED ENV{DYNAMORIO_ANDROID_API_LEVEL})
+    set(android_extra_dbg "${android_extra_dbg}
+                           ANDROID_API_LEVEL:STRING=$ENV{DYNAMORIO_ANDROID_API_LEVEL}")
+    set(android_extra_rel "${android_extra_dbg}
+                           ANDROID_API_LEVEL:STRING=$ENV{DYNAMORIO_ANDROID_API_LEVEL}")
+  endif()
 
   # For CI cross_android_only builds, we want to fail on config failures.
   # For user suite runs, we want to just skip if there's no cross setup.
@@ -509,21 +555,35 @@ if (UNIX AND ARCH_IS_X86)
     set(optional_cross_compile ON)
   endif ()
 
-  testbuild_ex("android-debug-internal-32" OFF "
+  testbuild_ex("arm-android-debug-internal" OFF "
     DEBUG:BOOL=ON
     INTERNAL:BOOL=ON
-    CMAKE_TOOLCHAIN_FILE:PATH=${CTEST_SOURCE_DIRECTORY}/make/toolchain-android.cmake
+    CMAKE_TOOLCHAIN_FILE:PATH=${CTEST_SOURCE_DIRECTORY}/make/toolchain-android-gcc.cmake
     ${build_tests}
     ${android_extra_dbg}
     " OFF ${arg_package} "")
-  testbuild_ex("android-release-external-32" OFF "
+  testbuild_ex("arm-android-release-external" OFF "
     DEBUG:BOOL=OFF
     INTERNAL:BOOL=OFF
-    CMAKE_TOOLCHAIN_FILE:PATH=${CTEST_SOURCE_DIRECTORY}/make/toolchain-android.cmake
+    CMAKE_TOOLCHAIN_FILE:PATH=${CTEST_SOURCE_DIRECTORY}/make/toolchain-android-gcc.cmake
     ${android_extra_rel}
     " OFF ${arg_package} "")
-  set(run_tests ${prev_run_tests})
 
+  testbuild_ex("aarch64-android-debug-internal" ON "
+    DEBUG:BOOL=ON
+    INTERNAL:BOOL=ON
+    CMAKE_TOOLCHAIN_FILE:PATH=${CTEST_SOURCE_DIRECTORY}/make/toolchain-android-llvm.cmake
+    ${build_tests}
+    ${android_extra_dbg}
+    " OFF ${arg_package} "")
+  testbuild_ex("aarch64-android-release-external" ON "
+    DEBUG:BOOL=OFF
+    INTERNAL:BOOL=OFF
+    CMAKE_TOOLCHAIN_FILE:PATH=${CTEST_SOURCE_DIRECTORY}/make/toolchain-android-llvm.cmake
+    ${android_extra_rel}
+    " OFF ${arg_package} "")
+
+  set(run_tests ${prev_run_tests})
   set(optional_cross_compile ${prev_optional_cross_compile})
   set(ARCH_IS_X86 ON)
 endif (UNIX AND ARCH_IS_X86)
@@ -538,6 +598,36 @@ if (ARCH_IS_X86 AND UNIX AND (a64_on_x86_only OR NOT arg_automated_ci))
     INTERNAL:BOOL=ON
     ${build_tests}
     " OFF ${arg_package} "")
+endif ()
+
+if (ARCH_IS_X86 AND UNIX)
+  set(orig_extra_ctest_args ${extra_ctest_args})
+  if (cross_riscv64_linux_only)
+    set(extra_ctest_args ${extra_ctest_args} INCLUDE_LABEL RUNS_ON_QEMU)
+  endif ()
+  set(prev_optional_cross_compile ${optional_cross_compile})
+  set(prev_run_tests ${run_tests})
+  set(run_tests ON)
+  if (NOT cross_riscv64_linux_only)
+    set(optional_cross_compile ON)
+  endif ()
+  set(ARCH_IS_X86 OFF)
+  testbuild_ex("riscv64-debug-internal" ON "
+    DEBUG:BOOL=ON
+    INTERNAL:BOOL=ON
+    ${build_tests}
+    CMAKE_TOOLCHAIN_FILE:PATH=${CTEST_SOURCE_DIRECTORY}/make/toolchain-riscv64.cmake
+    " OFF ${arg_package} "")
+  testbuild_ex("riscv64-release-external" ON "
+    DEBUG:BOOL=OFF
+    INTERNAL:BOOL=OFF
+    CMAKE_TOOLCHAIN_FILE:PATH=${CTEST_SOURCE_DIRECTORY}/make/toolchain-riscv64.cmake
+    " OFF ${arg_package} "")
+
+  set(run_tests ${prev_run_tests})
+  set(extra_ctest_args ${orig_extra_ctest_args})
+  set(optional_cross_compile ${prev_optional_cross_compile})
+  set(ARCH_IS_X86 ON)
 endif ()
 
 # XXX: do we still care about these builds?

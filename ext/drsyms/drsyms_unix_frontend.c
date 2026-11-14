@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2014 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2026 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -108,8 +108,8 @@ drsym_enumerate_symbols_local(const char *modpath, drsym_enumerate_cb callback,
 }
 
 static drsym_error_t
-drsym_lookup_symbol_local(const char *modpath, const char *symbol, size_t *modoffs OUT,
-                          uint flags)
+drsym_lookup_symbol_local(const char *modpath, const char *symbol,
+                          size_t *modoffs DR_PARAM_OUT, uint flags)
 {
     void *mod;
     drsym_error_t r;
@@ -131,8 +131,8 @@ drsym_lookup_symbol_local(const char *modpath, const char *symbol, size_t *modof
 }
 
 static drsym_error_t
-drsym_lookup_address_local(const char *modpath, size_t modoffs, drsym_info_t *out INOUT,
-                           uint flags)
+drsym_lookup_address_local(const char *modpath, size_t modoffs,
+                           drsym_info_t *out DR_PARAM_INOUT, uint flags)
 {
     void *mod;
     drsym_error_t r;
@@ -201,13 +201,13 @@ drsym_init(int shmid_in)
     drsym_unix_init();
 
     if (IS_SIDELINE) {
-        /* FIXME NYI i#446: establish connection with sideline server via shared
+        /* TODO NYI i#446: establish connection with sideline server via shared
          * memory specified by shmid
          */
     } else {
         hashtable_init_ex(&modtable, MODTABLE_HASH_BITS, HASH_STRING, true /*strdup*/,
-                          false /*!synch: using symbol_lock*/,
-                          (generic_func_t)drsym_unix_unload, NULL, NULL);
+                          false /*!synch: using symbol_lock*/, drsym_unix_unload, NULL,
+                          NULL);
     }
     return DRSYM_SUCCESS;
 }
@@ -226,7 +226,7 @@ drsym_exit(void)
 
     drsym_unix_exit();
     if (IS_SIDELINE) {
-        /* FIXME NYI i#446 */
+        /* TODO NYI i#446 */
     }
     hashtable_delete(&modtable);
     dr_recurlock_destroy(symbol_lock);
@@ -235,8 +235,8 @@ drsym_exit(void)
 
 DR_EXPORT
 drsym_error_t
-drsym_lookup_address(const char *modpath, size_t modoffs, drsym_info_t *out INOUT,
-                     uint flags)
+drsym_lookup_address(const char *modpath, size_t modoffs,
+                     drsym_info_t *out DR_PARAM_INOUT, uint flags)
 {
     if (IS_SIDELINE) {
         return DRSYM_ERROR_NOT_IMPLEMENTED;
@@ -247,7 +247,7 @@ drsym_lookup_address(const char *modpath, size_t modoffs, drsym_info_t *out INOU
 
 DR_EXPORT
 drsym_error_t
-drsym_lookup_symbol(const char *modpath, const char *symbol, size_t *modoffs OUT,
+drsym_lookup_symbol(const char *modpath, const char *symbol, size_t *modoffs DR_PARAM_OUT,
                     uint flags)
 {
     if (IS_SIDELINE) {
@@ -286,7 +286,7 @@ drsym_enumerate_symbols_ex(const char *modpath, drsym_enumerate_ex_cb callback,
 DR_EXPORT
 drsym_error_t
 drsym_get_type(const char *modpath, size_t modoffs, uint levels_to_expand, char *buf,
-               size_t buf_sz, drsym_type_t **type OUT)
+               size_t buf_sz, drsym_type_t **type DR_PARAM_OUT)
 {
     return DRSYM_ERROR_NOT_IMPLEMENTED;
 }
@@ -294,7 +294,7 @@ drsym_get_type(const char *modpath, size_t modoffs, uint levels_to_expand, char 
 DR_EXPORT
 drsym_error_t
 drsym_get_func_type(const char *modpath, size_t modoffs, char *buf, size_t buf_sz,
-                    drsym_func_type_t **func_type OUT)
+                    drsym_func_type_t **func_type DR_PARAM_OUT)
 {
     return DRSYM_ERROR_NOT_IMPLEMENTED;
 }
@@ -302,21 +302,22 @@ drsym_get_func_type(const char *modpath, size_t modoffs, char *buf, size_t buf_s
 DR_EXPORT
 drsym_error_t
 drsym_expand_type(const char *modpath, uint type_id, uint levels_to_expand, char *buf,
-                  size_t buf_sz, drsym_type_t **expanded_type OUT)
+                  size_t buf_sz, drsym_type_t **expanded_type DR_PARAM_OUT)
 {
     return DRSYM_ERROR_NOT_IMPLEMENTED;
 }
 
 DR_EXPORT
 size_t
-drsym_demangle_symbol(char *dst OUT, size_t dst_sz, const char *mangled, uint flags)
+drsym_demangle_symbol(char *dst DR_PARAM_OUT, size_t dst_sz, const char *mangled,
+                      uint flags)
 {
     return drsym_unix_demangle_symbol(dst, dst_sz, mangled, flags);
 }
 
 DR_EXPORT
 drsym_error_t
-drsym_get_module_debug_kind(const char *modpath, drsym_debug_kind_t *kind OUT)
+drsym_get_module_debug_kind(const char *modpath, drsym_debug_kind_t *kind DR_PARAM_OUT)
 {
     if (IS_SIDELINE) {
         return DRSYM_ERROR_NOT_IMPLEMENTED;
@@ -341,7 +342,7 @@ drsym_module_has_symbols(const char *modpath)
 {
     drsym_debug_kind_t kind;
     drsym_error_t r = drsym_get_module_debug_kind(modpath, &kind);
-    if (r == DRSYM_SUCCESS && !TEST(DRSYM_SYMBOLS, kind))
+    if (r == DRSYM_SUCCESS && !TESTANY(DRSYM_SYMBOLS, kind))
         r = DRSYM_ERROR;
     return r;
 }

@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2021 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2000-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -38,7 +38,20 @@
 /* header for library of core utilites shared with non-core: "drlibc" */
 
 #ifndef _DR_LIBC_H_
-#define _DR_LIBC_H_ 1
+#define _DR_LIBC_H_
+
+#if defined(UNIX) && !defined(LINUX_KERNEL)
+/* _LARGEFILE64_SOURCE should make libc struct match kernel. */
+#    ifndef _LARGEFILE64_SOURCE
+#        define _LARGEFILE64_SOURCE
+#    endif
+#    include <sys/types.h>
+#    include <sys/stat.h>
+#endif
+
+#if defined(MACOS) && defined(AARCH64)
+struct stat64 __DARWIN_STRUCT_STAT64;
+#endif
 
 /* If the caller is using the DR API they'll have our types that way; else we
  * include globals_shared.h.
@@ -59,6 +72,14 @@ dynamorio_mach_syscall(uint sysnum, uint num_args, ...);
 #    else
 ptr_int_t
 dynamorio_syscall(uint sysnum, uint num_args, ...);
+/* Wrapper for clone().
+ * N.B. func must not return.
+ * On x86 (32 and 64-bit) this supports passing NULL for newsp which is just
+ * shorthand for the child using the same value as the parent.
+ */
+thread_id_t
+dynamorio_clone(uint flags, byte *newsp, void *ptid, void *tls, void *ctid,
+                void (*func)(void));
 #    endif
 #endif
 
@@ -67,7 +88,8 @@ void
 clear_icache(void *beg, void *end);
 
 bool
-get_cache_line_size(OUT size_t *dcache_line_size, OUT size_t *icache_line_size);
+get_cache_line_size(DR_PARAM_OUT size_t *dcache_line_size,
+                    DR_PARAM_OUT size_t *icache_line_size);
 #endif
 
 void
@@ -76,7 +98,7 @@ dr_fpu_exception_init(void);
 #ifdef X86
 /* returns the value of mmx register #index in val */
 void
-get_mmx_val(OUT uint64 *val, uint index);
+get_mmx_val(DR_PARAM_OUT uint64 *val, uint index);
 #endif
 
 #ifdef WINDOWS
@@ -121,8 +143,14 @@ typedef struct _script_interpreter_t {
  * executable.
  */
 bool
-find_script_interpreter(OUT script_interpreter_t *result, IN const char *fname,
+find_script_interpreter(DR_PARAM_OUT script_interpreter_t *result,
+                        DR_PARAM_IN const char *fname,
                         ssize_t (*reader)(const char *pathname, void *buf, size_t count));
+
+#    ifndef LINUX_KERNEL
+ptr_int_t
+dr_stat_syscall(const char *fname, struct stat64 *st);
+#    endif
 #endif /* UNIX */
 
 #if defined(WINDOWS) && !defined(X64)

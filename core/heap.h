@@ -1,5 +1,6 @@
 /* **********************************************************
- * Copyright (c) 2010-2021 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2026 Google, Inc.  All rights reserved.
+ * Copyright (c) 2026 Meta Platforms, Inc.  All rights reserved.
  * Copyright (c) 2001-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -40,7 +41,7 @@
  */
 
 #ifndef _HEAP_H_
-#define _HEAP_H_ 1
+#define _HEAP_H_
 
 #ifdef HEAP_ACCOUNTING
 typedef enum {
@@ -68,9 +69,7 @@ typedef enum {
     ACCT_MEM_MGT,
     ACCT_STATS,
     ACCT_SPECIAL,
-#    ifdef CLIENT_INTERFACE
     ACCT_CLIENT,
-#    endif
     ACCT_LIBDUP, /* private copies of system libs => may leak */
     ACCT_CLEANCALL,
     /* NOTE: Also update the whichheap_name in heap.c when adding here */
@@ -95,7 +94,11 @@ typedef enum {
 } map_flags_t;
 
 typedef byte *heap_pc;
-#define HEAP_ALIGNMENT sizeof(heap_pc *)
+#ifdef ARM
+#    define HEAP_ALIGNMENT 8 /* Some C++ functions require 8-byte alignment on ARM. */
+#else
+#    define HEAP_ALIGNMENT sizeof(heap_pc *)
+#endif
 extern vm_area_vector_t *landing_pad_areas;
 
 #ifdef X64
@@ -107,7 +110,8 @@ void
 request_region_be_heap_reachable(byte *start, size_t size);
 
 void
-vmcode_get_reachable_region(byte **region_start OUT, byte **region_end OUT);
+vmcode_get_reachable_region(byte **region_start DR_PARAM_OUT,
+                            byte **region_end DR_PARAM_OUT);
 #endif
 
 /* Virtual memory types.  These are bitmask values. */
@@ -143,30 +147,30 @@ vmm_heap_fork_init(dcontext_t *dcontext);
 void
 print_vmm_heap_data(file_t outf);
 byte *
-vmcode_get_start();
+vmcode_get_start(void);
 byte *
-vmcode_get_end();
+vmcode_get_end(void);
 void
 iterate_vmm_regions(void (*cb)(byte *region_start, byte *region_end, void *user_data),
                     void *user_data);
 byte *
-vmcode_unreachable_pc();
+vmcode_unreachable_pc(void);
 byte *
 vmcode_get_writable_addr(byte *exec_addr);
 byte *
 vmcode_get_executable_addr(byte *write_addr);
 
-#ifdef CLIENT_INTERFACE
 void
-vmm_heap_handle_pending_low_on_memory_event_trigger();
-#endif
+vmm_heap_handle_pending_low_on_memory_event_trigger(void);
 
 bool
 heap_check_option_compatibility(void);
 
 bool
-is_vmm_reserved_address(byte *pc, size_t size, OUT byte **region_start,
-                        OUT byte **region_end);
+is_vmm_reserved_address(byte *pc, size_t size, DR_PARAM_OUT byte **region_start,
+                        DR_PARAM_OUT byte **region_end);
+bool
+vmcode_is_reachable(void);
 /* Returns whether "target" is reachable from all future vmcode allocations. */
 bool
 rel32_reachable_from_vmcode(byte *target);
@@ -235,7 +239,7 @@ heap_unreserve_for_external_mapping(byte *p, size_t size, which_vmm_t which);
 
 /* updates dynamo_areas and calls the os_ versions */
 byte *
-d_r_map_file(file_t f, size_t *size INOUT, uint64 offs, app_pc addr, uint prot,
+d_r_map_file(file_t f, size_t *size DR_PARAM_INOUT, uint64 offs, app_pc addr, uint prot,
              map_flags_t map_flags);
 bool
 d_r_unmap_file(byte *map, size_t size);
@@ -283,7 +287,7 @@ void
 print_heap_statistics(void);
 #endif
 
-/* FIXME: persistence is yet another dimension here
+/* XXX: persistence is yet another dimension here
  * let's clean all these up and have a single alloc routine?
  */
 /* i#1791: nonpersistent heap cannot be used for IR or other client allocations */
@@ -294,6 +298,7 @@ nonpersistent_heap_free(dcontext_t *dcontext, void *p,
                         size_t size HEAPACCT(which_heap_t which));
 
 /* Passing dcontext == GLOBAL_DCONTEXT allocates from a global pool.
+ * The memory comes from vmcode and is reachable only if vmcode_is_reachable().
  * Important note: within the W^X scheme (-satisfy_w_xor_x), this will return an address
  * of the writeable view. vmcode_get_executable_addr() needs to be called in order to get
  * the reachable address.
@@ -321,9 +326,10 @@ global_unprotected_heap_free(void *p, size_t size HEAPACCT(which_heap_t which));
 #define UNPROTECTED_GLOBAL_FREE global_unprotected_heap_free
 
 /* use global heap for shared fragments and their related data structures */
-#define FRAGMENT_ALLOC_DC(dc, flags) (TEST(FRAG_SHARED, (flags)) ? GLOBAL_DCONTEXT : (dc))
+#define FRAGMENT_ALLOC_DC(dc, flags) \
+    (TESTANY(FRAG_SHARED, (flags)) ? GLOBAL_DCONTEXT : (dc))
 #define FRAGMENT_TABLE_ALLOC_DC(dc, flags) \
-    (TEST(HASHTABLE_SHARED, (flags)) ? GLOBAL_DCONTEXT : (dc))
+    (TESTANY(HASHTABLE_SHARED, (flags)) ? GLOBAL_DCONTEXT : (dc))
 
 /* convenience for allocating a single type: does cast, sizeof, and HEAPACCT
  * for you, and takes param for whether protected or not

@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2015-2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2015-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -30,30 +30,60 @@
  * DAMAGE.
  */
 
-#include <iostream>
-#include <iterator>
-#include <string>
-#include <assert.h>
-#include <limits.h>
-#include <stdint.h> /* for supporting 64-bit integers*/
-#include "../common/memref.h"
-#include "../common/options.h"
-#include "../common/utils.h"
-#include "droption.h"
-#include "tlb_stats.h"
-#include "tlb.h"
 #include "tlb_simulator.h"
+
+#include <stddef.h>
+
+#include <fstream>
+#include <iostream>
+#include <string>
+#include <utility>
+
+#include "analysis_tool.h"
+#include "create_cache_replacement_policy.h"
+#include "memref.h"
+#include "utils.h"
+#include "caching_device_stats.h"
+#include "create_cache_replacement_policy.h"
+#include "simulator.h"
+#include "tlb.h"
+#include "tlb_simulator_create.h"
+#include "tlb_stats.h"
+#include "trace_entry.h"
+
+namespace dynamorio {
+namespace drmemtrace {
 
 analysis_tool_t *
 tlb_simulator_create(const tlb_simulator_knobs_t &knobs)
 {
-    return new tlb_simulator_t(knobs);
+    if (knobs.v2p_file.empty())
+        return new tlb_simulator_t(knobs);
+
+    std::ifstream fin;
+    fin.open(knobs.v2p_file);
+    if (!fin.is_open()) {
+        ERRMSG("Failed to open the v2p file '%s'\n", knobs.v2p_file.c_str());
+        return nullptr;
+    }
+
+    tlb_simulator_t *sim = new tlb_simulator_t(knobs);
+    std::string error_str = sim->create_v2p_from_file(fin);
+    fin.close();
+
+    if (!error_str.empty()) {
+        delete sim;
+        ERRMSG("ERROR: v2p_reader failed with: %s\n", error_str.c_str());
+        return nullptr;
+    }
+
+    return sim;
 }
 
 tlb_simulator_t::tlb_simulator_t(const tlb_simulator_knobs_t &knobs)
     : simulator_t(knobs.num_cores, knobs.skip_refs, knobs.warmup_refs,
                   knobs.warmup_fraction, knobs.sim_refs, knobs.cpu_scheduling,
-                  knobs.verbose)
+                  knobs.use_physical, knobs.verbose)
     , knobs_(knobs)
 {
     itlbs_ = new tlb_t *[knobs_.num_cores];
@@ -65,34 +95,45 @@ tlb_simulator_t::tlb_simulator_t(const tlb_simulator_knobs_t &knobs)
         lltlbs_[i] = NULL;
     }
     for (unsigned int i = 0; i < knobs_.num_cores; i++) {
-        itlbs_[i] = create_tlb(knobs_.TLB_replace_policy);
-        if (itlbs_[i] == NULL) {
-            error_string_ = "Failed to create itlbs_";
-            success_ = false;
-            return;
-        }
-        dtlbs_[i] = create_tlb(knobs_.TLB_replace_policy);
-        if (dtlbs_[i] == NULL) {
-            error_string_ = "Failed to create dtlbs_";
-            success_ = false;
-            return;
-        }
-        lltlbs_[i] = create_tlb(knobs_.TLB_replace_policy);
-        if (lltlbs_[i] == NULL) {
-            error_string_ = "Failed to create lltlbs_";
-            success_ = false;
-            return;
-        }
-
+        std::string core_str = std::to_string(i);
+        itlbs_[i] = new tlb_t("itlb " + core_str);
+        dtlbs_[i] = new tlb_t("dtlb " + core_str);
+        lltlbs_[i] = new tlb_t("lltlb " + core_str);
+        auto replace_policy = create_cache_replacement_policy(
+            knobs_.TLB_replace_policy, knobs_.TLB_L1I_entries / knobs_.TLB_L1I_assoc,
+            knobs_.TLB_L1I_assoc);
         if (!itlbs_[i]->init(knobs_.TLB_L1I_assoc, (int)knobs_.page_size,
-                             knobs_.TLB_L1I_entries, lltlbs_[i], new tlb_stats_t) ||
-            !dtlbs_[i]->init(knobs_.TLB_L1D_assoc, (int)knobs_.page_size,
-                             knobs_.TLB_L1D_entries, lltlbs_[i], new tlb_stats_t) ||
-            !lltlbs_[i]->init(knobs_.TLB_L2_assoc, (int)knobs_.page_size,
-                              knobs_.TLB_L2_entries, NULL, new tlb_stats_t)) {
+                             knobs_.TLB_L1I_entries, lltlbs_[i],
+                             new tlb_stats_t((int)knobs_.page_size),
+                             std::move(replace_policy))) {
             error_string_ =
-                "Usage error: failed to initialize TLbs_. Ensure entry number, "
-                "page size and associativity are powers of 2.";
+                "Usage error: failed to initialize itlbs_. Ensure (entry number / "
+                "associativity) is a power of 2.";
+            success_ = false;
+            return;
+        }
+        replace_policy = create_cache_replacement_policy(
+            knobs_.TLB_replace_policy, knobs_.TLB_L1D_entries / knobs_.TLB_L1D_assoc,
+            knobs_.TLB_L1D_assoc);
+        if (!dtlbs_[i]->init(knobs_.TLB_L1D_assoc, (int)knobs_.page_size,
+                             knobs_.TLB_L1D_entries, lltlbs_[i],
+                             new tlb_stats_t((int)knobs_.page_size),
+                             std::move(replace_policy))) {
+            error_string_ =
+                "Usage error: failed to initialize dtlbs_. Ensure (entry number / "
+                "associativity) is a power of 2.";
+            success_ = false;
+            return;
+        }
+        replace_policy = create_cache_replacement_policy(
+            knobs_.TLB_replace_policy, knobs_.TLB_L2_entries / knobs_.TLB_L2_assoc,
+            knobs_.TLB_L2_assoc);
+        if (!lltlbs_[i]->init(
+                knobs_.TLB_L2_assoc, (int)knobs_.page_size, knobs_.TLB_L2_entries, NULL,
+                new tlb_stats_t((int)knobs_.page_size), std::move(replace_policy))) {
+            error_string_ =
+                "Usage error: failed to initialize lltlbs_. Ensure (entry number / "
+                "associativity) is a power of 2.";
             success_ = false;
             return;
         }
@@ -103,97 +144,136 @@ tlb_simulator_t::~tlb_simulator_t()
 {
     for (unsigned int i = 0; i < knobs_.num_cores; i++) {
         // Try to handle failure during construction.
-        if (itlbs_[i] == NULL)
-            return;
-        delete itlbs_[i]->get_stats();
-        delete itlbs_[i];
-        if (dtlbs_[i] == NULL)
-            return;
-        delete dtlbs_[i]->get_stats();
-        delete dtlbs_[i];
-        if (lltlbs_[i] == NULL)
-            return;
-        delete lltlbs_[i]->get_stats();
-        delete lltlbs_[i];
+        if (itlbs_[i] != NULL) {
+            delete itlbs_[i]->get_stats();
+            delete itlbs_[i];
+        }
+        if (dtlbs_[i] != NULL) {
+            delete dtlbs_[i]->get_stats();
+            delete dtlbs_[i];
+        }
+        if (lltlbs_[i] != NULL) {
+            delete lltlbs_[i]->get_stats();
+            delete lltlbs_[i];
+        }
     }
     delete[] itlbs_;
     delete[] dtlbs_;
     delete[] lltlbs_;
 }
 
+std::string
+tlb_simulator_t::create_v2p_from_file(std::istream &v2p_file)
+{
+    // If we are not using physical addresses, we don't need a virtual to physical mapping
+    // at all.
+    if (!knobs_.use_physical)
+        return "";
+
+    std::string error_str = simulator_t::create_v2p_from_file(v2p_file);
+    if (!error_str.empty()) {
+        return error_str;
+    }
+    // Overwrite tlb_simulator_t.knobs_.page size with simulator_t.page_size, which is
+    // set to be the page size in v2p_file.
+    knobs_.page_size = page_size_;
+    return "";
+}
+
 bool
 tlb_simulator_t::process_memref(const memref_t &memref)
 {
     if (knobs_.skip_refs > 0) {
-        knobs_.skip_refs--;
+        // Only count non-markers toward *_refs counts.
+        if (memref.marker.type != TRACE_TYPE_MARKER)
+            knobs_.skip_refs--;
         return true;
     }
 
     // The references after warmup and simulated ones are dropped.
     if (knobs_.warmup_refs == 0 && knobs_.sim_refs == 0)
-        return true;
+        return false; // Early exit.
 
     // Both warmup and simulated references are simulated.
 
     if (!simulator_t::process_memref(memref))
         return false;
 
-    if (memref.marker.type == TRACE_TYPE_MARKER) {
-        // We ignore markers before we ask core_for_thread, to avoid asking
-        // too early on a timestamp marker.
-        return true;
-    }
-
     // We use a static scheduling of threads to cores, as it is
     // not practical to measure which core each thread actually
     // ran on for each memref.
-    int core;
-    if (memref.data.tid == last_thread_)
-        core = last_core_;
-    else {
-        core = core_for_thread(memref.data.tid);
-        last_thread_ = memref.data.tid;
-        last_core_ = core;
+    // core_index can end up as INVALID_CORE_INDEX during headers but we don't use it
+    // then; we assert below on all uses cases that it's not INVALID_CORE_INDEX.
+    int core_index = INVALID_CORE_INDEX;
+    // Do not try to schedule idle onto cores as we'll then think they had activity
+    // when we print them out.
+    if (memref.marker.type != TRACE_TYPE_MARKER ||
+        memref.marker.marker_type != TRACE_MARKER_TYPE_CORE_IDLE) {
+        if (memref.data.tid == last_thread_) {
+            core_index = last_core_index_;
+        } else {
+            core_index = core_for_thread(memref.data.tid);
+            if (core_index != INVALID_CORE_INDEX) {
+                last_thread_ = memref.data.tid;
+                last_core_index_ = core_index;
+            }
+        }
     }
 
-    if (type_is_instr(memref.instr.type))
-        itlbs_[core]->request(memref);
-    else if (memref.data.type == TRACE_TYPE_READ || memref.data.type == TRACE_TYPE_WRITE)
-        dtlbs_[core]->request(memref);
-    else if (memref.exit.type == TRACE_TYPE_THREAD_EXIT) {
-        handle_thread_exit(memref.exit.tid);
+    // To support swapping to physical addresses without modifying the passed-in
+    // memref (which is also passed to other tools run at the same time) we use
+    // indirection.
+    const memref_t *simref = &memref;
+    memref_t phys_memref;
+    if (knobs_.use_physical) {
+        phys_memref = memref2phys(memref);
+        simref = &phys_memref;
+    }
+
+    if (type_is_instr(simref->instr.type)) {
+        assert(core_index != INVALID_CORE_INDEX);
+        itlbs_[core_index]->request(*simref);
+    } else if (simref->data.type == TRACE_TYPE_READ ||
+               simref->data.type == TRACE_TYPE_WRITE) {
+        assert(core_index != INVALID_CORE_INDEX);
+        dtlbs_[core_index]->request(*simref);
+    } else if (simref->exit.type == TRACE_TYPE_THREAD_EXIT) {
+        handle_thread_exit(simref->exit.tid);
         last_thread_ = 0;
-    } else if (type_is_prefetch(memref.data.type) ||
-               memref.flush.type == TRACE_TYPE_INSTR_FLUSH ||
-               memref.flush.type == TRACE_TYPE_DATA_FLUSH ||
-               memref.marker.type == TRACE_TYPE_MARKER ||
-               memref.marker.type == TRACE_TYPE_INSTR_NO_FETCH) {
+    } else if (type_is_prefetch(simref->data.type) ||
+               simref->flush.type == TRACE_TYPE_INSTR_FLUSH ||
+               simref->flush.type == TRACE_TYPE_DATA_FLUSH ||
+               simref->marker.type == TRACE_TYPE_MARKER ||
+               simref->marker.type == TRACE_TYPE_INSTR_NO_FETCH) {
         // TLB simulator ignores prefetching, cache flushing, and markers
     } else {
-        error_string_ = "Unhandled memref type " + std::to_string(memref.data.type);
+        error_string_ = "Unhandled memref type " + std::to_string(simref->data.type);
         return false;
     }
 
     if (knobs_.verbose >= 3) {
-        std::cerr << "::" << memref.data.pid << "." << memref.data.tid << ":: "
-                  << " @" << (void *)memref.data.pc << " "
-                  << trace_type_names[memref.data.type] << " " << (void *)memref.data.addr
-                  << " x" << memref.data.size << std::endl;
+        std::cerr << "::" << simref->data.pid << "." << simref->data.tid << ":: "
+                  << " @" << (void *)simref->data.pc << " "
+                  << trace_type_names[simref->data.type] << " "
+                  << (void *)simref->data.addr << " x" << simref->data.size << std::endl;
     }
 
-    // process counters for warmup and simulated references
-    if (knobs_.warmup_refs > 0) { // warm tlbs up
-        knobs_.warmup_refs--;
-        // reset tlb stats when warming up is completed
-        if (knobs_.warmup_refs == 0) {
-            for (unsigned int i = 0; i < knobs_.num_cores; i++) {
-                itlbs_[i]->get_stats()->reset();
-                dtlbs_[i]->get_stats()->reset();
-                lltlbs_[i]->get_stats()->reset();
+    // Only count non-markers toward *_refs counts.
+    if (memref.marker.type != TRACE_TYPE_MARKER) {
+        // Process counters for warmup and simulated references.
+        if (knobs_.warmup_refs > 0) { // warm tlbs up
+            knobs_.warmup_refs--;
+            // reset tlb stats when warming up is completed
+            if (knobs_.warmup_refs == 0) {
+                for (unsigned int i = 0; i < knobs_.num_cores; i++) {
+                    itlbs_[i]->get_stats()->reset();
+                    dtlbs_[i]->get_stats()->reset();
+                    lltlbs_[i]->get_stats()->reset();
+                }
             }
+        } else {
+            knobs_.sim_refs--;
         }
-    } else {
-        knobs_.sim_refs--;
     }
     return true;
 }
@@ -203,8 +283,7 @@ tlb_simulator_t::print_results()
 {
     std::cerr << "TLB simulation results:\n";
     for (unsigned int i = 0; i < knobs_.num_cores; i++) {
-        print_core(i);
-        if (thread_ever_counts_[i] > 0) {
+        if (print_core(i)) {
             std::cerr << "  L1I stats:" << std::endl;
             itlbs_[i]->get_stats()->print_stats("    ");
             std::cerr << "  L1D stats:" << std::endl;
@@ -216,19 +295,5 @@ tlb_simulator_t::print_results()
     return true;
 }
 
-tlb_t *
-tlb_simulator_t::create_tlb(std::string policy)
-{
-    // XXX: how to implement different replacement policies?
-    // Should we extend tlb_t to tlb_XXX_t so as to avoid multiple inheritence?
-    // Or should we adopt multiple inheritence to have caching_device_XXX_t as one base
-    // and tlb_t as another base class?
-    if (policy == REPLACE_POLICY_NON_SPECIFIED || // default LFU
-        policy == REPLACE_POLICY_LFU)             // set to LFU
-        return new tlb_t;
-
-    // undefined replacement policy
-    ERRMSG("Usage error: undefined replacement policy. "
-           "Please choose " REPLACE_POLICY_LFU ".\n");
-    return NULL;
-}
+} // namespace drmemtrace
+} // namespace dynamorio

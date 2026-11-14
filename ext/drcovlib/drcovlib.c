@@ -1,5 +1,5 @@
 /* ***************************************************************************
- * Copyright (c) 2012-2018 Google, Inc.  All rights reserved.
+ * Copyright (c) 2012-2026 Google, Inc.  All rights reserved.
  * ***************************************************************************/
 
 /*
@@ -58,6 +58,11 @@
 #include "drtable.h"
 #include "modules.h"
 #include "drcovlib_private.h"
+#ifdef LINUX
+#    include "../../core/unix/include/syscall.h"
+#elif defined(UNIX)
+#    include <sys/syscall.h>
+#endif
 #include <limits.h>
 #include <string.h>
 
@@ -79,9 +84,6 @@ typedef struct _per_thread_t {
 
 static per_thread_t *global_data;
 static bool drcov_per_thread = false;
-#ifndef WINDOWS
-static int sysnum_execve = IF_X64_ELSE(59, 11);
-#endif
 static volatile bool go_native;
 static int tls_idx = -1;
 static int drcovlib_init_count;
@@ -139,8 +141,15 @@ bb_table_print(void *drcontext, per_thread_t *data)
         ASSERT(false, "invalid log file");
         return;
     }
-    dr_fprintf(data->log, "BB Table: %u bbs\n", drtable_num_entries(data->bb_table));
-    if (TEST(DRCOVLIB_DUMP_AS_TEXT, options.flags)) {
+    /* We do not support >32U-bit-max (~4 billion) blocks.
+     * drcov2lcov would need a number of changes to support this.
+     * We have a debug-build check here.
+     */
+    ASSERT(drtable_num_entries(data->bb_table) <= UINT_MAX,
+           "block count exceeds 32-bit max");
+    dr_fprintf(data->log, "BB Table: %u bbs\n",
+               (uint)drtable_num_entries(data->bb_table));
+    if (TESTANY(DRCOVLIB_DUMP_AS_TEXT, options.flags)) {
         dr_fprintf(data->log, "module id, start, size:\n");
         drtable_iterate(data->bb_table, data, bb_table_entry_print);
     } else
@@ -152,16 +161,17 @@ bb_table_entry_add(void *drcontext, per_thread_t *data, app_pc start, uint size)
 {
     bb_entry_t *bb_entry = drtable_alloc(data->bb_table, 1, NULL);
     uint mod_id;
-    app_pc mod_start;
-    drcovlib_status_t res = drmodtrack_lookup(drcontext, start, &mod_id, &mod_start);
+    app_pc mod_seg_start;
+    drcovlib_status_t res =
+        drmodtrack_lookup_segment(drcontext, start, &mod_id, &mod_seg_start);
     /* we do not de-duplicate repeated bbs */
     ASSERT(size < USHRT_MAX, "size overflow");
     bb_entry->size = (ushort)size;
     if (res == DRCOVLIB_SUCCESS) {
         ASSERT(mod_id < USHRT_MAX, "module id overflow");
         bb_entry->mod_id = (ushort)mod_id;
-        ASSERT(start > mod_start, "wrong module");
-        bb_entry->start = (uint)(start - mod_start);
+        ASSERT(start >= mod_seg_start, "wrong module");
+        bb_entry->start = (uint)(start - mod_seg_start);
     } else {
         /* XXX: we just truncate the address, which may have wrong value
          * in x64 arch. It should be ok now since it is an unknown module,
@@ -290,7 +300,7 @@ event_filter_syscall(void *drcontext, int sysnum)
 #ifdef WINDOWS
     return false;
 #else
-    return sysnum == sysnum_execve;
+    return sysnum == SYS_execve;
 #endif
 }
 
@@ -298,7 +308,7 @@ static bool
 event_pre_syscall(void *drcontext, int sysnum)
 {
 #ifdef UNIX
-    if (sysnum == sysnum_execve) {
+    if (sysnum == SYS_execve) {
         /* for !drcov_per_thread, the per-thread data is a copy of global data */
         per_thread_t *data = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
         ASSERT(data != NULL, "data must not be NULL");
@@ -306,6 +316,7 @@ event_pre_syscall(void *drcontext, int sysnum)
             drcontext = NULL;
         /* We only dump the data but do not free any memory.
          * XXX: for drcov_per_thread, we only dump the current thread.
+         * XXX: We don't handle the syscall failing.
          */
         dump_drcov_data(drcontext, data);
         /* TODO: add execve test.
@@ -323,7 +334,7 @@ event_pre_syscall(void *drcontext, int sysnum)
  */
 static dr_emit_flags_t
 event_basic_block_analysis(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
-                           bool translating, OUT void **user_data)
+                           bool translating, DR_PARAM_OUT void **user_data)
 {
     per_thread_t *data;
     instr_t *instr;
@@ -452,7 +463,7 @@ event_fork(void *drcontext)
 #endif
 
 drcovlib_status_t
-drcovlib_logfile(void *drcontext, OUT const char **path)
+drcovlib_logfile(void *drcontext, DR_PARAM_OUT const char **path)
 {
     if (path == NULL)
         return DRCOVLIB_ERROR_INVALID_PARAMETER;
@@ -500,6 +511,8 @@ drcovlib_exit(void)
         dump_drcov_data(NULL, global_data);
         global_data_destroy(global_data);
     }
+    drcov_per_thread = false;
+
     /* destroy module table */
     drmodtrack_exit();
 
@@ -545,7 +558,7 @@ drcovlib_init(drcovlib_options_t *ops)
         return DRCOVLIB_ERROR_INVALID_PARAMETER;
     if ((ops->flags & (~(DRCOVLIB_DUMP_AS_TEXT | DRCOVLIB_THREAD_PRIVATE))) != 0)
         return DRCOVLIB_ERROR_INVALID_PARAMETER;
-    if (TEST(DRCOVLIB_THREAD_PRIVATE, ops->flags)) {
+    if (TESTANY(DRCOVLIB_THREAD_PRIVATE, ops->flags)) {
         if (!dr_using_all_private_caches())
             return DRCOVLIB_ERROR_INVALID_SETUP;
         drcov_per_thread = true;
@@ -576,7 +589,7 @@ drcovlib_init(drcovlib_options_t *ops)
     drmgr_register_thread_init_event(event_thread_init);
     drmgr_register_thread_exit_event(event_thread_exit);
     drmgr_register_bb_instrumentation_event(event_basic_block_analysis, NULL, NULL);
-    dr_register_filter_syscall_event(event_filter_syscall);
+    drmgr_register_filter_syscall_event(event_filter_syscall);
     drmgr_register_pre_syscall_event(event_pre_syscall);
 #ifdef UNIX
     dr_register_fork_init_event(event_fork);

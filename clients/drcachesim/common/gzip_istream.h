@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2018-2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2018-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -36,13 +36,16 @@
  */
 
 #ifndef _GZIP_ISTREAM_H_
-#define _GZIP_ISTREAM_H_ 1
+#define _GZIP_ISTREAM_H_
 
 #ifndef HAS_ZLIB
 #    error HAS_ZLIB is required
 #endif
 #include <fstream>
 #include <zlib.h>
+
+namespace dynamorio {
+namespace drmemtrace {
 
 /* We need to override the stream buffer class which is where the file
  * reads happen.  The stream buffer base class reads from eback()..egptr()
@@ -83,7 +86,7 @@ public:
         if (dir == std::ios_base::cur &&
             ((off >= 0 && gptr() + off < egptr()) ||
              (off < 0 && gptr() + off >= eback())))
-            gbump(off);
+            gbump(static_cast<int>(off));
         else {
             // Unsupported!
             return -1;
@@ -110,5 +113,8 @@ public:
         delete rdbuf();
     }
 };
+
+} // namespace drmemtrace
+} // namespace dynamorio
 
 #endif /* _GZIP_ISTREAM_H_ */

@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2010-2021 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2026 Google, Inc.  All rights reserved.
  * Copyright (c) 2000-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -144,10 +144,10 @@ app_pc dynamo_dll_end = NULL; /* open-ended */
 static app_pc dynamo_dll_preferred_base = NULL;
 
 /* thread-local storage slots */
-enum { TLS_UNINITIALIZED = (ushort)0U };
+enum { TLS_UNINITIALIZED = 0 };
 static ushort tls_local_state_offs = TLS_UNINITIALIZED;
 /* we keep this cached for easy asm access */
-static ushort tls_dcontext_offs = TLS_UNINITIALIZED;
+static int tls_dcontext_offs = TLS_UNINITIALIZED;
 
 /* used for early inject */
 app_pc parent_early_inject_address = NULL; /* dynamo.c fills in */
@@ -209,7 +209,7 @@ get_nth_stack_frames_call_target(int num_frames, reg_t *ebp)
     if (i == num_frames) {
         /* success walking frames, return address should be the after
          * call address of the call that targeted this frame */
-        /* FIXME - would be nice to get this with decode_cti, but dr might
+        /* XXX - would be nice to get this with decode_cti, but dr might
          * not even be initialized yet and this is safer */
         byte buf[5]; /* sizeof call rel32 */
         if (d_r_safe_read((byte *)(next_frame[1] - sizeof(buf)), sizeof(buf), &buf) &&
@@ -250,7 +250,7 @@ check_for_ldrpLoadImportModule(byte *base, uint *ebp)
              * After that don't really care (is one of the
              * Ldrp*ImportDescriptor* routines. So we walk the
              * stack back and get the desired address.
-             * FIXME - would be nice if we had some way to double
+             * XXX - would be nice if we had some way to double
              * check this address, could try to decode and check against
              * the versions we've seen.
              * Note that NtMapViewOfSection in all its various platform forms
@@ -283,7 +283,7 @@ DllMainThreadAttach()
          */
         LOG(GLOBAL, LOG_TOP | LOG_THREADS, 1,
             "DllMain: initializing new thread " TIDFMT "\n", d_r_get_thread_id());
-        dynamo_thread_init(NULL, NULL, NULL _IF_CLIENT_INTERFACE(false));
+        dynamo_thread_init(NULL, NULL, NULL, false);
     }
 }
 #    endif
@@ -333,7 +333,7 @@ DllMain(HANDLE hModule, DWORD reason_for_call, LPVOID Reserved)
              * or kernel32 (possibly someone else?) depending on how we were
              * injected. For -early_inject, ntdll!LdrGetProcedureAddress is
              * usually the root of the call to our DLLMain (likely something
-             * to do with load vs. init order at process startup? FIXME
+             * to do with load vs. init order at process startup? XXX
              * understand better, is there a flag we can send to have this
              * called on load?), but in that case we use the address passed to
              * us by the parent. */
@@ -346,7 +346,7 @@ DllMain(HANDLE hModule, DWORD reason_for_call, LPVOID Reserved)
                 STACK_DEPTH_LdrpLoadDll_NT, (reg_t *)cur_ebp);
             ldrpLoadDll_address_not_NT = get_nth_stack_frames_call_target(
                 STACK_DEPTH_LdrpLoadDll, (reg_t *)cur_ebp);
-            /* FIXME - would be nice to have extra verification here,
+            /* XXX - would be nice to have extra verification here,
              * but after this frame there are too many possibilites (many
              * of which are unexported) so is hard to find something we
              * can check. */
@@ -380,7 +380,7 @@ get_dll_bounds(wchar_t *name, app_pc *start, app_pc *end)
     dllh = get_module_handle(name);
     ASSERT(dllh != NULL);
     pb = (PBYTE)dllh;
-    /* FIXME: we should just call get_allocation_size() */
+    /* XXX: we should just call get_allocation_size() */
     len = query_virtual_memory(pb, &mbi, sizeof(mbi));
     ASSERT(len == sizeof(mbi));
     ASSERT(mbi.State != MEM_FREE);
@@ -414,7 +414,9 @@ init_global_profiles()
         }
     });
     if (profile_file == INVALID_FILE) {
-        get_unique_logfile(".profile", NULL, 0, false, &profile_file);
+        get_unique_logfile(".profile", /*filename_buffer=*/NULL, /*maxlen=*/0,
+                           /*open_directory=*/false, /*output_directory=*/NULL,
+                           /*embed_timestamp=*/false, &profile_file);
     }
     DOLOG(1, LOG_PROFILE, {
         if (profile_file == INVALID_FILE)
@@ -493,7 +495,7 @@ exit_global_profiles()
     global_sum = sum_profile(global_profile);
 
     /* we expect to be the last thread at this point.
-       FIXME: we can remove the mutex_lock/unlock then */
+       XXX: we can remove the mutex_lock/unlock then */
     d_r_mutex_lock(&profile_dump_lock);
     if (dynamo_dll_profile)
         dump_dll_profile(dynamo_dll_profile, global_sum, "dynamorio.dll");
@@ -535,7 +537,8 @@ get_context_xstate_flag(void)
 
 /* Returns false and marks 'value' as an empty string when it fails. */
 static bool
-read_version_registry_value(const wchar_t *name, char *value OUT, size_t value_sz)
+read_version_registry_value(const wchar_t *name, char *value DR_PARAM_OUT,
+                            size_t value_sz)
 {
     reg_query_value_result_t result;
     char buf_array[sizeof(KEY_VALUE_PARTIAL_INFORMATION) +
@@ -555,7 +558,7 @@ read_version_registry_value(const wchar_t *name, char *value OUT, size_t value_s
     return false;
 }
 
-/* FIXME: Right now error reporting will work here, but once we have our
+/* XXX: Right now error reporting will work here, but once we have our
  * error reporting syscalls going through wrappers and requiring this
  * init routine, we'll have to have a fallback here that dynamically
  * determines the syscalls and finishes init, and then reports the error.
@@ -597,12 +600,10 @@ windows_version_init(int num_GetContextThread, int num_AllocateVirtualMemory)
                                 BUFFER_SIZE_ELEMENTS(os_edition));
     read_version_registry_value(L"ReleaseId", os_release_id,
                                 BUFFER_SIZE_ELEMENTS(os_release_id));
-#    ifdef CLIENT_INTERFACE
     ASSERT(REGISTRY_VERSION_STRING_MAX_LEN >=
            sizeof(((dr_os_version_info_t *)0)->release_id));
     ASSERT(REGISTRY_VERSION_STRING_MAX_LEN >=
            sizeof(((dr_os_version_info_t *)0)->edition));
-#    endif
 
     if (peb->OSPlatformId == VER_PLATFORM_WIN32_NT) {
         /* WinNT or descendents */
@@ -1027,13 +1028,13 @@ d_r_os_init(void)
     eventlog_init(); /* os dependent and currently Windows specific */
 
     if (os_version >= WINDOWS_VERSION_XP) {
-        /* FIXME: bootstrapping problem where we see 0x7ffe0300 before we see
+        /* XXX: bootstrapping problem where we see 0x7ffe0300 before we see
          * the 1st sysenter...solution for now is to hardcode initial values so
          * we pass the 1st PROGRAM_SHEPHERDING code origins test, then re-set these once
          * we see the 1st syscall.
          */
         /* on XP service pack 2 the syscall enter and exit stubs are Ki
-         * routines in ntdll.dll FIXME : as a hack for now will leave
+         * routines in ntdll.dll XXX : as a hack for now will leave
          * page_start as 0 (as it would be for 2000, since region is
          * executable no need for the code origins exception) and
          * after syscall to the appropriate value, this means will still
@@ -1042,7 +1043,7 @@ d_r_os_init(void)
          * the ki routines are aligned (less concern about enough space for the
          * interception stub, nicely exported for us etc.)
          */
-        /* initializing so get_module_handle should be safe, FIXME */
+        /* initializing so get_module_handle should be safe, XXX */
         module_handle_t ntdllh = get_ntdll_base();
         app_pc return_point = (app_pc)d_r_get_proc_address(ntdllh, "KiFastSystemCallRet");
         if (return_point != NULL) {
@@ -1057,7 +1058,7 @@ d_r_os_init(void)
             else
                 vsyscall_syscall_end_pc = NULL; /* wait until 1st one */
         } else {
-            /* FIXME : if INT syscalls are being used then this opens up a
+            /* XXX : if INT syscalls are being used then this opens up a
              * security hole for the followin page */
             vsyscall_page_start = VSYSCALL_PAGE_START_BOOTSTRAP_VALUE;
             vsyscall_after_syscall = VSYSCALL_AFTER_SYSCALL_BOOTSTRAP_VALUE;
@@ -1075,7 +1076,7 @@ d_r_os_init(void)
     /* case 3701 about performance gains,
      * and case 6670 about TLS conflict in SQL2005 */
 
-    /* FIXME: could control which entry should be cache aligned, but
+    /* XXX: could control which entry should be cache aligned, but
      * we should be able to restructure the state to ensure first
      * entry is indeed important.  Should make sure we choose same
      * position in both release and debug, see local_state_t.stats.
@@ -1085,7 +1086,7 @@ d_r_os_init(void)
     res = tls_calloc(false /*no synch required*/, &offs, TLS_NUM_SLOTS, alignment);
 
     DODEBUG({
-        /* FIXME: elevate failure here to a release-build syslog? */
+        /* XXX: elevate failure here to a release-build syslog? */
         if (!res) {
             SYSLOG_INTERNAL_ERROR("Cannot allocate %d tls slots at %d alignment",
                                   TLS_NUM_SLOTS, alignment);
@@ -1230,7 +1231,7 @@ os_fast_exit(void)
     ASSERT_CURIOSITY(reached_image_entry_yet() || standalone_library ||
                      RUNNING_WITHOUT_CODE_CACHE() IF_APP_EXPORTS(|| dr_api_entry)
                      /* Clients can go native.  XXX: add var for whether client did? */
-                     IF_CLIENT_INTERFACE(|| CLIENTS_EXIST()));
+                     || CLIENTS_EXIST());
 
     DOLOG(1, LOG_TOP, { print_mem_quota(); });
     DOLOG(1, LOG_TOP, { print_mem_stats(); });
@@ -1379,7 +1380,7 @@ os_terminate_wow64_write_args(bool exit_process, HANDLE proc_or_thread_handle,
 #    endif
 }
 
-/* FIXME: what are good values here? */
+/* XXX: what are good values here? */
 #    define KILL_PROC_EXIT_STATUS -1
 #    define KILL_THREAD_EXIT_STATUS -1
 
@@ -1396,8 +1397,8 @@ os_terminate_static_arguments(bool exit_process, bool custom_code, int exit_code
             byte pad_bytes[SYSCALL_PARAM_MAX_OFFSET];
         } padding;
         struct {
-            IN HANDLE ProcessOrThreadHandle;
-            IN NTSTATUS ExitStatus;
+            DR_PARAM_IN HANDLE ProcessOrThreadHandle;
+            DR_PARAM_IN NTSTATUS ExitStatus;
         } args;
     } terminate_args_t;
     /* It is not safe to use app stack and hope application will work.
@@ -1495,8 +1496,8 @@ os_terminate_common(dcontext_t *dcontext, terminate_flags_t terminate_type,
     HANDLE currentThreadOrProcess = NT_CURRENT_PROCESS;
     bool exit_process = true;
 
-    ASSERT(TEST(TERMINATE_PROCESS, terminate_type) != /* xor */
-           TEST(TERMINATE_THREAD, terminate_type));
+    ASSERT(TESTANY(TERMINATE_PROCESS, terminate_type) != /* xor */
+           TESTANY(TERMINATE_THREAD, terminate_type));
 
     /* We could be holding the bb_building_lock at this point -- if we cleanup,
      * we will get a rank order violation with all_threads_synch_lock.  if we
@@ -1515,11 +1516,11 @@ os_terminate_common(dcontext_t *dcontext, terminate_flags_t terminate_type,
          * certainly already done so for a syslog */
         if (TESTANY(DETACH_ON_TERMINATE | DETACH_ON_TERMINATE_NO_CLEAN,
                     DYNAMO_OPTION(internal_detach_mask))) {
-            /* FIXME : if we run into stack problems we could reset the stack
+            /* XXX : if we run into stack problems we could reset the stack
              * here though caller has likely alredy gone as deep as detach
              * will since almost everyone SYSLOG's before calling this */
             detach_helper(
-                TEST(DETACH_ON_TERMINATE_NO_CLEAN, DYNAMO_OPTION(internal_detach_mask))
+                TESTANY(DETACH_ON_TERMINATE_NO_CLEAN, DYNAMO_OPTION(internal_detach_mask))
                     ? DETACH_BAD_STATE_NO_CLEANUP
                     : DETACH_BAD_STATE);
             /* skip option synch, make this as safe as possible */
@@ -1546,7 +1547,7 @@ os_terminate_common(dcontext_t *dcontext, terminate_flags_t terminate_type,
     /* CHECK: Can a process disallow PROCESS_TERMINATE or THREAD_TERMINATE
        access even to itself?
     */
-    if (TEST(TERMINATE_THREAD, terminate_type)) {
+    if (TESTANY(TERMINATE_THREAD, terminate_type)) {
         exit_process =
             (!IS_CLIENT_THREAD(dcontext) && is_last_app_thread() && !dynamo_exited);
         if (!exit_process) {
@@ -1555,7 +1556,7 @@ os_terminate_common(dcontext_t *dcontext, terminate_flags_t terminate_type,
     }
 
     STATS_INC(num_threads_killed);
-    if (TEST(TERMINATE_CLEANUP, terminate_type)) {
+    if (TESTANY(TERMINATE_CLEANUP, terminate_type)) {
         byte *arguments =
             os_terminate_static_arguments(exit_process, custom_code, exit_code);
 
@@ -1577,10 +1578,10 @@ os_terminate_common(dcontext_t *dcontext, terminate_flags_t terminate_type,
         /* now we issue a syscall by number */
         /* we can't use issue_system_call_for_app because it relies on
          * dstack that we should release */
-        /* FIXME: what happens now if we get some callbacks that are still on
+        /* XXX: what happens now if we get some callbacks that are still on
          * their way? Shouldn't happen since Terminate* are believed to be
          * non-alertable. */
-        /* FIXME: we only want the last part of cleanup_and_terminate */
+        /* XXX: we only want the last part of cleanup_and_terminate */
         ASSERT(dcontext != NULL);
         cleanup_and_terminate(
             dcontext, syscalls[exit_process ? SYS_TerminateProcess : SYS_TerminateThread],
@@ -1599,7 +1600,7 @@ os_terminate_common(dcontext_t *dcontext, terminate_flags_t terminate_type,
                                  custom_code ? exit_code : KILL_PROC_EXIT_STATUS);
             ASSERT_NOT_REACHED();
         } else {
-            /* FIXME: this is now very dangerous - we even leave our own state */
+            /* XXX: this is now very dangerous - we even leave our own state */
             /* we should at least remove this thread from the all threads list
              * to avoid synchronizing issues, though we are running the risk of
              * an infinite loop with a failure in this function and detach on
@@ -1643,10 +1644,9 @@ os_tls_exit(local_state_t *local_state, bool other_thread)
      * the freed TEB tls slots */
 }
 
-#    ifdef CLIENT_INTERFACE
 /* Allocates num_slots tls slots aligned with alignment align */
 bool
-os_tls_calloc(OUT uint *offset, uint num_slots, uint alignment)
+os_tls_calloc(DR_PARAM_OUT uint *offset, uint num_slots, uint alignment)
 {
     bool need_synch = !dynamo_initialized;
     if (num_slots == 0)
@@ -1659,7 +1659,6 @@ os_tls_cfree(uint offset, uint num_slots)
 {
     return (bool)tls_cfree(true, offset, num_slots);
 }
-#    endif
 
 /* os_data is unused */
 void
@@ -1754,7 +1753,7 @@ os_thread_stack_exit(dcontext_t *dcontext)
         /* believe <= win2k frees the stack in process, would like to check
          * that but we run into problems with stacks that are never freed
          * (TerminateThread, threads killed by TerminateProcess 0, last thread
-         * calling TerminateProcess, etc.) FIXME figure out way to add an
+         * calling TerminateProcess, etc.) XXX figure out way to add an
          * assert_curiosity */
         /* make sure we use our dcontext (dcontext could belong to another thread
          * from other_thread_exit) since flushing will end up using this dcontext
@@ -1768,7 +1767,7 @@ os_thread_stack_exit(dcontext_t *dcontext)
                                     true /* own thread_initexit_lock */,
                                     false /* not image */);
         }
-        if (TEST(ASLR_HEAP_FILL, DYNAMO_OPTION(aslr))) {
+        if (TESTANY(ASLR_HEAP_FILL, DYNAMO_OPTION(aslr))) {
             size_t stack_reserved_size = ostd->stack_top - ostd->stack_base;
             /* verified above with get_allocation_size() this is not
              * only the committed portion
@@ -1795,7 +1794,7 @@ os_thread_under_dynamo(dcontext_t *dcontext)
 }
 
 void
-os_thread_not_under_dynamo(dcontext_t *dcontext)
+os_thread_not_under_dynamo(dcontext_t *dcontext, bool restore_sigblocked)
 {
     /* remove cur thread from callback list */
     ASSERT_MESSAGE(CHKLVL_ASSERTS + 1 /*expensive*/, "can only act on executing thread",
@@ -1871,8 +1870,10 @@ enum {
  * data, or another thread during synchall.
  */
 static generic_table_t *takeover_table;
-#    define INIT_HTABLE_SIZE_TAKEOVER 6             /* should remain small */
-#    define INVALID_PAYLOAD ((void *)(ptr_int_t)-2) /* NULL and -1 are used by table */
+#    define INIT_HTABLE_SIZE_TAKEOVER 6 /* should remain small */
+#    define INVALID_PAYLOAD                                        \
+        ((void *)(ptr_int_t) - 2) /* NULL and -1 are used by table \
+                                   */
 
 static void
 takeover_table_entry_free(dcontext_t *dcontext, void *e)
@@ -2035,7 +2036,7 @@ thread_attach_restore_full_state(takeover_data_t *data)
 }
 
 void
-thread_attach_translate(dcontext_t *dcontext, priv_mcontext_t *mc INOUT,
+thread_attach_translate(dcontext_t *dcontext, priv_mcontext_t *mc DR_PARAM_INOUT,
                         bool restore_memory)
 {
     takeover_data_t *data;
@@ -2052,14 +2053,14 @@ thread_attach_translate(dcontext_t *dcontext, priv_mcontext_t *mc INOUT,
 }
 
 static void
-thread_attach_context_revert_from_data(CONTEXT *cxt INOUT, takeover_data_t *data)
+thread_attach_context_revert_from_data(CONTEXT *cxt DR_PARAM_INOUT, takeover_data_t *data)
 {
     cxt->CXT_XIP = (ptr_uint_t)data->continuation_pc;
     thread_attach_restore_full_state(data);
 }
 
 void
-thread_attach_context_revert(CONTEXT *cxt INOUT)
+thread_attach_context_revert(CONTEXT *cxt DR_PARAM_OUT)
 {
     takeover_data_t *data;
     TABLE_RWLOCK(takeover_table, read, lock);
@@ -2501,6 +2502,15 @@ static bool
 os_take_over_thread(dcontext_t *dcontext, HANDLE hthread, thread_id_t tid, bool suspended)
 {
     bool success = true;
+
+    if (DYNAMO_OPTION(skip_terminating_threads)) {
+        if (nt_is_thread_terminating(hthread)) {
+            // Takeover fails when attaching and trying to takeover terminating threads.
+            // Luckily, we don't really need to take over them.
+            return success;
+        }
+    }
+
     DWORD cxt_flags = CONTEXT_DR_STATE;
     size_t bufsz = nt_get_context_size(cxt_flags);
     char *buf = (char *)heap_alloc(dcontext, bufsz HEAPACCT(ACCT_THREAD_MGT));
@@ -2643,7 +2653,7 @@ dcontext_t *
 os_thread_take_over_secondary(priv_mcontext_t *mc)
 {
     IF_DEBUG(int r =)
-    dynamo_thread_init(NULL, mc, NULL _IF_CLIENT_INTERFACE(false));
+    dynamo_thread_init(NULL, mc, NULL, false);
     ASSERT(r == SUCCESS);
     return get_thread_private_dcontext();
 }
@@ -2714,8 +2724,8 @@ os_take_over_all_unknown_threads(dcontext_t *dcontext)
                       * XXX i#95: we need a synchall-style loop for known threads as
                       * they can be in DR for syscall hook handling.
                       */
-                     (is_thread_currently_native(tr)
-                          IF_CLIENT_INTERFACE(&&!IS_CLIENT_THREAD(tr->dcontext)))) &&
+                     (is_thread_currently_native(tr) &&
+                      !IS_CLIENT_THREAD(tr->dcontext))) &&
                     threads[i].tid != my_id) {
                     LOG(GLOBAL, LOG_THREADS, 1,
                         "TAKEOVER: taking over thread " TIDFMT "\n", threads[i].tid);
@@ -2789,7 +2799,7 @@ thread_attach_setup(priv_mcontext_t *mc)
          * sets the context back).
          */
         mc->pc = data->continuation_pc;
-        thread_set_self_mcontext(mc);
+        thread_set_self_mcontext(mc, false);
         ASSERT_NOT_REACHED();
     }
     /* Preclude double takeover if we become suspended while in ntdll */
@@ -2799,7 +2809,7 @@ thread_attach_setup(priv_mcontext_t *mc)
      * already initialized.
      */
     if (!is_thread_initialized()) {
-        int rc = dynamo_thread_init(NULL, mc, NULL _IF_CLIENT_INTERFACE(false));
+        int rc = dynamo_thread_init(NULL, mc, NULL, false);
         ASSERT(rc == SUCCESS);
     }
     dcontext = get_thread_private_dcontext();
@@ -2823,6 +2833,14 @@ thread_attach_setup(priv_mcontext_t *mc)
     thread_attach_remove_from_table(data);
     data = NULL;
 
+    if (DYNAMO_OPTION(synchronous_attach) && !dr_started_and_attached) {
+        dcontext->whereami = DR_WHERE_SIGNAL_HANDLER;
+        LOG(THREAD, LOG_TOP, 2, "%s: waiting for all threads to be taken over\n",
+            __FUNCTION__);
+        wait_for_event(dr_all_threads_attached, 0);
+        dcontext->whereami = DR_WHERE_APP;
+    }
+
     transfer_to_dispatch(dcontext, get_mcontext(dcontext), false /*!full_DR_state*/);
     ASSERT_NOT_REACHED();
 }
@@ -2831,7 +2849,6 @@ thread_attach_setup(priv_mcontext_t *mc)
  * CLIENT THREADS
  */
 
-#    ifdef CLIENT_SIDELINE /* PR 222812: tied to sideline usage */
 /* i#41/PR 222812: client threads
  * * thread must have dcontext since many API routines require one and we
  *   don't expose GLOBAL_DCONTEXT (xref PR 243008, PR 216936, PR 536058)
@@ -2843,7 +2860,7 @@ thread_attach_setup(priv_mcontext_t *mc)
  *   the thread is auto-terminated and stack cleaned up on return from run
  *   function
  */
-/* FIXME PR 210591: transparency issues:
+/* XXX PR 210591: transparency issues:
  * 1) All dlls will be notifed of thread creation by DLL_THREAD_ATTACH
  *    => this is now solved by not running the Ldr code: intercept_new_thread()
  *    just comes straight here
@@ -2877,7 +2894,7 @@ client_thread_target(void *param)
 }
 
 bool
-is_new_thread_client_thread(CONTEXT *cxt, OUT byte **dstack)
+is_new_thread_client_thread(CONTEXT *cxt, DR_PARAM_OUT byte **dstack)
 {
     bool is_client = (void *)cxt->CXT_XIP == (void *)client_thread_target ||
         /* i#1309: on win8+ we have to use NtCreateThreadEx via wrapper */
@@ -2916,7 +2933,7 @@ dr_create_client_thread(void (*func)(void *param), void *arg)
     arg_buf[0] = (void *)func;
     arg_buf[1] = arg;
 
-    /* FIXME PR 225714: does this work on Vista? */
+    /* XXX PR 225714: does this work on Vista? */
     hthread = our_create_thread_have_stack(
         NT_CURRENT_PROCESS, IF_X64_ELSE(true, false), (void *)client_thread_target, NULL,
         arg_buf, BUFFER_SIZE_BYTES(arg_buf), dstack, DYNAMORIO_STACK_SIZE, false, &tid);
@@ -2925,12 +2942,11 @@ dr_create_client_thread(void (*func)(void *param), void *arg)
         stack_free(dstack, DYNAMORIO_STACK_SIZE);
         return false;
     }
-    /* FIXME: what about all of our check_sole_thread() checks? */
+    /* XXX: what about all of our check_sole_thread() checks? */
     res = close_handle(hthread);
     CLIENT_ASSERT(res, "error closing thread handle");
     return res;
 }
-#    endif CLIENT_SIDELINE /* PR 222812: tied to sideline usage */
 
 int
 get_os_version()
@@ -2939,9 +2955,9 @@ get_os_version()
 }
 
 void
-get_os_version_ex(int *version OUT, uint *service_pack_major OUT,
-                  uint *service_pack_minor OUT, uint *build_number OUT,
-                  const char **release_id OUT, const char **edition OUT)
+get_os_version_ex(int *version DR_PARAM_OUT, uint *service_pack_major DR_PARAM_OUT,
+                  uint *service_pack_minor DR_PARAM_OUT, uint *build_number DR_PARAM_OUT,
+                  const char **release_id DR_PARAM_OUT, const char **edition DR_PARAM_OUT)
 {
     if (version != NULL)
         *version = os_version;
@@ -3009,7 +3025,7 @@ static bool
 prot_is_readable(uint prot)
 {
     prot &= ~PAGE_PROTECTION_QUALIFIERS;
-    /* FIXME: consider just E to be unreadable?
+    /* XXX: consider just E to be unreadable?
      * do not do exclusions, sometimes prot == 0 or something
      */
     switch (prot) {
@@ -3056,7 +3072,7 @@ prot_is_copyonwrite(uint prot)
 bool
 prot_is_guard(uint prot)
 {
-    return TEST(PAGE_GUARD, prot);
+    return TESTANY(PAGE_GUARD, prot);
 }
 
 /* translate platform independent protection bits to native flags */
@@ -3064,22 +3080,22 @@ int
 memprot_to_osprot(uint prot)
 {
     uint os_prot = 0;
-    if (TEST(MEMPROT_EXEC, prot)) {
-        if (!TEST(MEMPROT_READ, prot)) {
-            ASSERT(!TEST(MEMPROT_WRITE, prot));
+    if (TESTANY(MEMPROT_EXEC, prot)) {
+        if (!TESTANY(MEMPROT_READ, prot)) {
+            ASSERT(!TESTANY(MEMPROT_WRITE, prot));
             os_prot = PAGE_EXECUTE;
-        } else if (TEST(MEMPROT_WRITE, prot))
+        } else if (TESTANY(MEMPROT_WRITE, prot))
             os_prot = PAGE_EXECUTE_READWRITE;
         else
             os_prot = PAGE_EXECUTE_READ;
-    } else if (TEST(MEMPROT_READ, prot)) {
-        if (TEST(MEMPROT_WRITE, prot))
+    } else if (TESTANY(MEMPROT_READ, prot)) {
+        if (TESTANY(MEMPROT_WRITE, prot))
             os_prot = PAGE_READWRITE;
         else
             os_prot = PAGE_READONLY;
     } else
         os_prot = PAGE_NOACCESS;
-    if (TEST(MEMPROT_GUARD, prot))
+    if (TESTANY(MEMPROT_GUARD, prot))
         os_prot |= PAGE_GUARD;
     return os_prot;
 }
@@ -3180,7 +3196,7 @@ dump_mbi_addr(file_t file, app_pc target, bool dump_xml)
     }
 }
 
-/* FIXME:
+/* XXX:
  * We need to be able to distinguish our own pid from that of a child
  * process.  We observe that after CreateProcess a child has pid of 0 (as
  * determined by process_id_from_handle, calling NtQueryInformationProcess).
@@ -3215,22 +3231,18 @@ num_app_args()
 {
     /* XXX i#2662: Add support for Windows. */
     ASSERT_NOT_IMPLEMENTED(false);
-#    ifdef CLIENT_INTERFACE
     set_client_error_code(NULL, DR_ERROR_NOT_IMPLEMENTED);
-#    endif
 
     return -1;
 }
 
 /* Returns the application's command-line arguments. */
 int
-get_app_args(OUT dr_app_arg_t *args_buf, int buf_size)
+get_app_args(DR_PARAM_OUT dr_app_arg_t *args_buf, int buf_size)
 {
     /* XXX i#2662: Add support for Windows. */
     ASSERT_NOT_IMPLEMENTED(false);
-#    ifdef CLIENT_INTERFACE
     set_client_error_code(NULL, DR_ERROR_NOT_IMPLEMENTED);
-#    endif
 
     return -1;
 }
@@ -3277,7 +3289,7 @@ should_inject_into_process(dcontext_t *dcontext, HANDLE process_handle,
         inject_setting_mask_t should_inject =
             systemwide_should_inject(process_handle, rununder_mask);
 
-        if (DYNAMO_OPTION(follow_systemwide) && TEST(INJECT_TRUE, should_inject)) {
+        if (DYNAMO_OPTION(follow_systemwide) && TESTANY(INJECT_TRUE, should_inject)) {
             LOG(THREAD, LOG_SYSCALLS | LOG_THREADS, 1,
                 "\tconfigured child should be injected\n");
             inject = true;
@@ -3294,15 +3306,15 @@ should_inject_into_process(dcontext_t *dcontext, HANDLE process_handle,
             inject = true; /* -follow_children defaults to inject */
 
             /* check if child should be excluded from running under dr */
-            if (TEST(INJECT_EXCLUDED, should_inject)) {
+            if (TESTANY(INJECT_EXCLUDED, should_inject)) {
                 LOG(THREAD, LOG_SYSCALLS | LOG_THREADS, 1,
                     "\tchild is excluded, not injecting\n");
                 inject = false;
             }
 
             /* check if we should leave injection to preinjector */
-            if (TEST(INJECT_TRUE, should_inject) && systemwide_inject_enabled() &&
-                !TEST(INJECT_EXPLICIT, should_inject)) {
+            if (TESTANY(INJECT_TRUE, should_inject) && systemwide_inject_enabled() &&
+                !TESTANY(INJECT_EXPLICIT, should_inject)) {
                 ASSERT(!DYNAMO_OPTION(follow_systemwide));
                 LOG(THREAD, LOG_SYSCALLS | LOG_THREADS, 1,
                     "\tletting preinjector inject into child\n");
@@ -3317,7 +3329,7 @@ should_inject_into_process(dcontext_t *dcontext, HANDLE process_handle,
             });
         }
         if (inject) {
-            ASSERT(!TEST(INJECT_EXCLUDED, should_inject));
+            ASSERT(!TESTANY(INJECT_EXCLUDED, should_inject));
             if (inject_settings != NULL)
                 *inject_settings = should_inject;
         }
@@ -3372,7 +3384,7 @@ inject_into_process(dcontext_t *dcontext, HANDLE process_handle, HANDLE thread_h
         /* We got the global key's library, use parent's library instead if the only
          * reason we're injecting is -follow_children (i.e. reading RUNUNDER gave us
          * !INJECT_TRUE). */
-        if (!TEST(INJECT_TRUE, should_inject)) {
+        if (!TESTANY(INJECT_TRUE, should_inject)) {
             ASSERT(DYNAMO_OPTION(follow_children));
             library = get_dynamorio_library_path();
         }
@@ -3431,7 +3443,7 @@ inject_into_process(dcontext_t *dcontext, HANDLE process_handle, HANDLE thread_h
          !is_wow64_process(process_handle))) {
         ASSERT(early_inject_address != NULL ||
                !INJECT_LOCATION_IS_LDR(early_inject_location));
-        /* FIXME if early_inject_address == NULL then early_inject_init failed
+        /* XXX if early_inject_address == NULL then early_inject_init failed
          * to find the correct address to use.  Don't expect that to happen,
          * but if it does could fall back to late injection (though we can't
          * be sure that would work, i.e. early thread process for ex.) or
@@ -3449,7 +3461,7 @@ inject_into_process(dcontext_t *dcontext, HANDLE process_handle, HANDLE thread_h
                               "process %d failed",
                               get_process_id(), library,
                               process_id_from_handle(process_handle));
-        /* FIXME i#49: this can happen for a 64-bit child of a 32-bit parent */
+        /* XXX i#49: this can happen for a 64-bit child of a 32-bit parent */
         ASSERT_CURIOSITY(false && "injection into child failed: 32 to 64?");
         return false; /* for compilation correctness and release builds */
     }
@@ -3470,7 +3482,7 @@ is_first_thread_in_new_process(HANDLE process_handle, CONTEXT *cxt)
      * Better would be able to tell from Eip if it is pointing at the
      * kernel32 thread start thunk or the kernel32 process start thunk,
      * or to check if the number of threads in the process equals 0,
-     * but no easy way to do either here.  FIXME
+     * but no easy way to do either here.  XXX
      */
     process_id_t pid = process_id_from_handle(process_handle);
     if (pid == 0) {
@@ -3534,7 +3546,7 @@ maybe_inject_into_process(dcontext_t *dcontext, HANDLE process_handle,
 {
     /* if inject_at_create_process becomes dynamic, need to move this check below
      * the synchronize dynamic options */
-    /* FIXME - can't read process parameters, at process create time is NULL
+    /* XXX - can't read process parameters, at process create time is NULL
      * value in peb field except in Vista.  Could pass it in. */
     /* Can't early inject 32-bit DR into a wow64 process as there is no
      * ntdll32.dll at early inject point, so thread injection only.  PR 215423.
@@ -3563,7 +3575,7 @@ maybe_inject_into_process(dcontext_t *dcontext, HANDLE process_handle,
                 /* On Vista+ a legacy NtCreateProcess* syscall is being used, and
                  * without -early_inject and without a context we're forced to
                  * wait and assume NtCreateThread will be called later.
-                 * FIXME i#1898: on win10 for heap crash handling we hit this, and
+                 * XXX i#1898: on win10 for heap crash handling we hit this, and
                  * we are currently missing the child.
                  */
                 SYSLOG_INTERNAL_WARNING("legacy process creation detected: may miss "
@@ -3679,7 +3691,7 @@ is_user_address(app_pc pc)
     /* we don't worry about LowestUserAddress which is the first 64KB
      * page which should normally be invalid.
      *
-     * FIXME: case 10899 although users can in fact allocate in the
+     * XXX: case 10899 although users can in fact allocate in the
      * NULL allocation region (by using base=1), as typically done in
      * a local NULL pointer attack.  Natively the address is still
      * visible for execution, and the OS should handle base=NULL on
@@ -3717,12 +3729,12 @@ merge_writecopy_pages(app_pc start, app_pc end)
              * Calling NtProtectVirtualMemory w/ PAGE_READWRITE to try
              * and remove the copy-on-write bits does not work, so we
              * write to every page!
-             * FIXME: test on other versions of windows!
+             * XXX: test on other versions of windows!
              * it's not documented so it may not be everywhere!
              * works on Win2K Professional
              * N.B.: since make_writable doesn't preserve copy-on-write,
              * it's a good thing we do this hack.
-             * FIXME: how many of these pages would never have been made private?
+             * XXX: how many of these pages would never have been made private?
              * (case 8069 covers that inquiry)
              */
             volatile app_pc pc = mbi.BaseAddress;
@@ -3750,7 +3762,7 @@ merge_writecopy_pages(app_pc start, app_pc end)
     /* OS could merge w/ another writable region so may not end at end */
     ASSERT(end <= start + mbi.RegionSize);
     /* we only call this on DR data sections right now */
-    ASSERT(dynamo_dll_end == NULL || /* FIXME: init it earlier */
+    ASSERT(dynamo_dll_end == NULL || /* XXX: init it earlier */
            (is_in_dynamo_dll(start) && is_in_dynamo_dll(end)));
     LOG(GLOBAL, LOG_VMAREAS, 2, "DR regions post-merger:\n");
     DOLOG(1, LOG_VMAREAS, {
@@ -3999,7 +4011,7 @@ mem_stats_snapshot()
             r_reserve += mbi.RegionSize;
         } else if (mbi.State == MEM_COMMIT) {
             r_commit += mbi.RegionSize;
-            if (TEST(PAGE_GUARD, mbi.Protect)) {
+            if (TESTANY(PAGE_GUARD, mbi.Protect)) {
                 /* if any guard blocks inside region, assume entire region
                  * is a stack
                  */
@@ -4064,7 +4076,7 @@ process_image(app_pc base, size_t size, uint prot, bool add, bool rewalking,
     ASSERT(prot_is_readable(prot));
     ASSERT(!rewalking || add); /* when rewalking can only add */
 
-    /* FIXME: we only know that we are in a MEM_IMAGE
+    /* XXX: we only know that we are in a MEM_IMAGE
      * we still need to be careful to check it is a real PE
      * We could optimize out these system calls, but for now staying safe
      */
@@ -4100,7 +4112,7 @@ process_image(app_pc base, size_t size, uint prot, bool add, bool rewalking,
              * this process first (i#817)
              */
             ASSERT_CURIOSITY(is_wow64_process(NT_CURRENT_PROCESS) ||
-                             !TEST(IMAGE_FILE_DLL, get_module_characteristics(base)));
+                             !TESTANY(IMAGE_FILE_DLL, get_module_characteristics(base)));
         }
     });
 #    else
@@ -4157,10 +4169,10 @@ process_image(app_pc base, size_t size, uint prot, bool add, bool rewalking,
         already_added_native_exec = true;
 
 #    ifdef GBOP
-        /* FIXME: if some one just loads a vm, our gbop would become useless;
+        /* XXX: if some one just loads a vm, our gbop would become useless;
          * need better dgc identification for gbop; see case 8087.
          */
-        if (add && TEST(GBOP_IS_DGC, DYNAMO_OPTION(gbop)) && !gbop_vm_loaded) {
+        if (add && TESTANY(GBOP_IS_DGC, DYNAMO_OPTION(gbop)) && !gbop_vm_loaded) {
             /* !gbop_vm_loaded in the check above would prevent this memory
              * protection change from happenning for each vm load, not that any
              * process load a vm multiple times or multiple vms.
@@ -4176,7 +4188,7 @@ process_image(app_pc base, size_t size, uint prot, bool add, bool rewalking,
 
     /* Case 7266: add all exes and dlls with managed code to native_exec_areas,
      * for now.
-     * FIXME: should try to execute non-managed code under DR, when possible.
+     * XXX: should try to execute non-managed code under DR, when possible.
      */
     if (DYNAMO_OPTION(native_exec) && DYNAMO_OPTION(native_exec_managed_code) &&
         module_has_cor20_header(base)) {
@@ -4193,7 +4205,7 @@ process_image(app_pc base, size_t size, uint prot, bool add, bool rewalking,
         module_is_native_exec = true;
     }
     /* xref case 10998 - we native exec modules with .pexe sections to handle all the
-     * int 3 strangeness.  FIXME - restrict further? only observed on Vista, known .pexe
+     * int 3 strangeness.  XXX - restrict further? only observed on Vista, known .pexe
      * sections from problematic dlls all begin with mostly the same 0x60 first bytes,
      * .pexe is observed to always be the first section, etc. */
     if (DYNAMO_OPTION(native_exec) && DYNAMO_OPTION(native_exec_dot_pexe) &&
@@ -4248,7 +4260,7 @@ process_image(app_pc base, size_t size, uint prot, bool add, bool rewalking,
 
                 /* Note adding full module region here,
                  * app_memory_protection_change() will filter out only
-                 * CODE.  FIXME: [minor perf] alternatively could walk
+                 * CODE.  XXX: [minor perf] alternatively could walk
                  * module and add only code sections here.
                  */
                 vmvector_add(patch_proof_areas, base, base + size, NULL);
@@ -4293,7 +4305,7 @@ process_image(app_pc base, size_t size, uint prot, bool add, bool rewalking,
                                        &num_threads, THREAD_SYNCH_NO_LOCKS_NO_XFER,
                                        /* if we fail to suspend a thread (e.g.,
                                         * privilege problems) ignore it.
-                                        * FIXME: retry instead? */
+                                        * XXX: retry instead? */
                                        THREAD_SYNCH_SUSPEND_FAILURE_IGNORE);
                 ASSERT(ok);
                 hotp_process_image(base, add, false, false, NULL, thread_table,
@@ -4356,7 +4368,7 @@ process_image(app_pc base, size_t size, uint prot, bool add, bool rewalking,
     DOLOG(1, LOG_SYMBOLS, {
         if (add) {
             /* we need to touch memory to check for PE and that doesn't always work
-             * FIXME: but, this is MEM_IMAGE, and above we verify the header
+             * XXX: but, this is MEM_IMAGE, and above we verify the header
              * is readable, so we can get rid of all of these system calls here
              */
             add_module_info((app_pc)base, size);
@@ -4394,7 +4406,7 @@ process_image_post_vmarea(app_pc base, size_t size, uint prot, bool add, bool re
     ASSERT(prot_is_readable(prot));
     ASSERT(!rewalking || add); /* when rewalking can only add */
 
-    /* FIXME: we only know that we are in a MEM_IMAGE
+    /* XXX: we only know that we are in a MEM_IMAGE
      * we still need to be careful to check it is a real PE
      * We could optimize out these system calls, but for now staying safe
      */
@@ -4403,8 +4415,8 @@ process_image_post_vmarea(app_pc base, size_t size, uint prot, bool add, bool re
         return;
     }
 #    ifdef RCT_IND_BRANCH
-    if (TEST(OPTION_ENABLED, DYNAMO_OPTION(rct_ind_call)) ||
-        TEST(OPTION_ENABLED, DYNAMO_OPTION(rct_ind_jump))) {
+    if (TESTANY(OPTION_ENABLED, DYNAMO_OPTION(rct_ind_call)) ||
+        TESTANY(OPTION_ENABLED, DYNAMO_OPTION(rct_ind_jump))) {
         /* we need to know about module addition or removal
          * whether or not we'll act on it right now
          */
@@ -4477,7 +4489,7 @@ find_executable_vm_areas()
         bool skip = dynamo_vm_area_overlap(pb, pb + mbi.RegionSize) &&
             !is_in_dynamo_dll(pb) /* our own text section is ok */
             /* client lib text section is ok (xref i#487) */
-            IF_CLIENT_INTERFACE(&&!is_in_client_lib(pb));
+            && !is_in_client_lib(pb);
         bool full_image = true;
         ASSERT(pb == mbi.BaseAddress);
         DOLOG(2, LOG_VMAREAS, {
@@ -4497,7 +4509,7 @@ find_executable_vm_areas()
             /* We want to add to our module list right away so we can use it to
              * obtain info when processing each +x region. We need the view size
              * to call process_image with so we walk the image here. */
-            /* FIXME - if it ever becomes a perf issue we can prob. change process_image
+            /* XXX - if it ever becomes a perf issue we can prob. change process_image
              * to not require the view size (by moving more things into
              * process_image_post_vmarea or remembering the queryies). */
             while (query_virtual_memory(pb_image, &mbi_image, sizeof(mbi_image)) ==
@@ -4582,7 +4594,7 @@ process_mmap(dcontext_t *dcontext, app_pc pc, size_t size, bool add, const char 
     /* Now update our vm areas executable region lists.
      * The protection flag doesn't tell us if there are executable areas inside,
      * must walk all the individual regions.
-     * FIXME: for remove, optimize to do single flush but multiple area removals?
+     * XXX: for remove, optimize to do single flush but multiple area removals?
      */
     while (query_virtual_memory(pb, &mbi, sizeof(mbi)) == sizeof(mbi)) {
         if (mbi.State == MEM_FREE || mbi.AllocationBase != region_base)
@@ -4643,19 +4655,11 @@ get_image_entry(void)
     return image_entry_point;
 }
 
-/* converts a local_state_t offset to a segment offset */
-ushort
+/* Converts a local-state slot offset to a signed segment displacement. */
+int
 os_tls_offset(ushort tls_offs)
 {
-    ASSERT_TRUNCATE(tls_offs, ushort, tls_local_state_offs + tls_offs);
-    return (ushort)(tls_local_state_offs + tls_offs);
-}
-
-/* converts a segment offset to a local_state_t offset */
-ushort
-os_local_state_offset(ushort seg_offs)
-{
-    return (ushort)(seg_offs - tls_local_state_offs);
+    return tls_local_state_offs + tls_offs;
 }
 
 local_state_t *
@@ -4678,7 +4682,7 @@ get_thread_private_dcontext(void)
 {
     /* This routine cannot be used before processwide os_init sets up the TLS index. */
     if (tls_dcontext_offs == TLS_UNINITIALIZED)
-        return (IF_CLIENT_INTERFACE(standalone_library ? GLOBAL_DCONTEXT :) NULL);
+        return standalone_library ? GLOBAL_DCONTEXT : NULL;
     /*
      * We don't need to check whether this thread has been initialized under us -
      * Windows sets the value to 0 for us, so we'll just return NULL.
@@ -4842,12 +4846,12 @@ os_raw_mem_free(void *p, size_t size, uint flags, heap_error_code_t *error_code)
     ASSERT(error_code != NULL);
     ASSERT(size > 0 && ALIGNED(size, PAGE_SIZE));
 
-    if (!TEST(RAW_ALLOC_RESERVE_ONLY, flags)) {
+    if (!TESTANY(RAW_ALLOC_RESERVE_ONLY, flags)) {
         *error_code = nt_decommit_virtual_memory(p, size);
         if (!NT_SUCCESS(*error_code))
             return false;
     }
-    if (!TEST(RAW_ALLOC_COMMIT_ONLY, flags))
+    if (!TESTANY(RAW_ALLOC_COMMIT_ONLY, flags))
         *error_code = nt_free_virtual_memory(p);
     LOG(GLOBAL, LOG_HEAP, 2, "os_raw_mem_free: " SZFMT " bytes @ " PFX "\n", size, p);
     return NT_SUCCESS(*error_code);
@@ -4866,9 +4870,9 @@ os_raw_mem_alloc(void *preferred, size_t size, uint prot, uint flags,
 
     *error_code = nt_allocate_virtual_memory(
         &p, size, os_prot,
-        TEST(RAW_ALLOC_RESERVE_ONLY, flags)
+        TESTANY(RAW_ALLOC_RESERVE_ONLY, flags)
             ? MEMORY_RESERVE_ONLY
-            : (TEST(RAW_ALLOC_COMMIT_ONLY, flags) ? MEM_COMMIT : MEMORY_COMMIT));
+            : (TESTANY(RAW_ALLOC_COMMIT_ONLY, flags) ? MEM_COMMIT : MEMORY_COMMIT));
     if (!NT_SUCCESS(*error_code)) {
         LOG(GLOBAL, LOG_HEAP, 3, "os_raw_mem_alloc %d bytes failed" PFX "\n", size, p);
         return NULL;
@@ -4917,8 +4921,8 @@ os_heap_reserve(void *preferred, size_t size, heap_error_code_t *error_code,
 }
 
 static bool
-find_free_memory_in_region(byte *start, byte *end, size_t size, byte **found_start OUT,
-                           byte **found_end OUT)
+find_free_memory_in_region(byte *start, byte *end, size_t size,
+                           byte **found_start DR_PARAM_OUT, byte **found_end DR_PARAM_OUT)
 {
     byte *cur;
     MEMORY_BASIC_INFORMATION mbi;
@@ -5038,7 +5042,7 @@ os_heap_systemwide_overcommit(heap_error_code_t last_error_code)
      * to retry, and maybe worth trying if systemwide memory
      * pressure has brought us to the limit
      *
-     * FIXME: case 7032 covers detecting this.  In fact a pagefile resize,
+     * XXX: case 7032 covers detecting this.  In fact a pagefile resize,
      *   will also cause an allocation failure, and TotalCommitLimit seems to be
      *   the current pagefile size + physical memory not used by the OS.
      *
@@ -5048,7 +5052,7 @@ os_heap_systemwide_overcommit(heap_error_code_t last_error_code)
      *     TotalCommitLimit
      */
 
-    /* FIXME: conservative answer yes */
+    /* XXX: conservative answer yes */
     return true;
 }
 
@@ -5090,7 +5094,7 @@ os_heap_get_commit_limit(size_t *commit_used, size_t *commit_limit)
  * only an 8-byte target and give up on hook chaining robustness.
  */
 bool
-os_find_free_code_space_in_libs(void **start OUT, void **end OUT)
+os_find_free_code_space_in_libs(void **start DR_PARAM_OUT, void **end DR_PARAM_OUT)
 {
     app_pc rx_end_nopad, rx_end_padded;
     ASSERT_CURIOSITY(get_os_version() >= WINDOWS_VERSION_8 &&
@@ -5201,7 +5205,7 @@ thread_set_context(thread_record_t *tr, CONTEXT *context)
 
 /* Takes an os-specific context */
 void
-thread_set_self_context(void *cxt)
+thread_set_self_context(void *cxt, bool is_detach_external)
 {
     /* We use NtContinue to avoid privilege issues with NtSetContext */
     nt_continue((CONTEXT *)cxt);
@@ -5210,7 +5214,7 @@ thread_set_self_context(void *cxt)
 
 /* Takes a priv_mcontext_t */
 void
-thread_set_self_mcontext(priv_mcontext_t *mc)
+thread_set_self_mcontext(priv_mcontext_t *mc, bool is_detach_external)
 {
     /* We can't use heap for our CONTEXT as we have no opportunity to free it.
      * We assume call paths can handle a large stack buffer as size something
@@ -5232,7 +5236,7 @@ thread_set_self_mcontext(priv_mcontext_t *mc)
         cxt = nt_initialize_context(buf, bufsz, cxt_flags);
     /* need ss and cs for setting my own context */
     mcontext_to_context(cxt, mc, true /* set_cur_seg */);
-    thread_set_self_context(cxt);
+    thread_set_self_context(cxt, false);
     ASSERT_NOT_REACHED();
 }
 
@@ -5251,7 +5255,7 @@ dr_mcontext_to_context(CONTEXT *dst, dr_mcontext_t *src)
      * We want to keep the assert to catch invalid internal uses, so we just
      * fill it all in and then adjust the flags.
      */
-    if (TEST(DR_MC_MULTIMEDIA, src->flags))
+    if (TESTANY(DR_MC_MULTIMEDIA, src->flags))
         dst->ContextFlags = CONTEXT_DR_STATE;
     else
         dst->ContextFlags = CONTEXT_DR_STATE_NO_YMM;
@@ -5262,9 +5266,9 @@ dr_mcontext_to_context(CONTEXT *dst, dr_mcontext_t *src)
     /* XXX: CONTEXT_CONTROL includes xbp, while that's under DR_MC_INTEGER.
      * We document this difference and recommend passing both to avoid problems.
      */
-    if (!TEST(DR_MC_INTEGER, src->flags))
+    if (!TESTANY(DR_MC_INTEGER, src->flags))
         dst->ContextFlags &= ~(CONTEXT_INTEGER);
-    if (!TEST(DR_MC_CONTROL, src->flags))
+    if (!TESTANY(DR_MC_CONTROL, src->flags))
         dst->ContextFlags &= ~(CONTEXT_CONTROL);
 
     return true;
@@ -5274,11 +5278,11 @@ dr_mcontext_to_context(CONTEXT *dst, dr_mcontext_t *src)
 static dr_mcontext_flags_t
 match_mcontext_flags_to_context_flags(dr_mcontext_flags_t mc_flags, DWORD cxt_flags)
 {
-    if (TEST(DR_MC_INTEGER, mc_flags) && !TESTALL(CONTEXT_INTEGER, cxt_flags))
+    if (TESTANY(DR_MC_INTEGER, mc_flags) && !TESTALL(CONTEXT_INTEGER, cxt_flags))
         mc_flags &= ~DR_MC_INTEGER;
-    if (TEST(DR_MC_CONTROL, mc_flags) && !TESTALL(CONTEXT_CONTROL, cxt_flags))
+    if (TESTANY(DR_MC_CONTROL, mc_flags) && !TESTALL(CONTEXT_CONTROL, cxt_flags))
         mc_flags &= ~DR_MC_CONTROL;
-    if (TEST(DR_MC_MULTIMEDIA, mc_flags) &&
+    if (TESTANY(DR_MC_MULTIMEDIA, mc_flags) &&
         !TESTALL(CONTEXT_DR_STATE & ~(CONTEXT_INTEGER | CONTEXT_CONTROL), cxt_flags))
         mc_flags &= ~DR_MC_MULTIMEDIA;
     return mc_flags;
@@ -5387,7 +5391,7 @@ debugbox(char *msg)
     if (debugbox_title_buf[0] == 0)
         debugbox_setup_title();
 
-    /* FIXME: If we hit an assert in nt_messagebox, we'll deadlock when
+    /* XXX: If we hit an assert in nt_messagebox, we'll deadlock when
      * we come back here.
      */
     d_r_mutex_lock(&debugbox_lock);
@@ -5422,7 +5426,7 @@ typedef struct {
                      ((timeout_context_t *)context)->message, \
                      ((timeout_context_t *)context)->seconds_left);
 
-/* FIXME: Be careful about creating a thread -- make sure we
+/* XXX: Be careful about creating a thread -- make sure we
 don't intercept its asynch events.  Not clear how to do that -- you can
 turn off interception once it's created, but to not intercept its init
 APC, currently all you can do is globally turn off event interception,
@@ -5513,19 +5517,18 @@ os_countdown_messagebox(char *message, int time_in_milliseconds)
 }
 #    endif /* FANCY_COUNTDOWN */
 
-#    if defined(CLIENT_INTERFACE) || defined(HOT_PATCHING_INTERFACE)
 shlib_handle_t
 load_shared_library(const char *name, bool client)
 {
-#        ifdef STATIC_LIBRARY
+#    ifdef STATIC_LIBRARY
     if (strcmp(name, get_application_name()) == 0) {
         wchar_t wname[MAX_PATH];
         snwprintf(wname, BUFFER_SIZE_ELEMENTS(wname), L"%hs", name);
         NULL_TERMINATE_BUFFER(wname);
         return get_module_handle(wname);
     }
-#        endif
-    if (IF_CLIENT_INTERFACE_ELSE(INTERNAL_OPTION(private_loader), false)) {
+#    endif
+    if (INTERNAL_OPTION(private_loader)) {
         /* We call locate_and_load_private_library() to support searching for
          * a pathless name.
          */
@@ -5537,9 +5540,7 @@ load_shared_library(const char *name, bool client)
         return load_library(buf);
     }
 }
-#    endif
 
-#    if defined(CLIENT_INTERFACE)
 shlib_routine_ptr_t
 lookup_library_routine(shlib_handle_t lib, const char *name)
 {
@@ -5549,7 +5550,7 @@ lookup_library_routine(shlib_handle_t lib, const char *name)
 void
 unload_shared_library(shlib_handle_t lib)
 {
-    if (IF_CLIENT_INTERFACE_ELSE(INTERNAL_OPTION(private_loader), false)) {
+    if (INTERNAL_OPTION(private_loader)) {
         unload_private_library((app_pc)lib);
     } else {
         free_library(lib);
@@ -5559,7 +5560,7 @@ unload_shared_library(shlib_handle_t lib)
 void
 shared_library_error(char *buf, int maxlen)
 {
-    /* FIXME : this routine does nothing. It used to use kernel32 FormatMessage
+    /* XXX : this routine does nothing. It used to use kernel32 FormatMessage
      * to report errors, but now that we are kernel32 independent that will no
      * longer work. Would be nice if we could do something with the nt status
      * codes, but unclear how to propagate them to here. */
@@ -5570,8 +5571,9 @@ shared_library_error(char *buf, int maxlen)
  * for linux, one of addr or name is needed; for windows, neither is needed.
  */
 bool
-shared_library_bounds(IN shlib_handle_t lib, IN byte *addr, IN const char *name,
-                      OUT byte **start, OUT byte **end)
+shared_library_bounds(DR_PARAM_IN shlib_handle_t lib, DR_PARAM_IN byte *addr,
+                      DR_PARAM_IN const char *name, DR_PARAM_OUT byte **start,
+                      DR_PARAM_OUT byte **end)
 {
     size_t sz = get_allocation_size(lib, start);
     ASSERT(start != NULL && end != NULL);
@@ -5579,7 +5581,6 @@ shared_library_bounds(IN shlib_handle_t lib, IN byte *addr, IN const char *name,
     ASSERT(addr == NULL || (addr >= *start && addr < *end));
     return true;
 }
-#    endif /* defined(CLIENT_INTERFACE) */
 
 /* Returns base of the "allocation region" containing pc for allocated memory,
  * Note the current protection settings may not be uniform in the whole region.
@@ -5679,7 +5680,7 @@ get_allocation_size_ex(HANDLE process, byte *pc, byte **base_pc)
          * it, we could have problems: but, if region becomes free, we'll break,
          * and so long as RegionSize > 0, we should make progress and hit
          * end of address space in worst case -- so we shouldn't need this
-         * num_blocks max, but we'll keep it for now.  FIXME.
+         * num_blocks max, but we'll keep it for now.  XXX.
          */
         num_blocks++;
     } while (num_blocks < MAX_QUERY_VM_BLOCKS);
@@ -5699,7 +5700,7 @@ get_allocation_size(byte *pc, byte **base_pc)
 }
 
 static void
-set_memtype_from_mbi(MEMORY_BASIC_INFORMATION *mbi, OUT dr_mem_info_t *info)
+set_memtype_from_mbi(MEMORY_BASIC_INFORMATION *mbi, DR_PARAM_OUT dr_mem_info_t *info)
 {
     if (mbi->State == MEM_FREE) {
         info->type = DR_MEMTYPE_FREE;
@@ -5722,7 +5723,7 @@ set_memtype_from_mbi(MEMORY_BASIC_INFORMATION *mbi, OUT dr_mem_info_t *info)
  * region and all with the same protection and state attributes.
  */
 static bool
-query_memory_internal(const byte *pc, OUT dr_mem_info_t *info,
+query_memory_internal(const byte *pc, DR_PARAM_OUT dr_mem_info_t *info,
                       /* i#345, i#1462: this is expensive so we make it optional */
                       bool get_real_base)
 {
@@ -5839,7 +5840,7 @@ query_memory_internal(const byte *pc, OUT dr_mem_info_t *info,
  * region and all with the same protection and state attributes.
  */
 bool
-query_memory_ex(const byte *pc, OUT dr_mem_info_t *info)
+query_memory_ex(const byte *pc, DR_PARAM_OUT dr_mem_info_t *info)
 {
     return query_memory_internal(pc, info, true /*get real base*/);
 }
@@ -5850,7 +5851,7 @@ query_memory_ex(const byte *pc, OUT dr_mem_info_t *info)
  * subsequent memory region.
  */
 bool
-query_memory_cur_base(const byte *pc, OUT dr_mem_info_t *info)
+query_memory_cur_base(const byte *pc, DR_PARAM_OUT dr_mem_info_t *info)
 {
     return query_memory_internal(pc, info, false /*don't need real base*/);
 }
@@ -5946,7 +5947,7 @@ get_stack_bounds(dcontext_t *dcontext, byte **base, byte **top)
         stack_base = get_allocation_base(stack_base);
         LOG(THREAD, LOG_THREADS, 1, "app stack region is " PFX "-" PFX "\n", stack_base,
             stack_top); /* NULL dcontext => nop */
-        /* FIXME - make curiosity? prob. could create a thread with no official
+        /* XXX - make curiosity? prob. could create a thread with no official
          * stack and we would largely be fine with that. */
         ASSERT(stack_base != NULL);
         ASSERT(stack_base < stack_top);
@@ -5956,7 +5957,7 @@ get_stack_bounds(dcontext_t *dcontext, byte **base, byte **top)
                   * We would test dcontext->nudge_thread but that's not set yet. */
                  is_wow64_process(NT_CURRENT_PROCESS)))
                /* client threads use dstack as sole stack */
-               IF_CLIENT_INTERFACE(|| is_dynamo_address(stack_base)));
+               || is_dynamo_address(stack_base));
         if (dcontext == NULL) {
             if (base != NULL)
                 *base = stack_base;
@@ -5991,7 +5992,7 @@ winnt.h:#define PAGE_EXECUTE_WRITECOPY 128
  * from pc to pc+size-1 are readable and that reading from there won't
  * generate an exception.  this is a stronger check than
  * !not_readable() below.
- * FIXME : beware of multi-thread races, just because this returns true,
+ * XXX : beware of multi-thread races, just because this returns true,
  * doesn't mean another thread can't make the region unreadable between the
  * check here and the actual read later.  See d_r_safe_read() as an alt.
  */
@@ -6008,11 +6009,11 @@ query_is_readable_without_exception(byte *pc, size_t size)
         if (res != sizeof(mbi)) {
             return false;
         } else {
-            if (mbi.State != MEM_COMMIT || TEST(PAGE_GUARD, mbi.Protect) ||
+            if (mbi.State != MEM_COMMIT || TESTANY(PAGE_GUARD, mbi.Protect) ||
                 !prot_is_readable(mbi.Protect))
                 return false;
         }
-        /* FIXME: this routine can walk by mbi.RegionSize instead of pages */
+        /* XXX: this routine can walk by mbi.RegionSize instead of pages */
         check_pc += PAGE_SIZE;
     } while (check_pc != 0 /*overflow*/ && check_pc < pc + size);
     return true;
@@ -6034,7 +6035,7 @@ is_readable_without_exception_query_os_noblock(byte *pc, size_t size)
 /* Reads size bytes starting at base and puts them in out_buf, this is safe
  * to call even if the memory at base is unreadable, returns true if the
  * read succeeded */
-/* FIXME : This avoids the races with an is_readable_without_exception followed
+/* XXX : This avoids the races with an is_readable_without_exception followed
  * by a read. We get the os to do the read for us via ReadVirtualMemory,
  * however this is still much slower then a structured exception handling
  * solution since we expect this to succeed most of the time.  Ref PR 206278
@@ -6063,7 +6064,7 @@ safe_read_ex(const void *base, size_t size, void *out_buf, size_t *bytes_read)
     }
 }
 
-/* FIXME - fold this together with safe_read_ex() (is a lot of places to update) */
+/* XXX - fold this together with safe_read_ex() (is a lot of places to update) */
 bool
 d_r_safe_read(const void *base, size_t size, void *out_buf)
 {
@@ -6090,7 +6091,7 @@ safe_write_ex(void *base, size_t size, const void *in_buf, size_t *bytes_written
     return nt_write_virtual_memory(NT_CURRENT_PROCESS, base, in_buf, size, bytes_written);
 }
 
-/* FIXME - fold this together with safe_write_ex() (is a lot of places to update) */
+/* XXX - fold this together with safe_write_ex() (is a lot of places to update) */
 bool
 safe_write(void *base, size_t size, const void *in_buf)
 {
@@ -6121,7 +6122,7 @@ get_current_protection(byte *pc)
 
 /* see note on is_readable_without_exception for differences between the two
  * returns true if any byte with address from pc to pc+size-1 is not_readable
- * FIXME: reverse the logic to make this is_readable
+ * XXX: reverse the logic to make this is_readable
  * Also CHECK that we actually need this routine
  */
 bool
@@ -6172,7 +6173,7 @@ unmark_page_as_guard(byte *pc, uint prot)
      * while we wanted to remove this protection. The returned value
      * can be checked for such a case.
      */
-    return TEST(PAGE_GUARD, old_prot);
+    return TESTANY(PAGE_GUARD, old_prot);
 }
 
 /* Change page protection for pc:pc+size.
@@ -6231,7 +6232,7 @@ internal_change_protection(byte *start, size_t requested_size, bool set, bool wr
 
         ASSERT(remaining_size > 0);
 
-        /* FIXME: note that a faster version of this routine when we
+        /* XXX: note that a faster version of this routine when we
          * know the desired flags can do without the
          * query_virtual_memory() calls and only needs to process the
          * results of protect_virtual_memory() to decide whether needs
@@ -6357,12 +6358,12 @@ internal_change_protection(byte *start, size_t requested_size, bool set, bool wr
         });
         res = protect_virtual_memory((void *)pc, subregion_size, new_flags, &old_prot);
         if (!res) {
-            /* FIXME: we may want to really make sure that we are out
+            /* XXX: we may want to really make sure that we are out
              * of commit memory, if we are marking this up as failure
              * here
              */
             subregions_failed = true;
-            /* FIXME: case 10551 we may want to use the techniques in
+            /* XXX: case 10551 we may want to use the techniques in
              * vmm_heap_commit to wait a little for someone else to
              * free up memory, or free any of our own.
              */
@@ -6481,8 +6482,8 @@ make_unwritable(byte *pc, size_t size)
 #endif /* !NOT_DYNAMORIO_CORE_PROPER: around most of file, to exclude preload */
 
 bool
-convert_NT_to_Dos_path(OUT wchar_t *buf, IN const wchar_t *fname,
-                       IN size_t buf_len /*# elements*/)
+convert_NT_to_Dos_path(DR_PARAM_OUT wchar_t *buf, DR_PARAM_IN const wchar_t *fname,
+                       DR_PARAM_IN size_t buf_len /*# elements*/)
 {
     /* RtlNtPathNameToDosPathName is only available on XP+ */
     HANDLE objdir;
@@ -6496,7 +6497,7 @@ convert_NT_to_Dos_path(OUT wchar_t *buf, IN const wchar_t *fname,
 
     LOG(THREAD_GET, LOG_NT, 3, "%s: converting %S\n", __FUNCTION__, fname);
 
-    /* Network paths: FIXME: what other forms do they take? */
+    /* Network paths: XXX: what other forms do they take? */
     if (wcsstr(fname, lanman) == fname) {
         _snwprintf(buf, buf_len, L"\\\\%s", fname + wcslen(lanman));
         buf[buf_len - 1] = L'\0';
@@ -6519,7 +6520,7 @@ convert_NT_to_Dos_path(OUT wchar_t *buf, IN const wchar_t *fname,
         return false;
     }
     /* Open the \?? Dos devices dir, which is where the drive symlinks live.
-     * FIXME: via NtSetInformationProcess ProcessDeviceMap, can the device
+     * XXX: via NtSetInformationProcess ProcessDeviceMap, can the device
      * dir be different from "\??"?  How do we know?
      */
     res = nt_open_object_directory(&objdir, L"\\??", false);
@@ -6570,9 +6571,10 @@ convert_NT_to_Dos_path(OUT wchar_t *buf, IN const wchar_t *fname,
  * Always null-terminates when it returns non-NULL.
  */
 wchar_t *
-convert_to_NT_file_path_wide(OUT wchar_t *fixedbuf, IN const wchar_t *fname,
-                             IN size_t fixedbuf_len /*# elements*/,
-                             OUT size_t *allocbuf_sz /*#bytes*/)
+convert_to_NT_file_path_wide(DR_PARAM_OUT wchar_t *fixedbuf,
+                             DR_PARAM_IN const wchar_t *fname,
+                             DR_PARAM_IN size_t fixedbuf_len /*# elements*/,
+                             DR_PARAM_OUT size_t *allocbuf_sz /*#bytes*/)
 {
     /* XXX: we could templatize this to share code w/ convert_to_NT_file_path(),
      * but a lot of the extra stuff there is curiosities for use within DR,
@@ -6695,8 +6697,8 @@ convert_to_NT_file_path_wide_free(wchar_t *buf, size_t alloc_sz)
 /* Always null-terminates when it returns true.
  */
 bool
-convert_to_NT_file_path(OUT wchar_t *buf, IN const char *fname,
-                        IN size_t buf_len /*# elements*/)
+convert_to_NT_file_path(DR_PARAM_OUT wchar_t *buf, DR_PARAM_IN const char *fname,
+                        DR_PARAM_IN size_t buf_len /*# elements*/)
 {
     bool is_UNC = false;
     bool is_device = false;
@@ -6710,14 +6712,14 @@ convert_to_NT_file_path(OUT wchar_t *buf, IN const char *fname,
     /* NOTE - for process control we use an app path (image location) with this routine
      * so we should handle all possible file name prefixes, we've seen -
      * c:\ \??\c:\ \\?\c:\ \\server \??\UNC\server \\?\UNC\server */
-    /* FIXME - could we ever get any other path formats here (xref case 9146 and the
+    /* XXX - could we ever get any other path formats here (xref case 9146 and the
      * reactos src.  See DEVICE_PATH \\.\foo, UNC_DOT_PATH \\., etc.
      * For i#499 we now convert \\.\foo to \??\foo.
      */
     /* CHECK - at the api level, paths longer then MAX_PATH require \\?\ prefix, unclear
      * if we would need to use that at this level instead of \??\ for long paths (not
      * that it matters since our buffer in this routine limits us to MAX_PATH anyways).
-    /* FIXME - handle . and .. */
+    /* XXX - handle . and .. */
     /* FIMXE : there is also ntdll!RtlDosPathNameToNtPathName_U that does the
      * translation for us, used by CreateDirectory CreateFile etc. but looking
      * at the dissasembly it grabs the loader lock! why does it need
@@ -6888,10 +6890,10 @@ os_get_file_size(const char *file, uint64 *size)
     if (file == NULL || size == NULL)
         return false;
 
-    /* See FIXME in os_internal_create_file() about prepending \??\ to the path
+    /* See XXX in os_internal_create_file() about prepending \??\ to the path
      * directly.
      */
-    /* FIXME: case 9182 this won't work for remote files */
+    /* XXX: case 9182 this won't work for remote files */
     _snwprintf(filename, BUFFER_SIZE_ELEMENTS(filename), L"\\??\\%hs", file);
     NULL_TERMINATE_BUFFER(filename);
     if (query_full_attributes_file(filename, &file_info)) {
@@ -6903,7 +6905,7 @@ os_get_file_size(const char *file, uint64 *size)
 }
 
 bool
-os_get_file_size_by_handle(IN HANDLE file_handle, uint64 *end_of_file /* OUT */)
+os_get_file_size_by_handle(DR_PARAM_IN HANDLE file_handle, uint64 *end_of_file /* OUT */)
 {
     FILE_STANDARD_INFORMATION standard_info;
     NTSTATUS res = nt_query_file_info(file_handle, &standard_info, sizeof(standard_info),
@@ -6919,7 +6921,7 @@ os_get_file_size_by_handle(IN HANDLE file_handle, uint64 *end_of_file /* OUT */)
 }
 
 bool
-os_set_file_size(IN HANDLE file_handle, uint64 end_of_file)
+os_set_file_size(DR_PARAM_IN HANDLE file_handle, uint64 end_of_file)
 {
     NTSTATUS res;
     FILE_END_OF_FILE_INFORMATION file_end_info;
@@ -6936,11 +6938,12 @@ os_set_file_size(IN HANDLE file_handle, uint64 end_of_file)
  * Note that any valid handle on the volume can be used.
  */
 bool
-os_get_disk_free_space(IN HANDLE file_handle, OUT uint64 *AvailableQuotaBytes OPTIONAL,
-                       OUT uint64 *TotalQuotaBytes OPTIONAL,
-                       OUT uint64 *TotalVolumeBytes OPTIONAL)
+os_get_disk_free_space(DR_PARAM_IN HANDLE file_handle,
+                       DR_PARAM_OUT uint64 *AvailableQuotaBytes OPTIONAL,
+                       DR_PARAM_OUT uint64 *TotalQuotaBytes OPTIONAL,
+                       DR_PARAM_OUT uint64 *TotalVolumeBytes OPTIONAL)
 {
-    /* FIXME: considering that we don't usually care about the actual
+    /* XXX: considering that we don't usually care about the actual
      * bytes available on the volume, we may use just
      * FILE_FS_SIZE_INFORMATION instead of FILE_FS_FULL_SIZE_INFORMATION
      * case 9000: need to check if both are available on NT
@@ -7012,10 +7015,10 @@ os_get_disk_free_space(IN HANDLE file_handle, OUT uint64 *AvailableQuotaBytes OP
  * shell32!SHFileOperation if we need this.
  *
  * We don't deal in any way with encrypted files - they are opened
- * raw.  FIXME: may want to at least make sure that encrypted files
+ * raw.  XXX: may want to at least make sure that encrypted files
  * aren't shared.
  *
- * FIXME: testing: doublecheck compressed file offsets are properly
+ * XXX: testing: doublecheck compressed file offsets are properly
  * used - test both encrypted and compressed folders.
  */
 bool
@@ -7027,7 +7030,7 @@ os_copy_file(HANDLE new_file, HANDLE original_file, uint64 new_file_offset,
      * Richter&Clark if a fast one is needed. */
 
     /* Note that NTFS will make the calls synchronously */
-    /* FIXME: it may be useful to set the expected total file size
+    /* XXX: it may be useful to set the expected total file size
      * right away with os_set_file_size(), but that should be done
      * only in case the current size is smaller (e.g. we shouldn't
      * truncate if trying to overwrite a subsection ) */
@@ -7038,13 +7041,13 @@ os_copy_file(HANDLE new_file, HANDLE original_file, uint64 new_file_offset,
 bool
 os_create_dir(const char *fname, create_directory_flags_t create_dir_flags)
 {
-    bool require_new = TEST(CREATE_DIR_REQUIRE_NEW, create_dir_flags);
-    bool force_owner = TEST(CREATE_DIR_FORCE_OWNER, create_dir_flags);
+    bool require_new = TESTANY(CREATE_DIR_REQUIRE_NEW, create_dir_flags);
+    bool force_owner = TESTANY(CREATE_DIR_FORCE_OWNER, create_dir_flags);
 
     /* case 9057 note that hard links are only between files but not directories */
     /* upcoming symlinks can be between either, for consistency should
      * always require_new,
-     * FIXME: not all current users do this properly
+     * XXX: not all current users do this properly
      */
     return os_internal_create_file_test(
         fname, true, 0, FILE_SHARE_READ,
@@ -7061,14 +7064,14 @@ os_open_directory(const char *fname, int os_open_flags)
         | FILE_SHARE_WRITE;
     uint access = READ_CONTROL;
 
-    /* FIXME: only 0 is allowed by create_file for now */
-    if (TEST(OS_OPEN_READ, os_open_flags))
+    /* XXX: only 0 is allowed by create_file for now */
+    if (TESTANY(OS_OPEN_READ, os_open_flags))
         access |= FILE_GENERIC_READ;
 
     return os_internal_create_file(fname, true, access, sharing, FILE_OPEN);
 }
 
-/* FIXME : investigate difference between GENERIC_* and FILE_GENERIC_*
+/* XXX : investigate difference between GENERIC_* and FILE_GENERIC_*
  * both seem to work as expected (and CreateFile uses the GENERIC_* while
  * the ddk uses FILE_GENERIC_*) but they resolve differently, some confusion.
  * ntddk.h has GENERIC_* as a single bit flag while FILE_GENERIC_* is
@@ -7078,42 +7081,45 @@ file_t
 os_open(const char *fname, int os_open_flags)
 {
     uint access = 0;
-    /* FIXME case 8865: should default be no sharing? */
+    /* XXX case 8865: should default be no sharing? */
     uint sharing = FILE_SHARE_READ;
 
-    if (TEST(OS_EXECUTE, os_open_flags))
+    if (TESTANY(OS_EXECUTE, os_open_flags))
         access |= FILE_GENERIC_EXECUTE;
-    if (TEST(OS_OPEN_READ, os_open_flags))
+    if (TESTANY(OS_OPEN_READ, os_open_flags))
         access |= FILE_GENERIC_READ;
 
-    if (TEST(OS_SHARE_DELETE, os_open_flags))
+    if (TESTANY(OS_SHARE_DELETE, os_open_flags))
         sharing |= FILE_SHARE_DELETE;
 
-    if (!TEST(OS_OPEN_WRITE, os_open_flags))
+    if (!TESTANY(OS_OPEN_WRITE, os_open_flags))
         return os_internal_create_file(fname, false, access, sharing, FILE_OPEN);
 
     /* We ignore OS_OPEN_WRITE_ONLY: Linux-only */
 
     /* clients are allowed to open the file however they want, xref PR 227737 */
-    ASSERT_CURIOSITY_ONCE((TEST(OS_OPEN_REQUIRE_NEW, os_open_flags) ||
-                           standalone_library IF_CLIENT_INTERFACE(|| CLIENTS_EXIST())) &&
+    ASSERT_CURIOSITY_ONCE((TESTANY(OS_OPEN_REQUIRE_NEW, os_open_flags) ||
+                           standalone_library || CLIENTS_EXIST()) &&
                           "symlink risk PR 213492");
 
     return os_internal_create_file(
         fname, false,
         access |
-            (TEST(OS_OPEN_APPEND, os_open_flags) ?
-                                                 /* FILE_GENERIC_WRITE minus
-                                                  * FILE_WRITE_DATA, so we get auto-append
-                                                  */
+            (TESTANY(OS_OPEN_APPEND, os_open_flags)
+                 ?
+                 /* FILE_GENERIC_WRITE minus
+                  * FILE_WRITE_DATA, so we get auto-append
+                  */
                  (STANDARD_RIGHTS_WRITE | FILE_APPEND_DATA | FILE_WRITE_ATTRIBUTES |
                   FILE_WRITE_EA)
-                                                 : FILE_GENERIC_WRITE),
+                 : FILE_GENERIC_WRITE),
         sharing,
-        (TEST(OS_OPEN_REQUIRE_NEW, os_open_flags)
+        (TESTANY(OS_OPEN_REQUIRE_NEW, os_open_flags)
              ? FILE_CREATE
-             : (TEST(OS_OPEN_APPEND, os_open_flags) ? FILE_OPEN_IF : FILE_OVERWRITE_IF)) |
-            (TEST(OS_OPEN_FORCE_OWNER, os_open_flags) ? FILE_DISPOSITION_SET_OWNER : 0));
+             : (TESTANY(OS_OPEN_APPEND, os_open_flags) ? FILE_OPEN_IF
+                                                       : FILE_OVERWRITE_IF)) |
+            (TESTANY(OS_OPEN_FORCE_OWNER, os_open_flags) ? FILE_DISPOSITION_SET_OWNER
+                                                         : 0));
 }
 
 void
@@ -7280,7 +7286,7 @@ os_delete_mapped_file(const char *filename)
                               * than its target, and avoid other reparse code.
                               * Otherwise the FILE_DELETE_ON_CLOSE would cause
                               * us to delete the target of a symlink!
-                              * FIXME: fully test this: case 10067
+                              * XXX: fully test this: case 10067
                               */
                              | FILE_OPEN_REPARSE_POINT);
     if (!NT_SUCCESS(res)) {
@@ -7321,7 +7327,7 @@ os_delete_mapped_file(const char *filename)
         } else
             ASSERT_CURIOSITY(false && "unable to confirm close-on-delete");
     }
-    /* FIXME case 10048: if failure here, schedule for smss-on-boot deletion */
+    /* XXX case 10048: if failure here, schedule for smss-on-boot deletion */
     return deleted;
 }
 
@@ -7457,7 +7463,7 @@ os_rename_file(const char *orig_name, const char *new_name, bool replace)
  * same directory is our primary use.
  */
 bool
-os_rename_file_in_directory(IN HANDLE rootdir, const wchar_t *orig_name,
+os_rename_file_in_directory(DR_PARAM_IN HANDLE rootdir, const wchar_t *orig_name,
                             const wchar_t *new_name, bool replace)
 {
     file_t fd = INVALID_FILE;
@@ -7494,7 +7500,7 @@ os_rename_file_in_directory(IN HANDLE rootdir, const wchar_t *orig_name,
 }
 
 byte *
-os_map_file(file_t f, size_t *size INOUT, uint64 offs, app_pc addr, uint prot,
+os_map_file(file_t f, size_t *size DR_PARAM_INOUT, uint64 offs, app_pc addr, uint prot,
             map_flags_t map_flags)
 {
     NTSTATUS res;
@@ -7510,29 +7516,29 @@ os_map_file(file_t f, size_t *size INOUT, uint64 offs, app_pc addr, uint prot,
     LARGE_INTEGER li_offs;
     li_offs.QuadPart = offs;
 
-    if (TEST(MAP_FILE_COPY_ON_WRITE, map_flags) && TEST(MEMPROT_WRITE, prot)) {
+    if (TESTANY(MAP_FILE_COPY_ON_WRITE, map_flags) && TESTANY(MEMPROT_WRITE, prot)) {
         /* Ask for COW for both the section and the view, though we should only
          * need it for the view (except on win98, according to Richter p604)
          */
         osprot = osprot_add_writecopy(osprot);
     }
-    res = nt_create_section(&section,
-                            SECTION_ALL_ACCESS, /* FIXME: maybe less privileges needed */
-                            NULL, /* full file size, even if partial view map */
-                            osprot,
-                            /* can only be SEC_IMAGE if a PE file */
-                            /* FIXME: SEC_RESERVE shouldn't work w/ COW yet
-                             * it did in my test */
-                            TEST(MAP_FILE_IMAGE, map_flags) ? SEC_IMAGE : SEC_COMMIT, f,
-                            /* process private - no security needed */
-                            /* object name attributes */
-                            NULL /* unnamed */, 0, NULL, NULL);
+    res = nt_create_section(
+        &section, SECTION_ALL_ACCESS, /* XXX: maybe less privileges needed */
+        NULL,                         /* full file size, even if partial view map */
+        osprot,
+        /* can only be SEC_IMAGE if a PE file */
+        /* XXX: SEC_RESERVE shouldn't work w/ COW yet
+         * it did in my test */
+        TESTANY(MAP_FILE_IMAGE, map_flags) ? SEC_IMAGE : SEC_COMMIT, f,
+        /* process private - no security needed */
+        /* object name attributes */
+        NULL /* unnamed */, 0, NULL, NULL);
     if (!NT_SUCCESS(res)) {
         LOG(GLOBAL, LOG_NT, 2, "os_map_file: NtCreateSection error " PFX "\n", res);
         return NULL;
     }
 #    ifdef X64
-    if (TEST(MAP_FILE_REACHABLE, map_flags)) {
+    if (TESTANY(MAP_FILE_REACHABLE, map_flags)) {
         loop = true;
         vmcode_get_reachable_region(&region_start, &region_end);
         /* addr need not be NULL: we'll use it if it's in the region */
@@ -7547,7 +7553,7 @@ os_map_file(file_t f, size_t *size INOUT, uint64 offs, app_pc addr, uint prot,
                                       0 /* not page-file-backed */,            /* 4 */
                                       &li_offs,                                /* 5 */
                                       (PSIZE_T)size,                           /* 6 */
-                                      ViewUnmap /* FIXME: expose? */,          /* 7 */
+                                      ViewUnmap /* XXX: expose? */,            /* 7 */
                                       0 /* no special top-down or anything */, /* 8 */
                                       osprot);                                 /* 9 */
 #    ifdef X64
@@ -7559,7 +7565,7 @@ os_map_file(file_t f, size_t *size INOUT, uint64 offs, app_pc addr, uint prot,
         }
         map = NULL; /* pick a new one */
     }
-    if (NT_SUCCESS(res) && TEST(MAP_FILE_REACHABLE, map_flags))
+    if (NT_SUCCESS(res) && TESTANY(MAP_FILE_REACHABLE, map_flags))
         ASSERT(map >= region_start && map + *size <= region_end);
 #    endif
     /* We do not need to keep the section handle open */
@@ -7591,7 +7597,7 @@ os_delete_memory_file(const char *name, file_t fd)
     ASSERT_NOT_IMPLEMENTED(false && "i#3556 NYI for Windows");
 }
 
-/* FIXME : should check context flags, what if only integer or only control! */
+/* XXX : should check context flags, what if only integer or only control! */
 /* Translates the context cxt for the given thread trec
  * Like any instance where a thread_record_t is used by a thread other than its
  * owner, the caller must hold the thread_initexit_lock to ensure that it
@@ -7669,7 +7675,7 @@ set_mcontext_for_syscall(dcontext_t *dcontext, int sys_enum,
 }
 
 /* raise an exception in the application context */
-/* FIXME : see os_forge_exception's call of this function for issues */
+/* XXX : see os_forge_exception's call of this function for issues */
 void
 os_raise_exception(dcontext_t *dcontext, EXCEPTION_RECORD *pexcrec, CONTEXT *pcontext)
 {
@@ -7744,7 +7750,7 @@ os_dump_core_dump_thread(file_t file, thread_id_t tid, TEB *teb, HANDLE h,
 {
     app_pc win32_start_addr = 0;
 
-    /* for x64, FIXME PR 249988: need to coordinate w/ ldmp.c */
+    /* for x64, XXX PR 249988: need to coordinate w/ ldmp.c */
 
     snprintf(dump_core_buf, BUFFER_SIZE_ELEMENTS(dump_core_buf),
              "Thread=" PFX "\nTEB=" PFX "\n"
@@ -7787,7 +7793,7 @@ os_dump_core_dump_thread(file_t file, thread_id_t tid, TEB *teb, HANDLE h,
 /* warning is from GET_OWN_CONTEXT: flow in/out of asm code suppresses global opt */
 #    pragma warning(disable : 4740)
 static bool
-os_dump_core_live_dump(const char *msg, char *path OUT, size_t path_sz)
+os_dump_core_live_dump(const char *msg, char *path DR_PARAM_OUT, size_t path_sz)
 {
     /* like the dump_core_buf, all the locals are protected by the
      * dumpcore_lock and are static to save stack space (CONTEXT is quite
@@ -7821,7 +7827,8 @@ os_dump_core_live_dump(const char *msg, char *path OUT, size_t path_sz)
     /* use no option synch for syslogs to avoid grabbing locks and risking
      * deadlock, caller should have synchronized already anyways */
     if (!get_unique_logfile(".ldmp", dump_core_file_name, sizeof(dump_core_file_name),
-                            false, &dmp_file) ||
+                            /*open_directory=*/false, /*output_directory=*/NULL,
+                            /*embed_timestamp=*/false, &dmp_file) ||
         dmp_file == INVALID_FILE) {
         SYSLOG_INTERNAL_NO_OPTION_SYNCH(SYSLOG_WARNING, "Unable to open core dump file");
         return false;
@@ -7843,8 +7850,8 @@ os_dump_core_live_dump(const char *msg, char *path OUT, size_t path_sz)
     /* Don't use get_list_of_threads, it grabs a lock and allocates memory
      * both of which might be dangerous on this path, instead walk table
      * by hand (we try to grab the necessary locks, but we will go ahead
-     * and walk the table if we can't FIXME)
-     * FIXME : share with dynamo.c */
+     * and walk the table if we can't XXX)
+     * XXX : share with dynamo.c */
     /* Try to grab locks,
      * NOTE os_dump_core, already turned off deadlock_avoidance for us */
 #    ifdef DEADLOCK_AVOIDANCE
@@ -7889,7 +7896,7 @@ os_dump_core_live_dump(const char *msg, char *path OUT, size_t path_sz)
     os_write(dmp_file, dump_core_buf, strlen(dump_core_buf));
 
     /* for all threads, suspend and dump context */
-    /* FIXME : do we care about segment, sse, float, or debug registers? */
+    /* XXX : do we care about segment, sse, float, or debug registers? */
     /* Do current thread first, first get thread record */
     if (all_threads != NULL) {
         for (i = 0; i < HASHTABLE_SIZE(ALL_THREADS_HASH_BITS); i++) {
@@ -7934,14 +7941,14 @@ os_dump_core_live_dump(const char *msg, char *path OUT, size_t path_sz)
     } else {
         const char *error_msg = "<error all threads list is already freed>";
         os_write(dmp_file, error_msg, strlen(error_msg));
-        /* FIXME : if other threads are active (say in the case of detaching)
+        /* XXX : if other threads are active (say in the case of detaching)
          * walking the memory below could be racy, what if another thread
          * frees some chunk of memory while we are copying it! Just live with
          * the race for now. */
     }
 
     /* dump memory */
-    /* FIXME : print_ldr_data() ? */
+    /* XXX : print_ldr_data() ? */
     while (query_virtual_memory(pb, &mbi, sizeof(mbi)) == sizeof(mbi)) {
         snprintf(dump_core_buf, BUFFER_SIZE_ELEMENTS(dump_core_buf),
                  "\n"
@@ -7959,7 +7966,7 @@ os_dump_core_live_dump(const char *msg, char *path OUT, size_t path_sz)
         NULL_TERMINATE_BUFFER(dump_core_buf);
         os_write(dmp_file, dump_core_buf, strlen(dump_core_buf));
 
-        if (mbi.State == MEM_COMMIT && !TEST(PAGE_GUARD, mbi.Protect) &&
+        if (mbi.State == MEM_COMMIT && !TESTANY(PAGE_GUARD, mbi.Protect) &&
             prot_is_readable(mbi.Protect)) {
             os_write(dmp_file, mbi.BaseAddress, mbi.RegionSize);
         }
@@ -7974,7 +7981,7 @@ os_dump_core_live_dump(const char *msg, char *path OUT, size_t path_sz)
         /* see Nebbett examples 1.2 and 2.1, may not be able to do this
          * in the general case one methodolgy requires the debug privilege
          * the other requires that a global flag is set at boot time
-         * FIXME */
+         * XXX */
     }
 
     /* end dump, forensics file will have call stacks and module list */
@@ -8062,7 +8069,7 @@ os_dump_core_external_dump()
 
         if (child != INVALID_HANDLE_VALUE) {
             /* wait for child to exit
-             * FIXME: this makes ntsd have to do a 30-second wait to break in!
+             * XXX: this makes ntsd have to do a 30-second wait to break in!
              * plus it causes drwtsn32 to hang, then timeout and kill us
              * w/o producing a dump file -- and only the header on the log file
              * BUT, if we don't do this, we only get dumps for -kill_thread!
@@ -8079,7 +8086,8 @@ os_dump_core_external_dump()
 
 /* return value is mostly about the ldmp, for dr_create_memory_dump */
 static bool
-os_dump_core_internal(const char *msg, bool live_only, char *path OUT, size_t path_sz)
+os_dump_core_internal(const char *msg, bool live_only, char *path DR_PARAM_OUT,
+                      size_t path_sz)
 {
     static thread_id_t current_dumping_thread_id VAR_IN_SECTION(NEVER_PROTECTED_SECTION) =
         0;
@@ -8093,11 +8101,11 @@ os_dump_core_internal(const char *msg, bool live_only, char *path OUT, size_t pa
     if (current_id == current_dumping_thread_id)
         return false; /* avoid infinite loop */
 
-        /* FIXME : A failure in the mutex_lock or mutex_unlock of the
-         * dump_core_lock could lead to an infinite recursion, also a failure while
-         * holding the eventlog_lock would lead to a deadlock at the syslog in
-         * livedump (but we would likely deadlock later anyways), all other
-         * recursion/deadlock cases should be handled by the above check */
+    /* XXX : A failure in the mutex_lock or mutex_unlock of the
+     * dump_core_lock could lead to an infinite recursion, also a failure while
+     * holding the eventlog_lock would lead to a deadlock at the syslog in
+     * livedump (but we would likely deadlock later anyways), all other
+     * recursion/deadlock cases should be handled by the above check */
 
 #    ifdef DEADLOCK_AVOIDANCE
     /* first turn off deadlock avoidance for this thread (needed for live dump
@@ -8143,7 +8151,7 @@ os_dump_core(const char *msg)
 }
 
 bool
-os_dump_core_live(const char *msg, char *path OUT, size_t path_sz)
+os_dump_core_live(const char *msg, char *path DR_PARAM_OUT, size_t path_sz)
 {
     return os_dump_core_internal(msg, true /*live only*/, path, path_sz);
 }
@@ -8252,12 +8260,12 @@ detach_handle_callbacks(int num_threads, thread_record_t **threads,
          * }
          * Not a real struct since variable size arrays. Note that nothing requires the
          * above elements to be in that order (or even in the same allocation).  We
-         * allocate them together to save memory since we must leak this. FIXME - find
+         * allocate them together to save memory since we must leak this. XXX - find
          * a way to free the allocation once we are finished with it. */
         int callback_buf_size = DETACH_CALLBACK_CODE_SIZE +
             num_threads_with_callbacks * sizeof(detach_callback_stack_t) +
             num_stacked_callbacks * sizeof(app_pc);
-        /* FIXME - this should (along with any do/shared syscall containing gencode) be
+        /* XXX - this should (along with any do/shared syscall containing gencode) be
          * allocated outside of our vmmheap so that we can free the vmmheap reservation
          * on detach. */
         byte *callback_buf = (byte *)heap_mmap(
@@ -8430,7 +8438,7 @@ detach_helper(int detach_type)
         eventlog_fast_exit();
         /* We don't even unload our dll since it's no longer required to unload
          * our dll for proper tools function. */
-        /* FIXME : since we reached detach_helper via a clean call out of the
+        /* XXX : since we reached detach_helper via a clean call out of the
          * cache, if we return we will return back into the cache! It would be
          * cleaner for the thread to die by returning from its start function,
          * but to avoid complications we just kill it here. */
@@ -8441,10 +8449,13 @@ detach_helper(int detach_type)
         ASSERT_NOT_REACHED();
         return;
     }
+    /* NB: since we cleaned up during detach_on_permanent_stack, much of DR will
+     * no longer work (even options have been reset to their default values).
+     */
 
-    /* FIXME : unload dll, be able to have thread continue etc. */
+    /* XXX : unload dll, be able to have thread continue etc. */
 
-    /* FIXME : since we reached detach_helper via a clean call out of the
+    /* XXX : since we reached detach_helper via a clean call out of the
      * cache, if we return we will return back into the cache! It would be
      * cleaner for the thread to die by returning from its start function,
      * but to avoid complications we just kill it here. */
@@ -8456,7 +8467,7 @@ detach_helper(int detach_type)
     return;
 }
 
-/* FIXME : we create a thread to do the detaching, and all other dlls will
+/* XXX : we create a thread to do the detaching, and all other dlls will
  * be notifed of its creation by dll_thread_attach, is a transparency issue. */
 /* sets detach in motion and then returns */
 void
@@ -8543,42 +8554,34 @@ mutex_free_contended_event(mutex_t *lock)
  * requires a non-NULL dcontext to be passed.
  */
 static bool
-os_wait_event(event_t e,
-              int timeout_ms _IF_CLIENT_INTERFACE(bool set_safe_for_synch)
-                  _IF_CLIENT_INTERFACE(dcontext_t *dcontext)
-                      _IF_CLIENT_INTERFACE(priv_mcontext_t *mc))
+os_wait_event(event_t e, int timeout_ms, bool set_safe_for_synch, dcontext_t *dcontext,
+              priv_mcontext_t *mc)
 {
     wait_status_t res;
     bool reported_timeout = false;
     LARGE_INTEGER timeout;
 
-#    ifdef CLIENT_INTERFACE
     if (mc != NULL) {
         ASSERT(dcontext != NULL);
         *get_mcontext(dcontext) = *mc;
     }
-#    endif
 
     KSTART(wait_event);
     /* we allow using this in release builds as well */
     if (timeout_ms == 0 && DYNAMO_OPTION(deadlock_timeout) > 0) {
         timeout.QuadPart =
             -((int)DYNAMO_OPTION(deadlock_timeout)) * TIMER_UNITS_PER_MILLISECOND;
-#    ifdef CLIENT_INTERFACE
         /* if set_safe_for_synch dcontext must be non-NULL */
         ASSERT(!set_safe_for_synch || dcontext != NULL);
         if (set_safe_for_synch)
             dcontext->client_data->client_thread_safe_for_synch = true;
         if (mc != NULL)
             set_synch_state(dcontext, THREAD_SYNCH_VALID_MCONTEXT);
-#    endif
         res = nt_wait_event_with_timeout(e, &timeout /* debug timeout */);
-#    ifdef CLIENT_INTERFACE
         if (set_safe_for_synch)
             dcontext->client_data->client_thread_safe_for_synch = false;
         if (mc != NULL)
             set_synch_state(dcontext, THREAD_SYNCH_NONE);
-#    endif
         if (res == WAIT_SIGNALED) {
             KSTOP(wait_event);
             return true; /* all went well */
@@ -8589,7 +8592,7 @@ os_wait_event(event_t e,
          * to explicitly overwrite the hidden DO_ONCE variable from a debugging
          * session if this is getting in the way.
          */
-        /* FIXME - instead of DO_ONCE we may want a named static variable that
+        /* XXX - instead of DO_ONCE we may want a named static variable that
          * we can access easily from the debugger. */
         DO_ONCE({
             reported_timeout = true;
@@ -8597,13 +8600,13 @@ os_wait_event(event_t e,
                                      "Timeout expired - 1st wait, possible deadlock "
                                      "(or you were debugging)");
             /* do a 2nd wait so we can get two dumps to compare for progress */
-            /* FIXME - use shorter timeout for the 2nd wait? */
+            /* XXX - use shorter timeout for the 2nd wait? */
             res = nt_wait_event_with_timeout(e, &timeout /* debug timeout */);
             if (res == WAIT_SIGNALED) {
                 /* 2nd wait succeeded! We must not have been really deadlocked.
                  * Syslog a warning to ignore the first ldmp and continue. */
-                /* FIXME - should we reset the DO_ONCE now? */
-                /* FIXME - should this be a report_dynamorio_problem or some
+                /* XXX - should we reset the DO_ONCE now? */
+                /* XXX - should this be a report_dynamorio_problem or some
                  * such so is more useful in release builds? */
                 SYSLOG_INTERNAL_WARNING("WARNING - 2nd wait after deadlock timeout "
                                         "expired succeeded! Not really deadlocked.");
@@ -8617,26 +8620,22 @@ os_wait_event(event_t e,
         });
     }
     /* fallback to waiting forever */
-#    ifdef CLIENT_INTERFACE
     if (set_safe_for_synch)
         dcontext->client_data->client_thread_safe_for_synch = true;
     if (mc != NULL)
         set_synch_state(dcontext, THREAD_SYNCH_VALID_MCONTEXT);
-#    endif
     if (timeout_ms > 0)
         timeout.QuadPart = -timeout_ms * TIMER_UNITS_PER_MILLISECOND;
     res = nt_wait_event_with_timeout(e, timeout_ms > 0 ? &timeout : INFINITE_WAIT);
-#    ifdef CLIENT_INTERFACE
     if (set_safe_for_synch)
         dcontext->client_data->client_thread_safe_for_synch = false;
     if (mc != NULL)
         set_synch_state(dcontext, THREAD_SYNCH_NONE);
-#    endif
     if (reported_timeout) {
         /* Our wait eventually succeeded so not truly a deadlock.  Syslog a
          * warning to that effect. */
-        /* FIXME - should we reset the DO_ONCE now? */
-        /* FIXME - should this be a report_dynamorio_problem or some
+        /* XXX - should we reset the DO_ONCE now? */
+        /* XXX - should this be a report_dynamorio_problem or some
          * such so is more useful in release builds? */
         SYSLOG_INTERNAL_WARNING("WARNING - Final wait after reporting deadlock timeout "
                                 "expired succeeded! Not really deadlocked.");
@@ -8664,11 +8663,10 @@ os_wait_handle(HANDLE h, uint64 timeout_ms)
 #ifndef NOT_DYNAMORIO_CORE_PROPER
 
 void
-mutex_wait_contended_lock(mutex_t *lock _IF_CLIENT_INTERFACE(priv_mcontext_t *mc))
+mutex_wait_contended_lock(mutex_t *lock, priv_mcontext_t *mc)
 {
     contention_event_t event =
         mutex_get_contended_event(&lock->contended_event, SynchronizationEvent);
-#    ifdef CLIENT_INTERFACE
     dcontext_t *dcontext = get_thread_private_dcontext();
     bool set_safe_for_sync =
         (dcontext != NULL && IS_CLIENT_THREAD(dcontext) &&
@@ -8679,10 +8677,7 @@ mutex_wait_contended_lock(mutex_t *lock _IF_CLIENT_INTERFACE(priv_mcontext_t *mc
        client_thread_safe_for_sync flag.
     */
     ASSERT(!(set_safe_for_sync && mc != NULL));
-#    endif
-    os_wait_event(event,
-                  0 _IF_CLIENT_INTERFACE(set_safe_for_sync) _IF_CLIENT_INTERFACE(dcontext)
-                      _IF_CLIENT_INTERFACE(mc));
+    os_wait_event(event, 0, set_safe_for_sync, dcontext, mc);
     /* the event was signaled, and this thread was released,
        the auto-reset event is again nonsignaled for all other threads to wait on
     */
@@ -8701,9 +8696,7 @@ rwlock_wait_contended_writer(read_write_lock_t *rwlock)
 {
     contention_event_t event =
         mutex_get_contended_event(&rwlock->writer_waiting_readers, SynchronizationEvent);
-    os_wait_event(event,
-                  0 _IF_CLIENT_INTERFACE(false) _IF_CLIENT_INTERFACE(NULL)
-                      _IF_CLIENT_INTERFACE(NULL));
+    os_wait_event(event, 0, false, NULL, NULL);
     /* the event was signaled, and this thread was released,
        the auto-reset event is again nonsignaled for all other threads to wait on
     */
@@ -8726,9 +8719,7 @@ rwlock_wait_contended_reader(read_write_lock_t *rwlock)
 {
     contention_event_t notify_readers =
         mutex_get_contended_event(&rwlock->readers_waiting_writer, SynchronizationEvent);
-    os_wait_event(notify_readers,
-                  0 _IF_CLIENT_INTERFACE(false) _IF_CLIENT_INTERFACE(NULL)
-                      _IF_CLIENT_INTERFACE(NULL));
+    os_wait_event(notify_readers, 0, false, NULL, NULL);
     /* the event was signaled, and only a single threads waiting on
      * this event are released, if this was indeed the last reader
      */
@@ -8779,9 +8770,7 @@ reset_event(event_t e)
 bool
 wait_for_event(event_t e, int timeout_ms)
 {
-    return os_wait_event(e,
-                         timeout_ms _IF_CLIENT_INTERFACE(false) _IF_CLIENT_INTERFACE(NULL)
-                             _IF_CLIENT_INTERFACE(NULL));
+    return os_wait_event(e, timeout_ms, false, NULL, NULL);
 }
 
 timestamp_t
@@ -8842,8 +8831,9 @@ early_inject_init()
     wchar_t buf[MAX_PATH];
     int os_version_number = get_os_version();
     GET_NTDLL(LdrLoadDll,
-              (IN PCWSTR PathToFile OPTIONAL, IN PULONG Flags OPTIONAL,
-               IN PUNICODE_STRING ModuleFileName, OUT PHANDLE ModuleHandle));
+              (DR_PARAM_IN PCWSTR PathToFile OPTIONAL, DR_PARAM_IN PULONG Flags OPTIONAL,
+               DR_PARAM_IN PUNICODE_STRING ModuleFileName,
+               DR_PARAM_OUT PHANDLE ModuleHandle));
     ASSERT(dcontext != NULL);
 
     early_inject_location = DYNAMO_OPTION(early_inject_location);
@@ -8891,7 +8881,7 @@ early_inject_init()
             /* Case 7806, on some NT machines LdrpLoadDll causes problems
              * while on others it doesn't.  Just turn off early injection
              * on NT for now (LdrpLoadDll wasn't giving very good aslr support
-             * anyways and isn't a desktop target).  FIXME - we could just
+             * anyways and isn't a desktop target).  XXX - we could just
              * hardcode a table of LdrpLoadImportModule addresses for NT since
              * we don't expect Microsoft to release any more patches for it.
              */
@@ -8965,7 +8955,7 @@ early_inject_init()
          * until all static dlls are loaded unless GetProcAddress is called
          * on the dll first, in that case its DllMain is called from there
          * not LdrpLoadDll as we expect). */
-        /* FIXME - we could use a helper dll to get this, but it won't work
+        /* XXX - we could use a helper dll to get this, but it won't work
          * when early_injected for the same reason dr's DllMain walk doesn't.
          * Maybe there's some flag we can pass to the Ldr to tell it to call
          * the DllMain right away (could then use it when trampoline loads
@@ -9017,7 +9007,7 @@ early_inject_init()
         under_dr_save = dcontext->thread_record->under_dynamo_control;
         dcontext->thread_record->under_dynamo_control = false;
         whereami_save = dcontext->whereami;
-        /* FIXME - this is an ugly hack to get the kstack in a form compatible
+        /* XXX - this is an ugly hack to get the kstack in a form compatible
          * with d_r_dispatch for processing the native exec syscalls we'll hit
          * while loading the helper dll (hotpatch has a similar issue but
          * lucks out with having a compatible stack).  Shouldn't mess things
@@ -9036,7 +9026,7 @@ early_inject_init()
         /* load the helper library, post syscall hook will fill in
          * ldrpLoadImportModule_address for us */
         early_inject_load_helper_dcontext = dcontext;
-        /* FIXME : if we are early_injected and the load fails because either
+        /* XXX : if we are early_injected and the load fails because either
          * of the helper dlls don't exist/can't be found the Ldr treats
          * that as a process init failure and aborts the process.  Wonder if
          * there's a flag we can pass to the Ldr to tell it not to do that.
@@ -9045,7 +9035,7 @@ early_inject_init()
          * a different inject_location which would be unexpected in a product
          * configuration). */
         EXITING_DR();
-        /* FIXME - we are making the assumption (currently true) that our
+        /* XXX - we are making the assumption (currently true) that our
          * load_library() & free_library() routines themselves don't write to
          * any self protected regions, if changes we may need special versions
          * here. */
@@ -9066,11 +9056,11 @@ early_inject_init()
         ASSERT(mod != NULL && ldrpLoadImportModule_address != NULL &&
                "check that drearlyhelp*.dlls are installed");
 
-        /* FIXME - should we do anything if the address isn't found for some
+        /* XXX - should we do anything if the address isn't found for some
          * reason (most likely would be the helper dlls didn't exist/couldn't
          * be found)?  Could choose to fall back to another os version
          * appropriate location. As is, in release build we'd just fail to
-         * follow children when we couldn't find the address (see FIXME in
+         * follow children when we couldn't find the address (see XXX in
          * inject_into_process()).  I expect QA is going to run into this
          * occasionally (esp. till nodemgr etc. handle the helper dlls), so
          * can we do anything to make things easier/more apparent for them? */
@@ -9079,7 +9069,7 @@ early_inject_init()
     default: ASSERT_NOT_REACHED();
     }
 
-    /* FIXME - if failed to get address for any reason and we were early
+    /* XXX - if failed to get address for any reason and we were early
      * injected, we could fall back to parent's address. */
     ASSERT(early_inject_address != NULL);
     /* Since we are using a non-overridden Ldr* location can assert that
@@ -9104,10 +9094,10 @@ earliest_inject_init(byte *arg_ptr)
          * should we just silently go native?
          */
     } else {
-        /* Restore +rx to hook location before DR init scans it */
+        /* Restore the prior protections to the hook location before DR init scans it. */
         uint old_prot;
         if (!bootstrap_protect_virtual_memory((byte *)(ptr_int_t)args->hook_location,
-                                              EARLY_INJECT_HOOK_SIZE, PAGE_EXECUTE_READ,
+                                              EARLY_INJECT_HOOK_SIZE, args->hook_prot,
                                               &old_prot)) {
             /* XXX: again, how handle failure? */
         }
@@ -9163,7 +9153,7 @@ get_process_SID_string()
     static char process_SID[SECURITY_MAX_SID_STRING_SIZE];
     if (!process_SID[0]) {
         wchar_t sid_string[SECURITY_MAX_SID_STRING_SIZE];
-        /* FIXME: we only need to query NtOpenProcessToken, but we'll
+        /* XXX: we only need to query NtOpenProcessToken, but we'll
          * assume that this function is called early enough before any
          * impersonation could have taken place and NtOpenThreadToken
          */
@@ -9235,7 +9225,7 @@ os_validate_owner_equals(HANDLE file_or_directory_handle, PSID expected_owner)
      * therefore it doesn't present a privilege escalation route.
      */
 
-    /* FIXME: If we do allow anyone to create their own directory,
+    /* XXX: If we do allow anyone to create their own directory,
      * then we'd have to verify it wasn't created by somebody else -
      * after we open a file we should validate that we are its
      * rightful owner (and we'll assume we have maintained the correct
@@ -9247,13 +9237,13 @@ os_validate_owner_equals(HANDLE file_or_directory_handle, PSID expected_owner)
      * created files' owner will be the current user (in addition to
      * being readable by the current user).  We also assume that the
      * cache\ directory is on the local system.
-     * FIXME: case 10884 we can't assume that, we have to create our files explicitly
+     * XXX: case 10884 we can't assume that, we have to create our files explicitly
      *
-     * (FIXME: unclear whether Machine account will be available for
+     * (XXX: unclear whether Machine account will be available for
      * us on the network for services)
      */
 
-    /* FIXME: having a open handle to the directory instead of
+    /* XXX: having a open handle to the directory instead of
      * concatenating strings would allow us to do the check only on
      * the directory, and not on the files.  We only need to make sure
      * there are no TOCTOU races: no symbolic links allowed, and
@@ -9271,7 +9261,7 @@ os_validate_owner_equals(HANDLE file_or_directory_handle, PSID expected_owner)
     /* This buffer must be aligned on a 4-byte boundary. */
     ASSERT(ALIGNED(sd, sizeof(DWORD)));
 
-    /* FIXME: unlike SIDs which we can bound, there is no good bound
+    /* XXX: unlike SIDs which we can bound, there is no good bound
      * for a complete SD.  We need to ensure that only one SID would
      * be returned to us here.
      */
@@ -9288,7 +9278,7 @@ os_validate_owner_equals(HANDLE file_or_directory_handle, PSID expected_owner)
     ASSERT(actual_sd_length < sizeof(sd_buf));
 
     if (get_owner_sd(sd, &owner)) {
-        /* FIXME: on Vista services using restricted SIDs may require
+        /* XXX: on Vista services using restricted SIDs may require
          * obtaining the SID that we can use for creating files */
 
         if (!equal_sid(owner, expected_owner)) {
@@ -9317,7 +9307,7 @@ os_filesystem_supports_ownership(HANDLE file_or_directory_handle)
      * Everyone - which certainly should only happen on FAT32.
      */
 
-    /* FIXME: Alternatively we can test for support for file
+    /* XXX: Alternatively we can test for support for file
      * ID/reference, since creation by file reference is only
      * supported on NTFS
      */
@@ -9489,7 +9479,7 @@ os_current_user_directory(char *directory_prefix /* INOUT */, uint directory_len
         if (!equal_sid(get_process_owner_SID(), get_process_primary_SID())) {
             LOG(GLOBAL, LOG_CACHE, 1,
                 "Default owner is not current user, we must be an Administrator?\n");
-            /* FIXME: we could try to really check */
+            /* XXX: we could try to really check */
         }
     });
 
@@ -9511,7 +9501,7 @@ os_current_user_directory(char *directory_prefix /* INOUT */, uint directory_len
      * normally other process don't need to read these.
      */
 
-    /* FIXME: Of course, at beginning we want be dealing with
+    /* XXX: Of course, at beginning we want be dealing with
      * impersonation at all, but we should try to detect it here if we
      * fail to open a directory due to impersonated thread.
      */
@@ -9527,11 +9517,11 @@ os_current_user_directory(char *directory_prefix /* INOUT */, uint directory_len
          * DACL and we don't care about group.
          */
 
-        /* FIXME: we should ensure we do not follow symlinks! */
+        /* XXX: we should ensure we do not follow symlinks! */
         if (!os_create_dir(directory, CREATE_DIR_REQUIRE_NEW | CREATE_DIR_FORCE_OWNER)) {
             LOG(GLOBAL, LOG_CACHE, 2, "\terror creating per-user dir %s\n", directory);
 
-            /* FIXME: currently this is expected for the 4.2 ACLs */
+            /* XXX: currently this is expected for the 4.2 ACLs */
             /* Note SYSLOG can be just a Warning since we will still
              * run correctly without persistence. */
             SYSLOG_INTERNAL_ERROR_ONCE("Persistent cache per-user needed.\n"
@@ -9546,7 +9536,7 @@ os_current_user_directory(char *directory_prefix /* INOUT */, uint directory_len
         }
     }
 
-    /* FIXME: case 8812 if the cache\ directory inheritable ACLs are
+    /* XXX: case 8812 if the cache\ directory inheritable ACLs are
      * setup accordingly we should be able to automatically create a
      * our own per-user folder, without dealing with forging ACLs
      * here, and without asking a trusted components to create it for
@@ -9575,7 +9565,7 @@ os_check_option_compatibility(void)
     if (!os_has_aslr)
         return false;
 
-    if (TEST(OS_ASLR_DISABLE_PCACHE_ALL, DYNAMO_OPTION(os_aslr))) {
+    if (TESTANY(OS_ASLR_DISABLE_PCACHE_ALL, DYNAMO_OPTION(os_aslr))) {
         /* completely disable pcache */
 
         /* enabled by -desktop, but can be enabled independently as well */
@@ -9597,7 +9587,7 @@ os_check_option_compatibility(void)
 
     /* note dynamorio.dll is not marked as ASLR friendly so we keep
      * using our own -aslr_dr */
-    if (TEST(OS_ASLR_DISABLE_PCACHE_ALL, DYNAMO_OPTION(os_aslr))) {
+    if (TESTANY(OS_ASLR_DISABLE_PCACHE_ALL, DYNAMO_OPTION(os_aslr))) {
         /* completely disable ASLR */
         /* enabled by -client, but can be enabled independently as well */
         if (DYNAMO_OPTION(aslr) != 0) {
@@ -9619,6 +9609,6 @@ os_check_option_compatibility(void)
 size_t
 os_page_size(void)
 {
-    /* FIXME i#1680: Determine page size using system call. */
+    /* XXX i#1680: Determine page size using system call. */
     return 4096;
 }

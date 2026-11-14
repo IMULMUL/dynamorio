@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2015-2018 Google, Inc.  All rights reserved.
+ * Copyright (c) 2015-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -33,7 +33,7 @@
 /* This is the data format that the simulator and analysis tools take as input. */
 
 #ifndef _MEMREF_H_
-#define _MEMREF_H_ 1
+#define _MEMREF_H_
 
 #include <stdint.h>
 #include <stddef.h> // for size_t
@@ -44,10 +44,78 @@
  * @brief DrMemtrace trace entry structures.
  */
 
+namespace dynamorio {  /**< General DynamoRIO namespace. */
+namespace drmemtrace { /**< DrMemtrace tracing + simulation infrastructure namespace. */
+
 // On some platforms, like MacOS, a thread id is 64 bits.
 // We just make both 64 bits to cover all our bases.
-typedef int_least64_t memref_pid_t; /**< Process id type. */
-typedef int_least64_t memref_tid_t; /**< Thread id type. */
+/**
+ * Process id type.  When multiple workloads are combined in one trace, a workload ordinal
+ * is added to the top (64-MEMREF_ID_WORKLOAD_SHIFT) bits; the workload_from_memref_pid()
+ * and pid_from_memref_pid() helpers can be used to separate the values if desired.
+ */
+typedef int64_t memref_pid_t;
+/**
+ * Thread id type.  When multiple workloads are combined in one trace, a workload ordinal
+ * is added to the top (64-MEMREF_ID_WORKLOAD_SHIFT) bits; the workload_from_memref_tid()
+ * and tid_from_memref_tid() helpers can be used to separate the values if desired.
+ */
+typedef int64_t memref_tid_t;
+
+/** Constants related to tid and pid fields. */
+enum {
+    /**
+     * When multiple workloads are combined in one trace, a workload ordinal is added to
+     * the top (64-MEMREF_ID_WORKLOAD_SHIFT) bits of the pid and tid fields of #memref_t.
+     * We use 48 to leave some room for >32-bit identifiers (Mac has a 64-bit tid type)
+     * while still leaving plenty of room for the workload ordinal.
+     */
+    MEMREF_ID_WORKLOAD_SHIFT = 48,
+};
+
+/**
+ * When multiple workloads are combined in one trace, a workload ordinal is added to the
+ * top (64-MEMREF_ID_WORKLOAD_SHIFT) bits of the #memref_t pid field.  This function
+ * extracts the workload ordinal.
+ */
+static inline int
+workload_from_memref_pid(memref_tid_t pid)
+{
+    return pid >> MEMREF_ID_WORKLOAD_SHIFT;
+}
+
+/**
+ * When multiple workloads are combined in one trace, a workload ordinal is added to the
+ * top (64-MEMREF_ID_WORKLOAD_SHIFT) bits of the #memref_t tid field.  This function
+ * extracts the workload ordinal.
+ */
+static inline int
+workload_from_memref_tid(memref_tid_t tid)
+{
+    return tid >> MEMREF_ID_WORKLOAD_SHIFT;
+}
+
+/**
+ * When multiple workloads are combined in one trace, a workload ordinal is added to the
+ * top (64-MEMREF_ID_WORKLOAD_SHIFT) bits of the #memref_t pid field.  This function
+ * extracts just the pid.
+ */
+static inline memref_pid_t
+pid_from_memref_pid(memref_pid_t pid)
+{
+    return pid & ((1ULL << MEMREF_ID_WORKLOAD_SHIFT) - 1);
+}
+
+/**
+ * When multiple workloads are combined in one trace, a workload ordinal is added to the
+ * top (64-MEMREF_ID_WORKLOAD_SHIFT) bits of the #memref_t tid field.  This function
+ * extracts just the tid.
+ */
+static inline memref_tid_t
+tid_from_memref_tid(memref_tid_t tid)
+{
+    return tid & ((1ULL << MEMREF_ID_WORKLOAD_SHIFT) - 1);
+}
 
 /** A trace entry representing a data load, store, or prefetch. */
 struct _memref_data_t {
@@ -66,6 +134,27 @@ struct _memref_instr_t {
     memref_tid_t tid;  /**< Thread id. */
     addr_t addr;       /**< The address of the instruction (i.e., program counter). */
     size_t size;       /**< The length of the instruction. */
+    /**
+     * The instruction's raw encoding.  This field is only valid when the file type
+     * (see #TRACE_MARKER_TYPE_FILETYPE) has #OFFLINE_FILE_TYPE_ENCODINGS set.
+     * DynamoRIO's decode_from_copy() (or any other decoding library) can be used to
+     * decode into a higher-level instruction representation.
+     */
+    unsigned char encoding[MAX_ENCODING_LENGTH];
+    /**
+     * Indicates whether the encoding field is the first instance of its kind for this
+     * address.  This can be used to determine when to invalidate cached decoding
+     * information.  This field may be set to true on internal file divisions and
+     * not only when application code actually changed.
+     */
+    bool encoding_is_new;
+    /**
+     * Valid only for an indirect branch instruction (types
+     * #TRACE_TYPE_INSTR_INDIRECT_JUMP, #TRACE_TYPE_INSTR_INDIRECT_CALL, and
+     * #TRACE_TYPE_INSTR_RETURN).  Holds the actual target of that branch.  This is only
+     * present in trace version #TRACE_ENTRY_VERSION_BRANCH_INFO and higher.
+     */
+    addr_t indirect_branch_target;
 };
 
 /** A trace entry representing a software-requested explicit cache flush. */
@@ -102,6 +191,13 @@ struct _memref_marker_t {
 };
 
 /**
+ * To enable #memref_t to be default initialized reliably, a byte array is defined
+ * with the same length as the largest member of the union.  A subsequent
+ * static_assert makes sure the chosen size is truly the largest.
+ */
+constexpr int MEMREF_T_SIZE_BYTES = sizeof(_memref_instr_t);
+
+/**
  * Each trace entry is one of the structures in this union.
  * Each entry identifies the originating process and thread.
  * Although the pc of each data reference is provided, the trace also guarantees that
@@ -114,16 +210,47 @@ struct _memref_marker_t {
  * without a thread switch intervening, to make it simpler to identify branch
  * targets (again, unless the trace is filtered by an online first-level cache).
  * Online traces do not currently guarantee this.
+ *
+ * Note that #memref_t is **not** initialized by default.  The _raw_bytes array
+ * is added to the union as its first member to make sure a #memref_t object
+ * can be fully initialized if desired, for example `memref_t memref = {};`.
  */
 typedef union _memref_t {
     // The C standard allows us to reference the type field of any of these, and the
     // addr and size fields of data, instr, or flush generically if known to be one
     // of those types, due to the shared fields in our union of structs.
-    struct _memref_data_t data;        /**< A data load or store. */
-    struct _memref_instr_t instr;      /**< An insruction fetch. */
-    struct _memref_flush_t flush;      /**< A software-initiated cache flush. */
-    struct _memref_thread_exit_t exit; /**< A thread exit. */
-    struct _memref_marker_t marker;    /**< A marker holding metadata. */
+    // The _raw_bytes entry is for initialization purposes and must be first in
+    // this list.  A byte array is used for initialization rather than an existing struct
+    // to avoid incomplete initialization due to padding or alignment constraints within a
+    // struct.  This array is not intended to be used for memref_t access.
+    uint8_t _raw_bytes[MEMREF_T_SIZE_BYTES]; /**< Do not use: for init only. */
+    struct _memref_data_t data;              /**< A data load or store. */
+    struct _memref_instr_t instr;            /**< An instruction fetch. */
+    struct _memref_flush_t flush;            /**< A software-initiated cache flush. */
+    struct _memref_thread_exit_t exit;       /**< A thread exit. */
+    struct _memref_marker_t marker;          /**< A marker holding metadata. */
 } memref_t;
+
+static inline bool
+memref_has_pc(const memref_t &memref, uint64_t &pc)
+{
+    if (type_is_instr(memref.instr.type)) {
+        pc = memref.instr.addr;
+        return true;
+    }
+    if (memref.marker.type == TRACE_TYPE_MARKER &&
+        memref.marker.marker_type == TRACE_MARKER_TYPE_KERNEL_EVENT) {
+        pc = memref.marker.marker_value;
+        return true;
+    }
+    return false;
+}
+
+static_assert(sizeof(memref_t) == MEMREF_T_SIZE_BYTES,
+              "Update MEMREF_T_SIZE_BYTES to match sizeof(memref_t).  Did the largest "
+              "union member change?");
+
+} // namespace drmemtrace
+} // namespace dynamorio
 
 #endif /* _MEMREF_H_ */

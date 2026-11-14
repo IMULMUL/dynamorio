@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2013-2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2013-2026 Google, Inc.  All rights reserved.
  * Copyright (c) 2007-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -66,7 +66,7 @@ write_array(char *array)
 static uint
 get_os_mem_prot(uint prot)
 {
-    if (add_exec && TEST(DR_MEMPROT_READ, prot))
+    if (add_exec && TESTANY(DR_MEMPROT_READ, prot))
         return (prot | DR_MEMPROT_EXEC);
     return prot;
 }
@@ -577,6 +577,33 @@ alignment_test(void)
         for (int i = 0; i < NUM_TRIES; ++i)
             free(mem[i]);
     }
+
+    /* I had trouble getting /std:c11 passed to VS so we disable this for Windows.
+     * It is here to test the UNIX private loader in any case.
+     */
+#ifdef UNIX
+    /* Test redirection of C11/C++17's aligned_alloc(). */
+    void *p = aligned_alloc(32, 53);
+    ASSERT(ALIGNED(p, 32));
+    /* If aligned_alloc isn't redirected, free() will be and will trigger debug
+     * checks on memory patterns not matching.
+     */
+    free(p);
+    /* Check some other values. */
+    p = aligned_alloc(4, 15);
+    ASSERT(ALIGNED(p, 4));
+    free(p);
+    p = aligned_alloc(8, 15);
+    ASSERT(ALIGNED(p, 8));
+    free(p);
+    p = aligned_alloc(16, 253);
+    ASSERT(ALIGNED(p, 16));
+    free(p);
+    p = aligned_alloc(128, 987);
+    ASSERT(ALIGNED(p, 128));
+    free(p);
+#endif
+
     dr_fprintf(STDERR, "success\n");
 }
 
@@ -742,7 +769,7 @@ dr_init(client_id_t id)
     int res = personality(0xffffffff);
     if (res == -1)
         fprintf(stderr, "Error: fail to get personality\n");
-    else if (TEST(READ_IMPLIES_EXEC, res))
+    else if (TESTANY(READ_IMPLIES_EXEC, res))
         add_exec = true;
 #endif
 

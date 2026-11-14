@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2015-2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2015-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -34,14 +34,24 @@
  */
 
 #ifndef _SIMULATOR_H_
-#define _SIMULATOR_H_ 1
+#define _SIMULATOR_H_
 
+#include <assert.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#include <istream>
 #include <unordered_map>
 #include <vector>
-#include "caching_device_stats.h"
-#include "caching_device.h"
+
 #include "analysis_tool.h"
+#include "caching_device.h"
+#include "caching_device_stats.h"
 #include "memref.h"
+#include "trace_entry.h"
+
+namespace dynamorio {
+namespace drmemtrace {
 
 class simulator_t : public analysis_tool_t {
 public:
@@ -50,10 +60,27 @@ public:
     }
     simulator_t(unsigned int num_cores, uint64_t skip_refs, uint64_t warmup_refs,
                 double warmup_fraction, uint64_t sim_refs, bool cpu_scheduling,
-                unsigned int verbose);
+                bool use_physical, unsigned int verbose);
     virtual ~simulator_t() = 0;
+
+    std::string
+    initialize_stream(memtrace_stream_t *serial_stream) override;
+
+    std::string
+    initialize_shard_type(shard_type_t shard_type) override;
+
+    shard_type_t
+    preferred_shard_type() override
+    {
+        // We prefer a dynamic schedule with more realistic thread interleavings.
+        return SHARD_BY_CORE;
+    }
+
     bool
     process_memref(const memref_t &memref) override;
+
+    virtual std::string
+    create_v2p_from_file(std::istream &v2p_file);
 
 protected:
     // Initialize knobs. Success or failure is indicated by setting/resetting
@@ -61,15 +88,42 @@ protected:
     void
     init_knobs(unsigned int num_cores, uint64_t skip_refs, uint64_t warmup_refs,
                double warmup_fraction, uint64_t sim_refs, bool cpu_scheduling,
-               unsigned int verbose);
-    void
+               bool use_physical, unsigned int verbose);
+
+    // Returns whether the core was ever non-empty.
+    bool
     print_core(int core) const;
+
     int
     find_emptiest_core(std::vector<int> &counts) const;
+
+    // Returns INVALID_CORE_INDEX during headers before the first cpuid marker is seen.
     virtual int
     core_for_thread(memref_tid_t tid);
+
     virtual void
     handle_thread_exit(memref_tid_t tid);
+
+    addr_t
+    virt2phys(addr_t virt) const;
+
+    memref_t
+    memref2phys(memref_t memref) const;
+
+    addr_t
+    page_start(addr_t addr) const
+    {
+        assert(page_size_ > 0);
+        return addr & ~(page_size_ - 1);
+    }
+
+    addr_t
+    synthetic_virt2phys(addr_t virt) const;
+
+    // We use -1 instead of INVALID_THREAD_ID==0 because we have many tests
+    // which set tid to 0 to mean "don't care".
+    static constexpr memref_tid_t INVALID_LAST_THREAD = -1;
+    static constexpr int INVALID_CORE_INDEX = -1;
 
     unsigned int knob_num_cores_;
     uint64_t knob_skip_refs_;
@@ -77,17 +131,32 @@ protected:
     double knob_warmup_fraction_;
     uint64_t knob_sim_refs_;
     bool knob_cpu_scheduling_;
+    bool knob_use_physical_;
     unsigned int knob_verbose_;
 
-    memref_tid_t last_thread_;
-    int last_core_;
+    shard_type_t shard_type_ = SHARD_BY_THREAD;
+    memtrace_stream_t *serial_stream_ = nullptr;
+    memref_tid_t last_thread_ = INVALID_LAST_THREAD; // Only used for SHARD_BY_THREAD.
+    int last_core_index_ = INVALID_CORE_INDEX;
 
     // For thread mapping to cores:
-    std::unordered_map<int, int> cpu2core_;
+    std::unordered_map<int64_t, int> cpu2core_;
+    // The following fields are only used for SHARD_BY_THREAD.
     std::unordered_map<memref_tid_t, int> thread2core_;
     std::vector<int> cpu_counts_;
     std::vector<int> thread_counts_;
     std::vector<int> thread_ever_counts_;
+    int non_marker_count_ = 0;
+
+    // For virtual to physical page mappings.
+    size_t page_size_ = 0;
+    std::unordered_map<addr_t, addr_t> virt2phys_;
+    addr_t prior_phys_addr_ = 0;
+    // Indicates whether the simulator uses a v2p file for virtual to physical mapping.
+    bool use_v2p_file_ = false;
 };
+
+} // namespace drmemtrace
+} // namespace dynamorio
 
 #endif /* _SIMULATOR_H_ */

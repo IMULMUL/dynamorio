@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2020-2022 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -33,18 +33,11 @@
 /* Tests drreg when the user performs end of basic block restoration. */
 
 #include "dr_api.h"
+#include "client_tools.h"
 #include "drmgr.h"
 #include "drreg.h"
 #include "drutil.h"
 #include <string.h> /* memcpy */
-
-#define CHECK(x, msg)                        \
-    do {                                     \
-        if (!(x)) {                          \
-            dr_fprintf(STDERR, "%s\n", msg); \
-            dr_abort();                      \
-        }                                    \
-    } while (0);
 
 #ifdef X86
 #    define TEST_REG DR_REG_XDI
@@ -61,7 +54,7 @@ static void
 event_exit(void);
 static dr_emit_flags_t
 event_bb_app2app(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
-                 bool translating, OUT void **user_data);
+                 bool translating, DR_PARAM_OUT void **user_data);
 static dr_emit_flags_t
 event_bb_analysis(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
                   bool translating, void *user_data);
@@ -83,7 +76,7 @@ dr_init(client_id_t id)
     drmgr_init();
     res = drreg_init(&ops);
     CHECK(res == DRREG_SUCCESS, "drreg init failed");
-    dr_register_exit_event(event_exit);
+    drmgr_register_exit_event(event_exit);
 
     ok = drmgr_register_bb_instrumentation_ex_event(event_bb_app2app, event_bb_analysis,
                                                     event_bb_insert, NULL, &priority);
@@ -108,7 +101,7 @@ event_exit(void)
 
 static dr_emit_flags_t
 event_bb_app2app(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
-                 bool translating, OUT void **user_data)
+                 bool translating, DR_PARAM_OUT void **user_data)
 {
     drreg_status_t res =
         drreg_set_bb_properties(drcontext, DRREG_USER_RESTORES_AT_BB_END);
@@ -137,7 +130,7 @@ get_val_from_ctx(void *drcontext, reg_id_t reg_id)
 }
 
 static void
-set_reg_val()
+set_reg_val(void)
 {
     void *drcontext = dr_get_current_drcontext();
     void *val = (void *)get_val_from_ctx(drcontext, TEST_REG);
@@ -145,7 +138,7 @@ set_reg_val()
 }
 
 static void
-check_reg_val()
+check_reg_val(void)
 {
     void *drcontext = dr_get_current_drcontext();
     reg_t val = get_val_from_ctx(drcontext, TEST_REG);
@@ -176,7 +169,8 @@ event_bb_insert(void *drcontext, void *tag, instrlist_t *bb, instr_t *instr,
         res = drreg_restore_all(drcontext, bb, instr);
         CHECK(res == DRREG_SUCCESS, "failed to restore all");
 
-        dr_insert_clean_call(drcontext, bb, instr, set_reg_val, false, 0);
+        dr_insert_clean_call_ex(drcontext, bb, instr, set_reg_val,
+                                DR_CLEANCALL_READS_APP_CONTEXT, 0);
 
         res = drreg_reserve_aflags(drcontext, bb, instr);
         CHECK(res == DRREG_SUCCESS, "failed to reserve flags");
@@ -197,7 +191,8 @@ event_bb_insert(void *drcontext, void *tag, instrlist_t *bb, instr_t *instr,
         res = drreg_restore_all(drcontext, bb, instr);
         CHECK(res == DRREG_SUCCESS, "failed to restore all");
 
-        dr_insert_clean_call(drcontext, bb, instr, check_reg_val, false, 0);
+        dr_insert_clean_call_ex(drcontext, bb, instr, check_reg_val,
+                                DR_CLEANCALL_READS_APP_CONTEXT, 0);
 
         drvector_delete(&allowed);
     }

@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2012-2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2012-2026 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -47,7 +47,7 @@
 #endif
 #include "instrument.h"
 #include "instr.h"
-#include "instr_create.h"
+#include "instr_create_shared.h"
 #include "decode.h"
 #include "disassemble.h"
 #include "os_private.h"
@@ -56,7 +56,7 @@
 #include "dr_inject.h"
 
 #include <assert.h>
-#ifndef MACOS
+#if !(defined(MACOS) || defined(ANDROID64))
 /* If we don't define _EXTERNALIZE_CTYPE_INLINES_*, we get errors vs tolower
  * in globals.h; if we do, we get errors on isspace missing.  We solve that
  * by just by supplying our own isspace.
@@ -78,6 +78,7 @@
 #include <sys/user.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <time.h>
 #ifdef MACOS
 #    include <spawn.h>
 #    include <crt_externs.h> /* _NSGetEnviron() */
@@ -92,13 +93,15 @@ typedef enum {
     PLATFORM_UNKNOWN,
 } platform_status_t;
 
-#ifdef MACOS
+#if defined(MACOS) || defined(ANDROID64)
 /* The type is just "int", and the values are different, so we use the Linux
  * type name to match the Linux constant names.
  */
 #    ifndef PT_ATTACHEXC /* New replacement for PT_ATTACH */
 #        define PT_ATTACHEXC PT_ATTACH
 #    endif
+
+#    ifdef MACOS
 enum __ptrace_request {
     PTRACE_TRACEME = PT_TRACE_ME,
     PTRACE_CONT = PT_CONTINUE,
@@ -107,6 +110,7 @@ enum __ptrace_request {
     PTRACE_DETACH = PT_DETACH,
     PTRACE_SINGLESTEP = PT_STEP,
 };
+#    endif
 
 /* clang-format off */ /* (work around clang-format bug) */
 static int inline
@@ -144,6 +148,8 @@ typedef struct _dr_inject_info_t {
     bool exited;
     int exitcode;
     bool no_emulate_brk; /* is -no_emulate_brk in the option string? */
+
+    bool wait_syscall; /* valid iff -attach: handle blocking syscalls */
 
 #ifdef MACOS
     bool spawn_32bit;
@@ -495,7 +501,7 @@ exe_is_right_bitwidth(const char *exe, int *errcode)
  */
 DR_EXPORT
 int
-dr_inject_process_create(const char *exe, const char **argv, void **data OUT)
+dr_inject_process_create(const char *exe, const char **argv, void **data DR_PARAM_OUT)
 {
     int r;
     int fds[2];
@@ -547,7 +553,7 @@ error:
 
 DR_EXPORT
 int
-dr_inject_prepare_to_exec(const char *exe, const char **argv, void **data OUT)
+dr_inject_prepare_to_exec(const char *exe, const char **argv, void **data DR_PARAM_OUT)
 {
     dr_inject_info_t *info = create_inject_info(exe, argv);
     int errcode = 0;
@@ -563,6 +569,22 @@ dr_inject_prepare_to_exec(const char *exe, const char **argv, void **data OUT)
     info->method = INJECT_LD_PRELOAD;
     /* Trigger automated takeover in case DR is statically linked. */
     setenv("DYNAMORIO_TAKEOVER_IN_INIT", "1", true /*overwrite*/);
+    return errcode;
+}
+
+DR_EXPORT
+int
+dr_inject_prepare_to_attach(process_id_t pid, const char *appname, bool wait_syscall,
+                            void **data DR_PARAM_OUT)
+{
+    dr_inject_info_t *info = create_inject_info(appname, NULL);
+    int errcode = 0;
+    *data = info;
+    info->pid = pid;
+    info->pipe_fd = 0; /* No pipe. */
+    info->exec_self = false;
+    info->method = INJECT_PTRACE;
+    info->wait_syscall = wait_syscall;
     return errcode;
 }
 
@@ -613,7 +635,7 @@ dr_inject_get_image_name(void *data)
     return (char *)info->image_name;
 }
 
-/* FIXME: Use the parser in options.c.  The implementation here will find
+/* XXX: Use the parser in options.c.  The implementation here will find
  * options in quoted strings, like the client options string.
  */
 static bool
@@ -742,7 +764,6 @@ bool
 dr_inject_wait_for_child(void *data, uint64 timeout_millis)
 {
     dr_inject_info_t *info = (dr_inject_info_t *)data;
-    pid_t res;
 
     timeout_expired = false;
     if (timeout_millis > 0) {
@@ -763,12 +784,34 @@ dr_inject_wait_for_child(void *data, uint64 timeout_millis)
         setitimer(ITIMER_REAL, &timer, NULL);
     }
 
-    do {
-        res = waitpid(info->pid, &info->exitcode, 0);
-    } while (res != info->pid && res != -1 &&
-             /* The signal handler sets this and makes waitpid return EINTR. */
-             !timeout_expired);
-    info->exited = (res == info->pid);
+    if (info->method != INJECT_PTRACE) {
+        pid_t res;
+        do {
+            res = waitpid(info->pid, &info->exitcode, 0);
+        } while (res != info->pid && res != -1 &&
+                 /* The signal handler sets this and makes waitpid return EINTR. */
+                 !timeout_expired);
+        info->exited = (res == info->pid);
+    } else {
+        bool exit = false;
+        struct timespec t;
+        t.tv_sec = 1;
+        t.tv_nsec = 0L;
+        do {
+            /* At this point dr_inject_process_run has called PTRACE_DETACH
+             * For non-child target, we should poll for its exit.
+             * There is no standard way of getting non-child target process' exit code.
+             */
+            if (kill(info->pid, 0) == -1) {
+                if (errno == ESRCH)
+                    exit = true;
+            }
+            /* sleep might not be implemented using nanosleep */
+            nanosleep(&t, 0);
+        } while (!exit && !timeout_expired);
+        info->exitcode = 0;
+        info->exited = (exit != false);
+    }
     return info->exited;
 }
 
@@ -777,7 +820,7 @@ int
 dr_inject_process_exit(void *data, bool terminate)
 {
     dr_inject_info_t *info = (dr_inject_info_t *)data;
-    int status;
+    int status = 0;
     if (info->exited) {
         /* If it already exited when we waited on it above, then we *cannot*
          * wait on it again or try to kill it, or we might target some new
@@ -798,15 +841,25 @@ dr_inject_process_exit(void *data, bool terminate)
         }
         /* Do a blocking wait to get the real status code.  This shouldn't take
          * long since we just sent an unblockable SIGKILL.
+         * Return immediately if we are under INJECT_PTRACE because we can't wait
+         * for detached non-child process.
          */
-        waitpid(info->pid, &status, 0);
+        if (info->method != INJECT_PTRACE)
+            waitpid(info->pid, &status, 0);
+        else
+            status = WEXITSTATUS(info->exitcode);
     } else {
         /* Use WNOHANG to match our Windows semantics, which does not block if
          * the child hasn't exited.  The status returned is probably not useful,
          * but the caller shouldn't look at it if they haven't waited for the
          * app to terminate.
+         * Return immediately if we are under INJECT_PTRACE because we can't wait
+         * for detached non-child process.
          */
-        waitpid(info->pid, &status, WNOHANG);
+        if (info->method != INJECT_PTRACE)
+            waitpid(info->pid, &status, WNOHANG);
+        else
+            status = WEXITSTATUS(info->exitcode);
     }
     if (info->pipe_fd != 0)
         close(info->pipe_fd);
@@ -825,6 +878,7 @@ enum { MAX_SHELL_CODE = 4096 };
 #        define USER_REGS_TYPE user_regs_struct
 #        define REG_PC_FIELD IF_X64_ELSE(rip, eip)
 #        define REG_SP_FIELD IF_X64_ELSE(rsp, esp)
+#        define REG_DI_FIELD IF_X64_ELSE(rdi, edi)
 #        define REG_RETVAL_FIELD IF_X64_ELSE(rax, eax)
 #    elif defined(DR_HOST_ARM)
 /* On AArch32, glibc uses user_regs instead of user_regs_struct.
@@ -842,14 +896,58 @@ enum { MAX_SHELL_CODE = 4096 };
 #        define REG_RETVAL_FIELD uregs[0] /* r0 in user_regs */
 #    elif defined(DR_HOST_AARCH64)
 #        define USER_REGS_TYPE user_pt_regs
+#        define USER_VREGS_TYPE user_fpsimd_struct
 #        define REG_PC_FIELD pc
 #        define REG_SP_FIELD sp
 #        define REG_RETVAL_FIELD regs[0] /* x0 in user_regs_struct */
+#    elif defined(DR_HOST_RISCV64)
+#        define USER_REGS_TYPE user_regs_struct
+#        define REG_PC_FIELD pc
+#        define REG_SP_FIELD sp
+#        define REG_RETVAL_FIELD a0
+#    endif
+
+#    if defined(DR_HOST_AARCH64)
+#        define MAX_SUPPORTED_SVE_VECTOR_LENGTH sizeof(dr_simd_t)
 #    endif
 
 enum { REG_PC_OFFSET = offsetof(struct USER_REGS_TYPE, REG_PC_FIELD) };
 
 #    define APP instrlist_append
+#    define PRE instrlist_prepend
+
+/* XXX: Ideally we'd use syscall_instr_length() in arch.c but that requires some
+ * movement or refactoring to get it into a common file/library.
+ */
+static inline size_t
+system_call_length(dr_isa_mode_t mode)
+{
+#    if defined(X86)
+    ASSERT(INT_LENGTH == SYSCALL_LENGTH);
+    ASSERT(SYSENTER_LENGTH == SYSCALL_LENGTH);
+    return SYSCALL_LENGTH;
+#    elif defined(AARCH64)
+    return SVC_LENGTH;
+#    elif defined(ARM)
+    return mode == DR_ISA_ARM_THUMB ? SVC_THUMB_LENGTH : SVC_ARM_LENGTH;
+#    elif defined(RISCV64)
+    return SYSCALL_LENGTH;
+#    else
+#        error Unsupported arch.
+#    endif
+}
+
+#    if defined(X86)
+/* X86s are little endian */
+enum { SYSCALL_AS_SHORT = 0x050f, SYSENTER_AS_SHORT = 0x340f, INT80_AS_SHORT = 0x80cd };
+#    elif defined(AARCH64)
+enum { SVC_RAW = 0xd4000001 };
+#    elif defined(ARM)
+/* XXX: The arm one *could* have a predicate so the 1st nibble could be <0xe. */
+enum { SVC_ARM_RAW = 0xef000000, SVC_THUMB_RAW = 0xdf00 };
+#    endif
+
+enum { ERESTARTSYS = 512, ERESTARTNOINTR = 513, ERESTARTNOHAND = 514 };
 
 static bool op_exec_gdb = false;
 
@@ -869,14 +967,17 @@ typedef struct _enum_name_pair_t {
 static const enum_name_pair_t pt_req_map[] = { { PTRACE_TRACEME, "PTRACE_TRACEME" },
                                                { PTRACE_PEEKTEXT, "PTRACE_PEEKTEXT" },
                                                { PTRACE_PEEKDATA, "PTRACE_PEEKDATA" },
-                                               { PTRACE_PEEKUSER, "PTRACE_PEEKUSER" },
                                                { PTRACE_POKETEXT, "PTRACE_POKETEXT" },
                                                { PTRACE_POKEDATA, "PTRACE_POKEDATA" },
-                                               { PTRACE_POKEUSER, "PTRACE_POKEUSER" },
                                                { PTRACE_CONT, "PTRACE_CONT" },
                                                { PTRACE_KILL, "PTRACE_KILL" },
                                                { PTRACE_SINGLESTEP, "PTRACE_SINGLESTEP" },
-#    ifndef DR_HOST_AARCH64
+#    ifdef DR_HOST_AARCH64
+                                               { PTRACE_GETREGSET, "PTRACE_GETREGSET" },
+                                               { PTRACE_SETREGSET, "PTRACE_SETREGSET" },
+#    else
+                                               { PTRACE_PEEKUSER, "PTRACE_PEEKUSER" },
+                                               { PTRACE_POKEUSER, "PTRACE_POKEUSER" },
                                                { PTRACE_GETREGS, "PTRACE_GETREGS" },
                                                { PTRACE_SETREGS, "PTRACE_SETREGS" },
                                                { PTRACE_GETFPREGS, "PTRACE_GETFPREGS" },
@@ -933,13 +1034,102 @@ our_ptrace(int request, pid_t pid, void *addr, void *data)
 static long
 our_ptrace_getregs(pid_t pid, struct USER_REGS_TYPE *regs)
 {
-#    ifdef AARCH64
+#    if defined(AARCH64) || defined(RISCV64)
     struct iovec iovec = { regs, sizeof(*regs) };
     return our_ptrace(PTRACE_GETREGSET, pid, (void *)NT_PRSTATUS, &iovec);
 #    else
     return our_ptrace(PTRACE_GETREGS, pid, NULL, regs);
 #    endif
 }
+
+#    if defined(DR_HOST_AARCH64)
+static long
+our_ptrace_getvregs(pid_t pid, struct USER_VREGS_TYPE *vregs)
+{
+    struct iovec iovec = { vregs, sizeof(*vregs) };
+    return our_ptrace(PTRACE_GETREGSET, pid, (void *)NT_FPREGSET, &iovec);
+}
+
+static long
+our_ptrace_get_sve(pid_t pid, struct user_sve_header *sve_header, size_t size)
+{
+    ASSERT(size >= sizeof(struct user_sve_header));
+    struct iovec iovec = { sve_header, size };
+    return our_ptrace(PTRACE_GETREGSET, pid, (void *)NT_ARM_SVE, &iovec);
+}
+
+static long
+our_ptrace_set_sve(pid_t pid, struct user_sve_header *sve_state)
+{
+    struct iovec iovec = { sve_state, sve_state->size };
+    return our_ptrace(PTRACE_SETREGSET, pid, (void *)NT_ARM_SVE, &iovec);
+}
+
+/* Get the SVE register state for the target process.
+ * Returns false if an error occurs.
+ * On success sve_state_out will be set to a heap allocated user_sve_header containing
+ * the SVE register state if the target process has SVE state active, or NULL if SVE
+ * state is not active.
+ * sve_state_out is allocated using malloc which is safe because this code will never
+ * be run in DR managed mode. The caller is responsible for freeing it using free() when
+ * it is no longer needed.
+ */
+static bool
+get_sve_state(pid_t pid, struct user_sve_header **sve_state_out)
+{
+    /* First we need to read the header to find out the vector length. */
+    struct user_sve_header sve_header = { 0 };
+    if (our_ptrace_get_sve(pid, &sve_header, sizeof(sve_header)) < 0) {
+        /* No SVE support. */
+        *sve_state_out = NULL;
+        return true;
+    }
+
+    if (sve_header.vl > MAX_SUPPORTED_SVE_VECTOR_LENGTH) {
+        /* DynamoRIO supports a maximum of 64-byte (512-bit) vectors so we can't
+         * attach to this process.
+         */
+        fprintf(stderr,
+                "Unable to attach to process. The target process has an SVE vector "
+                "length larger than the maxumum supported by DynamoRIO\n");
+        *sve_state_out = NULL;
+        return false;
+    }
+
+    /* Now we know the vector length we can allocate enough memory to contain the
+     * register data and call our_ptrace_get_sve() again to get the register data (if
+     * there is any).
+     */
+    const size_t full_sve_state_size =
+        SVE_PT_SIZE(sve_vq_from_vl(sve_header.vl), SVE_PT_REGS_SVE);
+
+    /* It is safe to use malloc here because this code will never be run in DR managed
+     * mode.
+     */
+    *sve_state_out = malloc(full_sve_state_size);
+
+    if (*sve_state_out == NULL)
+        return false;
+
+    const bool ptrace_error =
+        our_ptrace_get_sve(pid, *sve_state_out, full_sve_state_size) < 0;
+    ASSERT(!ptrace_error);
+
+    /* Finally we need to check if the target actually has SVE state. Only tasks which
+     * have executed an SVE instruction since the last syscall will have active SVE
+     * state.
+     */
+    const bool has_active_sve_state =
+        !ptrace_error && TESTANY((*sve_state_out)->flags, SVE_PT_REGS_SVE);
+
+    if (!has_active_sve_state) {
+        free(*sve_state_out);
+        *sve_state_out = NULL;
+    }
+
+    return !ptrace_error;
+}
+#    endif
 
 static long
 our_ptrace_setregs(pid_t pid, struct USER_REGS_TYPE *regs)
@@ -960,7 +1150,7 @@ ptrace_read_memory(pid_t pid, void *dst, void *src, size_t len)
     uint i;
     ptr_int_t *dst_reg = dst;
     ptr_int_t *src_reg = src;
-    ASSERT(len % sizeof(ptr_int_t) == 0); /* FIXME handle */
+    ASSERT(len % sizeof(ptr_int_t) == 0); /* XXX handle */
     for (i = 0; i < len / sizeof(ptr_int_t); i++) {
         /* We use a raw syscall instead of the libc wrapper, so the value read
          * is stored in the data pointer instead of being returned in r.
@@ -980,7 +1170,7 @@ ptrace_write_memory(pid_t pid, void *dst, void *src, size_t len)
     uint i;
     ptr_int_t *dst_reg = dst;
     ptr_int_t *src_reg = src;
-    ASSERT(len % sizeof(ptr_int_t) == 0); /* FIXME handle */
+    ASSERT(len % sizeof(ptr_int_t) == 0); /* XXX handle */
     for (i = 0; i < len / sizeof(ptr_int_t); i++) {
         long r = our_ptrace(PTRACE_POKEDATA, pid, &dst_reg[i], (void *)src_reg[i]);
         if (r < 0)
@@ -991,53 +1181,77 @@ ptrace_write_memory(pid_t pid, void *dst, void *src, size_t len)
 
 /* Push a pointer to a string to the stack.  We create a fake instruction with
  * raw bytes equal to the string we want to put in the injectee.  The call will
- * pass these invalid instruction bytes, and the return address on the stack
- * will point to the string.
+ * skip over these invalid instruction bytes and set the return address to point
+ * to the string.
  */
 static void
 gen_push_string(void *dc, instrlist_t *ilist, const char *msg)
 {
-#    ifdef X86
     instr_t *after_msg = INSTR_CREATE_label(dc);
-    instr_t *msg_instr = instr_build_bits(dc, OP_UNDECODED, strlen(msg) + 1);
-    APP(ilist, INSTR_CREATE_call(dc, opnd_create_instr(after_msg)));
+    size_t msg_space = strlen(msg) + 1;
+#    ifdef AARCHXX
+    msg_space = ALIGN_FORWARD(msg_space, 4);
+#    endif
+    instr_t *msg_instr = instr_build_bits(dc, OP_UNDECODED, msg_space);
+    APP(ilist, XINST_CREATE_call(dc, opnd_create_instr(after_msg)));
     instr_set_raw_bytes(msg_instr, (byte *)msg, strlen(msg) + 1);
     instr_set_raw_bits_valid(msg_instr, true);
     APP(ilist, msg_instr);
     APP(ilist, after_msg);
-#    else
-    /* FIXME i#1551: NYI on ARM */
-    ASSERT_NOT_IMPLEMENTED(false);
-#    endif /* X86 */
+#    if defined(AARCH64)
+    /* Maintain 16-byte alignment by pushing a 2nd reg. */
+    APP(ilist,
+        /* XXX i#2440: There should be a convenience creation macro for this. */
+        instr_create_2dst_4src(dc, OP_stp,
+                               opnd_create_base_disp(DR_REG_XSP, DR_REG_NULL, 0,
+                                                     -2 * (int)sizeof(void *), OPSZ_16),
+                               opnd_create_reg(DR_REG_XSP), opnd_create_reg(DR_REG_LR),
+                               opnd_create_reg(DR_REG_R0), opnd_create_reg(DR_REG_XSP),
+                               OPND_CREATE_INT8(-2 * (int)sizeof(void *))));
+#    elif defined(ARM)
+    /* Handle Thumb mode setting the LSB and skipping the first char ('/'). */
+    APP(ilist,
+        INSTR_CREATE_bic(dc, opnd_create_reg(DR_REG_LR), opnd_create_reg(DR_REG_LR),
+                         OPND_CREATE_INT8(1)));
+    APP(ilist, INSTR_CREATE_push(dc, opnd_create_reg(DR_REG_LR)));
+#    endif
 }
 
 static void
 gen_syscall(void *dc, instrlist_t *ilist, int sysnum, uint num_opnds, opnd_t *args)
 {
-#    ifdef X86
     uint i;
     ASSERT(num_opnds <= MAX_SYSCALL_ARGS);
     APP(ilist,
-        INSTR_CREATE_mov_imm(dc, opnd_create_reg(DR_REG_XAX),
-                             OPND_CREATE_INTPTR(sysnum)));
+        XINST_CREATE_load_int(dc, opnd_create_reg(DR_SYSNUM_REG),
+                              OPND_CREATE_INT32(sysnum)));
     for (i = 0; i < num_opnds; i++) {
-        if (opnd_is_immed_int(args[i]) || opnd_is_instr(args[i])) {
-            APP(ilist,
-                INSTR_CREATE_mov_imm(dc, opnd_create_reg(syscall_regparms[i]), args[i]));
+        if (opnd_is_immed_int(args[i])) {
+            instrlist_insert_mov_immed_ptrsz(dc, opnd_get_immed_int(args[i]),
+                                             opnd_create_reg(syscall_regparms[i]), ilist,
+                                             instrlist_last(ilist), NULL, NULL);
+        } else if (opnd_is_instr(args[i])) {
+            instrlist_insert_mov_instr_addr(dc, opnd_get_instr(args[i]), NULL,
+                                            opnd_create_reg(syscall_regparms[i]), ilist,
+                                            instrlist_last(ilist), NULL, NULL);
         } else if (opnd_is_base_disp(args[i])) {
             APP(ilist,
-                INSTR_CREATE_mov_ld(dc, opnd_create_reg(syscall_regparms[i]), args[i]));
+                XINST_CREATE_load(dc, opnd_create_reg(syscall_regparms[i]), args[i]));
+        } else {
+            ASSERT_NOT_IMPLEMENTED(false);
         }
     }
     /* XXX: Reuse create_syscall_instr() in emit_utils.c. */
+#    ifdef X86
 #        ifdef X64
     APP(ilist, INSTR_CREATE_syscall(dc));
 #        else
-    APP(ilist, INSTR_CREATE_int(dc, OPND_CREATE_INT8((char)0x80)));
+    APP(ilist, INSTR_CREATE_int(dc, OPND_CREATE_INT8((sbyte)0x80)));
 #        endif
+#    elif defined(RISCV64)
+    APP(ilist, INSTR_CREATE_ecall(dc));
 #    else
-    /* FIXME i#1551: NYI on ARM */
-    ASSERT_NOT_IMPLEMENTED(false);
+    APP(ilist, INSTR_CREATE_svc(dc, opnd_create_immed_int((sbyte)0x0, OPSZ_1)));
 #    endif /* X86 */
 }
 
@@ -1047,7 +1261,7 @@ gen_print(void *dc, instrlist_t *ilist, const char *msg)
 {
     opnd_t args[MAX_SYSCALL_ARGS];
     args[0] = OPND_CREATE_INTPTR(2);
-    args[1] = OPND_CREATE_MEMPTR(DR_REG_XSP, 0);  /* msg is on TOS. */
+    args[1] = OPND_CREATE_MEMPTR(DR_REG_XSP, 0); /* msg is on TOS. */
     args[2] = OPND_CREATE_INTPTR(strlen(msg));
     gen_push_string(dc, ilist, msg);
     gen_syscall(dc, ilist, SYSNUM_NO_CANCEL(SYS_write), 3, args);
@@ -1059,7 +1273,14 @@ unexpected_trace_event(process_id_t pid, int sig_expected, int sig_actual)
 {
     if (verbose) {
         app_pc err_pc;
+#    ifdef AARCH64
+        /* PEEKUSER is not available. */
+        struct USER_REGS_TYPE regs;
+        our_ptrace_getregs(pid, &regs);
+        err_pc = (app_pc)regs.REG_PC_FIELD;
+#    else
         our_ptrace(PTRACE_PEEKUSER, pid, (void *)REG_PC_OFFSET, &err_pc);
+#    endif
         fprintf(stderr,
                 "Unexpected trace event.  Expected %s, got signal %d "
                 "at pc: %p\n",
@@ -1110,11 +1331,46 @@ injectee_run_get_retval(dr_inject_info_t *info, void *dc, instrlist_t *ilist)
     app_pc pc;
     long r;
     ptr_int_t failure = -EUNATCH; /* Unlikely to be used by most syscalls. */
+    dr_isa_mode_t app_mode;
 
     /* Get register state before executing the shellcode. */
     r = our_ptrace_getregs(info->pid, &regs);
     if (r < 0)
         return r;
+#    if defined(DR_HOST_AARCH64)
+    struct user_sve_header *sve_state = NULL;
+    if (!get_sve_state(info->pid, &sve_state))
+        return failure;
+#    endif
+
+#    if defined(X86)
+    app_mode = IF_X64_ELSE(DR_ISA_AMD64, DR_ISA_IA32);
+#    elif defined(AARCH64)
+    app_mode = DR_ISA_ARM_A64;
+#    elif defined(ARM)
+    app_mode = TESTANY(EFLAGS_T, regs.uregs[16]) ? DR_ISA_ARM_THUMB : DR_ISA_ARM_A32;
+#    elif defined(RISCV64)
+    app_mode = DR_ISA_RV64;
+#    else
+#        error Unsupported arch.
+#    endif
+
+    /* For cases where we are not actally getting blocked by a syscall
+     * and wait_syscall is not specified
+     * need to pad nop everytime we restart process with PTRACE_CONT variations
+     * number_of_null_bytes = sizeof(syscall_instr) / sizeof(nop_instr)
+     */
+    uint nop_times = 0;
+#    ifdef X86
+    nop_times = system_call_length(app_mode);
+#    else
+    /* The syscall will match the nop length regardless of the mode. */
+    nop_times = 1;
+#    endif
+    int i;
+    for (i = 0; i < nop_times; i++) {
+        PRE(ilist, XINST_CREATE_nop(dc));
+    }
 
     /* Use the current PC's page, since it's executable.  Our shell code is
      * always less than one page, so we won't overflow.
@@ -1125,17 +1381,16 @@ injectee_run_get_retval(dr_inject_info_t *info, void *dc, instrlist_t *ilist)
     APP(ilist, XINST_CREATE_debug_instr(dc));
     if (verbose) {
         fprintf(stderr, "injecting code:\n");
-#    if defined(INTERNAL) || defined(DEBUG) || defined(CLIENT_INTERFACE)
         /* XXX: This disas call aborts on our raw bytes instructions.  Can we
          * teach DR's disassembler to avoid those instrs?
          */
         instrlist_disassemble(dc, pc, ilist, STDERR);
-#    endif
     }
 
     /* Encode ilist into shellcode. */
     end_pc = instrlist_encode_to_copy(dc, ilist, shellcode, pc,
                                       &shellcode[MAX_SHELL_CODE], true /*jmp*/);
+    ASSERT(end_pc != NULL);
     code_size = end_pc - &shellcode[0];
     code_size = ALIGN_FORWARD(code_size, sizeof(reg_t));
     ASSERT(code_size <= MAX_SHELL_CODE);
@@ -1146,17 +1401,45 @@ injectee_run_get_retval(dr_inject_info_t *info, void *dc, instrlist_t *ilist)
         !ptrace_write_memory(info->pid, pc, shellcode, code_size))
         return failure;
 
-    /* Run it! */
-    our_ptrace(PTRACE_POKEUSER, info->pid, (void *)REG_PC_OFFSET, pc);
+    /* Run it!
+     * While under Ptrace during blocking syscall, upon continuing
+     * execution, tracee PC will be set back to syscall instruction
+     * PC = PC - sizeof(syscall). We have to add offsets to compensate.
+     */
+    uint offset = 0;
+    if (!info->wait_syscall)
+        offset = system_call_length(app_mode);
+#    ifdef AARCH64
+    /* POKEUSER is not available. */
+    ptr_int_t saved_pc = regs.REG_PC_FIELD;
+    regs.REG_PC_FIELD = (ptr_int_t)(pc + offset);
+    r = our_ptrace_setregs(info->pid, &regs);
+    if (r < 0)
+        return r;
+    regs.REG_PC_FIELD = saved_pc;
+#    else
+    r = our_ptrace(PTRACE_POKEUSER, info->pid, (void *)REG_PC_OFFSET, pc + offset);
+    if (r < 0)
+        return r;
+#    endif
     if (!continue_until_break(info->pid))
         return failure;
 
     /* Get return value. */
     ret = failure;
+#    ifdef AARCH64
+    /* PEEKUSER is not available. */
+    struct USER_REGS_TYPE modified_regs;
+    r = our_ptrace_getregs(info->pid, &modified_regs);
+    if (r < 0)
+        return r;
+    ret = modified_regs.REG_RETVAL_FIELD;
+#    else
     r = our_ptrace(PTRACE_PEEKUSER, info->pid,
                    (void *)offsetof(struct USER_REGS_TYPE, REG_RETVAL_FIELD), &ret);
     if (r < 0)
         return r;
+#    endif
 
     /* Put back original code and registers. */
     if (!ptrace_write_memory(info->pid, pc, orig_code, code_size))
@@ -1164,6 +1447,14 @@ injectee_run_get_retval(dr_inject_info_t *info, void *dc, instrlist_t *ilist)
     r = our_ptrace_setregs(info->pid, &regs);
     if (r < 0)
         return r;
+#    if defined(DR_HOST_AARCH64)
+    if (sve_state != NULL) {
+        r = our_ptrace_set_sve(info->pid, sve_state);
+        free(sve_state);
+        if (r < 0)
+            return r;
+    }
+#    endif
 
     return ret;
 }
@@ -1176,6 +1467,7 @@ injectee_open(dr_inject_info_t *info, const char *path, int flags, mode_t mode)
     instrlist_t *ilist = instrlist_create(dc);
     opnd_t args[MAX_SYSCALL_ARGS];
     int num_args = 0;
+
     gen_push_string(dc, ilist, path);
 #    ifndef SYS_open
     args[num_args++] = OPND_CREATE_INTPTR(AT_FDCWD);
@@ -1217,15 +1509,15 @@ injectee_mmap(dr_inject_info_t *info, void *addr, size_t sz, int prot, int flags
  * injector_dr_fd to injectee_dr_fd to map the former to the latter.
  */
 static byte *
-injectee_map_file(file_t f, size_t *size INOUT, uint64 offs, app_pc addr, uint prot,
-                  map_flags_t map_flags)
+injectee_map_file(file_t f, size_t *size DR_PARAM_INOUT, uint64 offs, app_pc addr,
+                  uint prot, map_flags_t map_flags)
 {
     int fd;
     int flags = 0;
     app_pc r;
-    if (TEST(MAP_FILE_COPY_ON_WRITE, map_flags))
+    if (TESTANY(MAP_FILE_COPY_ON_WRITE, map_flags))
         flags |= MAP_PRIVATE;
-    if (TEST(MAP_FILE_FIXED, map_flags))
+    if (TESTANY(MAP_FILE_FIXED, map_flags))
         flags |= MAP_FIXED;
     /* MAP_FILE_IMAGE is a nop on Linux. */
     if (f == injector_dr_fd)
@@ -1268,6 +1560,17 @@ injectee_unmap(byte *addr, size_t size)
     return true;
 }
 
+static byte *
+injectee_overlap_map_file(file_t f, size_t *size DR_PARAM_INOUT, uint64 offs, app_pc addr,
+                          uint prot, map_flags_t map_flags)
+{
+    /* This works only if the user wants the new mapping only at the given addr,
+     * and it is acceptable to unmap any mapping already existing there.
+     */
+    ASSERT(TESTANY(MAP_FILE_FIXED, map_flags));
+    return injectee_map_file(f, size, offs, addr, prot, map_flags);
+}
+
 /* Do an mprotect syscall in the injectee. */
 static bool
 injectee_prot(byte *addr, size_t size, uint prot /*MEMPROT_*/)
@@ -1290,13 +1593,67 @@ injectee_prot(byte *addr, size_t size, uint prot /*MEMPROT_*/)
     return true;
 }
 
+static void *
+injectee_memset(void *dst, int val, size_t size)
+{
+    ptr_int_t *dst_addr = dst;
+    ptr_int_t src_val;
+    long r;
+    if (!ALIGNED(dst_addr, sizeof(ptr_int_t))) {
+        dst_addr = (ptr_int_t *)ALIGN_BACKWARD(dst_addr, sizeof(ptr_int_t));
+        r = our_ptrace(PTRACE_PEEKDATA, injector_info->pid, dst_addr, &src_val);
+        if (r < 0)
+            return NULL;
+        /* Set the top bytes to val. */
+        uint offs = (byte *)dst - (byte *)dst_addr;
+        byte *dst_byte = (byte *)&src_val;
+        dst_byte += offs;
+        for (int i = 0; i < sizeof(ptr_int_t) - offs; i++, dst_byte++)
+            *dst_byte = val;
+        r = our_ptrace(PTRACE_POKEDATA, injector_info->pid, dst_addr, (void *)src_val);
+        if (r < 0)
+            return NULL;
+        dst_addr++;
+    }
+    src_val = 0;
+    for (uint i = 0; i < sizeof(ptr_int_t); i++)
+        src_val |= val << 8 * i;
+    for (; dst_addr + 1 < (ptr_int_t *)((byte *)dst + size); dst_addr++) {
+        r = our_ptrace(PTRACE_POKEDATA, injector_info->pid, dst_addr, (void *)src_val);
+        if (r < 0)
+            return NULL;
+    }
+    if (dst_addr + 1 > (ptr_int_t *)((byte *)dst + size)) {
+        r = our_ptrace(PTRACE_PEEKDATA, injector_info->pid, dst_addr, &src_val);
+        if (r < 0)
+            return NULL;
+        /* Set the bottom bytes to val. */
+        int offs = (byte *)(dst_addr + 1) - ((byte *)dst + size);
+        byte *dst_byte = (byte *)&src_val;
+        for (int i = 0; i < sizeof(ptr_int_t) - offs; i++, dst_byte++)
+            *dst_byte = val;
+        r = our_ptrace(PTRACE_POKEDATA, injector_info->pid, dst_addr, (void *)src_val);
+        if (r < 0)
+            return NULL;
+        dst_addr++;
+    }
+    return dst;
+}
+
 /* Convert a user_regs_struct used by the ptrace API into DR's priv_mcontext_t
  * struct.
  */
 static void
+#    if defined(DR_HOST_AARCH64)
+user_regs_to_mc(priv_mcontext_t *mc, struct USER_REGS_TYPE *regs,
+                struct USER_VREGS_TYPE *vregs, struct user_sve_header *sve_header)
+#    else
 user_regs_to_mc(priv_mcontext_t *mc, struct USER_REGS_TYPE *regs)
+#    endif
 {
-#    ifdef X86
+#    if defined(DR_HOST_NOT_TARGET)
+    ASSERT_NOT_IMPLEMENTED(false);
+#    elif defined(X86)
 #        ifdef X64
     mc->rip = (app_pc)regs->rip;
     mc->rax = regs->rax;
@@ -1345,8 +1702,76 @@ user_regs_to_mc(priv_mcontext_t *mc, struct USER_REGS_TYPE *regs)
     mc->r15 = regs->uregs[15];
     mc->cpsr = regs->uregs[16];
 #    elif defined(AARCH64)
-    ASSERT_NOT_IMPLEMENTED(false); /* FIXME i#1569 */
-#    endif /* X86/ARM */
+    mc->r0 = regs->regs[0];
+    mc->r1 = regs->regs[1];
+    mc->r2 = regs->regs[2];
+    mc->r3 = regs->regs[3];
+    mc->r4 = regs->regs[4];
+    mc->r5 = regs->regs[5];
+    mc->r6 = regs->regs[6];
+    mc->r7 = regs->regs[7];
+    mc->r8 = regs->regs[8];
+    mc->r9 = regs->regs[9];
+    mc->r10 = regs->regs[10];
+    mc->r11 = regs->regs[11];
+    mc->r12 = regs->regs[12];
+    mc->r13 = regs->regs[13];
+    mc->r14 = regs->regs[14];
+    mc->r15 = regs->regs[15];
+    mc->r16 = regs->regs[16];
+    mc->r17 = regs->regs[17];
+    mc->r18 = regs->regs[18];
+    mc->r19 = regs->regs[19];
+    mc->r20 = regs->regs[20];
+    mc->r21 = regs->regs[21];
+    mc->r22 = regs->regs[22];
+    mc->r23 = regs->regs[23];
+    mc->r24 = regs->regs[24];
+    mc->r25 = regs->regs[25];
+    mc->r26 = regs->regs[26];
+    mc->r27 = regs->regs[27];
+    mc->r28 = regs->regs[28];
+    mc->r29 = regs->regs[29];
+    mc->r30 = regs->regs[30];
+    mc->sp = regs->sp;
+    mc->pc = (app_pc)regs->pc;
+    mc->nzcv = regs->pstate & 0xF0000000;
+
+    if (sve_header != NULL) {
+        /* Process has active SVE state. */
+        ASSERT(TESTANY(SVE_PT_REGS_SVE, sve_header->flags));
+        ASSERT(sve_header->vl <= MAX_SUPPORTED_SVE_VECTOR_LENGTH);
+
+        /* The ptrace macros calculate sizes based on "vq": the vector length in
+         * quadwords.
+         */
+        const size_t vq = sve_vq_from_vl(sve_header->vl);
+
+        for (size_t i = 0; i < MCXT_NUM_SIMD_SVE_SLOTS; i++) {
+            memcpy(&mc->simd[i].u64[0],
+                   (byte *)sve_header + SVE_PT_SVE_ZREG_OFFSET(vq, i),
+                   SVE_PT_SVE_ZREG_SIZE(vq));
+        }
+
+        for (size_t i = 0; i < MCXT_NUM_SVEP_SLOTS; i++) {
+            memcpy(&mc->svep[i].u16[0],
+                   (byte *)sve_header + SVE_PT_SVE_PREG_OFFSET(vq, i),
+                   SVE_PT_SVE_PREG_SIZE(vq));
+        }
+        memcpy(&mc->ffr.u16[0], (byte *)sve_header + SVE_PT_SVE_FFR_OFFSET(vq),
+               SVE_PT_SVE_FFR_SIZE(vq));
+    } else {
+        /* Process does not have active SVE state so fall back to using vregs. */
+        int i;
+        for (i = 0; i < MCXT_NUM_SIMD_SVE_SLOTS; i++) {
+            memcpy(&mc->simd[i].q, &vregs->vregs[i], sizeof(mc->simd->q));
+        }
+    }
+
+    mc->fpsr = vregs->fpsr;
+    mc->fpcr = vregs->fpcr;
+
+#    endif /* X86/ARM/AARCH64 */
 }
 
 /* Detach from the injectee and re-exec ourselves as gdb with --pid.  This is
@@ -1394,12 +1819,74 @@ detach_and_exec_gdb(process_id_t pid, const char *library_path)
     ASSERT(false && "failed to exec gdb?");
 }
 
+/* singlestep traced process
+ */
+static bool
+ptrace_singlestep(process_id_t pid)
+{
+    if (our_ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL) < 0)
+        return false;
+
+    if (!wait_until_signal(pid, SIGTRAP))
+        return false;
+
+    return true;
+}
+
+/* Check if prev bytes form a syscall.
+ * For X86, we can't be sure if previous bytes are actually a syscall due to
+ * variations in instruction size. Do additional checks if that is the case.
+ */
+static bool
+is_prev_bytes_syscall(process_id_t pid, app_pc src_pc, dr_isa_mode_t app_mode)
+{
+    app_pc syscall_pc = src_pc - system_call_length(app_mode);
+    /* ptrace_read_memory reads by multiple of sizeof(ptr_int_t) */
+    byte instr_bytes[sizeof(ptr_int_t)];
+    ptrace_read_memory(pid, instr_bytes, syscall_pc, sizeof(ptr_int_t));
+#    if defined(X86)
+#        ifdef X64
+    if (*(unsigned short *)instr_bytes == SYSCALL_AS_SHORT)
+        return true;
+#        else
+    if (*(unsigned short *)instr_bytes == SYSENTER_AS_SHORT ||
+        *(unsigned short *)instr_bytes == INT80_AS_SHORT)
+        return true;
+#        endif
+#    elif defined(AARCH64)
+    if (*(unsigned int *)instr_bytes == SVC_RAW)
+        return true;
+#    elif defined(ARM)
+    if (app_mode == DR_ISA_ARM_THUMB && *(unsigned short *)instr_bytes == SVC_THUMB_RAW)
+        return true;
+    if (app_mode == DR_ISA_ARM_A32 && *(unsigned int *)instr_bytes == SVC_ARM_RAW)
+        return true;
+#    endif
+    return false;
+}
+
+/* i#38: Quick explaination for PC offsetting and NOP sleds:
+ * If ptrace happens in middle of blocking syscalls, tracer will get PC address at
+ * the next instruction after syscall, but will set it back to previous syscall
+ * instruction by subtracting PC (PC -= (byte)sizeof(syscall)).
+ * We can then issue PTRACE_SINGLESTEP to wait for syscall completion and
+ * get out of syscall context to get normal ptrace PC behaviours (wait_syscall flag).
+ * Else we start injection immidiately. This cause PC to subtract sizeof(syscall) bytes
+ * every time we continue for the rest of ptrace session until PTRACE_DETACH.
+ * To compensate we set PC += (byte)sizeof(syscall) before PTRACE_CONTs
+ * and add nop sleds before our shellcodes and DR entry point.
+ * Errno masking also required to minimize app breakage.
+ * Detailed infomations in issue page.
+ */
 bool
 inject_ptrace(dr_inject_info_t *info, const char *library_path)
 {
     long r;
     int dr_fd;
     struct USER_REGS_TYPE regs;
+#    if defined(DR_HOST_AARCH64)
+    struct USER_VREGS_TYPE vregs;
+#    endif
     ptrace_stack_args_t args;
     app_pc injected_base;
     app_pc injected_dr_start;
@@ -1428,15 +1915,21 @@ inject_ptrace(dr_inject_info_t *info, const char *library_path)
             return false;
         if (!continue_until_break(info->pid))
             return false;
+    } else {
+        if (info->wait_syscall) {
+            /* We are attached to target process, singlestep to make sure not returning
+             * from blocked syscall.
+             */
+            if (!ptrace_singlestep(info->pid))
+                return false;
+        }
     }
 
     /* Open libdynamorio.so as readonly in the child. */
     dr_fd = injectee_open(info, library_path, O_RDONLY, 0);
     if (dr_fd < 0) {
         if (verbose) {
-            fprintf(stderr,
-                    "Unable to open libdynamorio.so in injectee (%d): "
-                    "%s\n",
+            fprintf(stderr, "Unable to open %s in injectee (%d): %s\n ", library_path,
                     -dr_fd, strerror(-dr_fd));
         }
         return false;
@@ -1451,9 +1944,10 @@ inject_ptrace(dr_inject_info_t *info, const char *library_path)
     injector_info = info;
     injector_dr_fd = loader.fd;
     injectee_dr_fd = dr_fd;
-    injected_base = elf_loader_map_phdrs(&loader, true /*fixed*/, injectee_map_file,
-                                         injectee_unmap, injectee_prot, NULL,
-                                         MODLOAD_SEPARATE_PROCESS /*!reachable*/);
+    injected_base = elf_loader_map_phdrs(
+        &loader, true /*fixed*/, injectee_map_file, injectee_unmap, injectee_prot, NULL,
+        injectee_memset, MODLOAD_SEPARATE_PROCESS /*!reachable*/,
+        injectee_overlap_map_file);
     if (injected_base == NULL) {
         if (verbose)
             fprintf(stderr, "Unable to mmap libdynamorio.so in injectee\n");
@@ -1464,17 +1958,84 @@ inject_ptrace(dr_inject_info_t *info, const char *library_path)
      * XXX: Actually look up an export.
      */
     injected_dr_start = (app_pc)loader.ehdr->e_entry + loader.load_delta;
-    elf_loader_destroy(&loader);
 
     our_ptrace_getregs(info->pid, &regs);
+#    if defined(DR_HOST_AARCH64)
+    our_ptrace_getvregs(info->pid, &vregs);
+    struct user_sve_header *sve_state = NULL;
+    if (!get_sve_state(info->pid, &sve_state))
+        return false;
+#    endif
+
+    dr_isa_mode_t app_mode;
+#    if defined(X86)
+    app_mode = IF_X64_ELSE(DR_ISA_AMD64, DR_ISA_IA32);
+#    elif defined(AARCH64)
+    app_mode = DR_ISA_ARM_A64;
+#    elif defined(ARM)
+    app_mode = TESTANY(EFLAGS_T, regs.uregs[16]) ? DR_ISA_ARM_THUMB : DR_ISA_ARM_A32;
+#    elif defined(RISCV64)
+    app_mode = DR_ISA_RV64;
+#    else
+#        error Unsupported arch.
+#    endif
+
+    /* While under Ptrace during blocking syscall, upon continuing
+     * execution, tracee PC will be set back to syscall instruction
+     * PC = PC - sizeof(syscall). We have to add offsets to compensate.
+     */
+#    ifdef ARM
+    dr_isa_mode_t dr_asm_mode = DR_ISA_ARM_A32;
+#    else
+    dr_isa_mode_t dr_asm_mode = app_mode;
+#    endif
+    if (!info->wait_syscall) {
+        uint offset = system_call_length(dr_asm_mode);
+        injected_dr_start += offset;
+    }
+    elf_loader_destroy(&loader);
+
+    /* Hijacking errno value
+     * After attaching with ptrace during blocking syscall,
+     * Errno value is leaked from kernel handling
+     * Mask that value into EINTR
+     */
+    if (!info->wait_syscall) {
+        if (is_prev_bytes_syscall(info->pid, (app_pc)regs.REG_PC_FIELD, app_mode)) {
+            /* Prev bytes might match by accident, so check return value too. */
+            /* XXX i#38: If we interrupt an auto-restart syscall, we want to shift
+             * the app takeover PC back and restore the syscall number: but it's not
+             * easy to find the number.  (On some AArch64 kernels, the kernel does
+             * this for us, for both auto-restart and interruptible.)
+             */
+            if (regs.REG_RETVAL_FIELD == -ERESTARTSYS ||
+                regs.REG_RETVAL_FIELD == -ERESTARTNOINTR ||
+                regs.REG_RETVAL_FIELD == -ERESTARTNOHAND) {
+                if (verbose) {
+                    fprintf(stderr, "Post-syscall: changing %ld to -EINTR\n",
+                            (long int)regs.REG_RETVAL_FIELD);
+                }
+                regs.REG_RETVAL_FIELD = -EINTR;
+            }
+        }
+    }
 
     /* Create an injection context and "push" it onto the stack of the injectee.
      * If you need to pass more info to the injected child process, this is a
      * good place to put it.
      */
     memset(&args, 0, sizeof(args));
+#    if defined(DR_HOST_AARCH64)
+    user_regs_to_mc(&args.mc, &regs, &vregs, sve_state);
+    free(sve_state);
+#    else
     user_regs_to_mc(&args.mc, &regs);
+#    endif
     args.argc = ARGC_PTRACE_SENTINEL;
+#    ifdef ARM
+    if (app_mode == DR_ISA_ARM_THUMB)
+        args.mc.pc = PC_AS_JMP_TGT(app_mode, args.mc.pc);
+#    endif
 
     /* We need to send the home directory over.  It's hard to find the
      * environment in the injectee, and even if we could HOME might be
@@ -1483,7 +2044,7 @@ inject_ptrace(dr_inject_info_t *info, const char *library_path)
     strncpy(args.home_dir, getenv("HOME"), BUFFER_SIZE_ELEMENTS(args.home_dir));
     NULL_TERMINATE_BUFFER(args.home_dir);
 
-#    if defined(X86) || defined(AARCHXX)
+#    if defined(X86) || defined(AARCHXX) || defined(RISCV64)
     regs.REG_SP_FIELD -= REDZONE_SIZE; /* Need to preserve x64 red zone. */
     regs.REG_SP_FIELD -= sizeof(args); /* Allocate space for args. */
     regs.REG_SP_FIELD = ALIGN_BACKWARD(regs.REG_SP_FIELD, REGPARM_END_ALIGN);
@@ -1492,7 +2053,17 @@ inject_ptrace(dr_inject_info_t *info, const char *library_path)
 #        error "depends on arch stack growth direction"
 #    endif
 
+#    ifdef X86
+    /* _start for x86 assumes xdi starts out 0.  Otherwise relocation is skipped. */
+    regs.REG_DI_FIELD = 0;
+#    endif
+
     regs.REG_PC_FIELD = (ptr_int_t)injected_dr_start;
+#    ifdef ARM
+    /* DR's assembly is ARM. */
+    ASSERT(dr_asm_mode == DR_ISA_ARM_A32);
+    regs.uregs[16] &= ~EFLAGS_T;
+#    endif
     our_ptrace_setregs(info->pid, &regs);
 
     if (op_exec_gdb) {
@@ -1503,7 +2074,7 @@ inject_ptrace(dr_inject_info_t *info, const char *library_path)
     /* This should run something equivalent to dynamorio_app_init(), and then
      * return.
      * XXX: we can actually fault during dynamorio_app_init() due to safe_reads,
-     * so we have to expect SIGSEGV and let it be delivered.
+     * so we have to expect SIGSEGV or SIGBUS and let it be delivered.
      * XXX: SIGILL is delivered from signal_arch_init() and we should pass it
      * to its original handler.
      */
@@ -1511,13 +2082,23 @@ inject_ptrace(dr_inject_info_t *info, const char *library_path)
     do {
         /* Continue or deliver pending signal from status. */
         r = our_ptrace(PTRACE_CONT, info->pid, NULL, (void *)(ptr_int_t)signal);
-        if (r < 0)
+        if (r < 0) {
+            if (verbose)
+                perror("PTRACE_CONT failed");
             return false;
+        }
         r = waitpid(info->pid, &status, 0);
-        if (r < 0 || !WIFSTOPPED(status))
+        if (r < 0 || !WIFSTOPPED(status)) {
+            if (verbose) {
+                if (r < 0)
+                    perror("waitpid failed");
+                else
+                    fprintf(stderr, "bad status 0x%x\n", status);
+            }
             return false;
+        }
         signal = WSTOPSIG(status);
-    } while (signal == SIGSEGV || signal == SIGILL);
+    } while (signal == SIGSEGV || signal == SIGBUS || signal == SIGILL);
 
     /* When we get SIGTRAP, DR has initialized. */
     if (signal != SIGTRAP) {

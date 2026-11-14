@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2012-2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2012-2026 Google, Inc.  All rights reserved.
  * Copyright (c) 2008-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -46,8 +46,8 @@
 
 extern vm_area_vector_t *fcache_unit_areas; /* from fcache.c */
 
-static bool started_detach = false; /* set before synchall */
-bool doing_detach = false;          /* set after synchall */
+bool started_detach = false; /* set before synchall */
+bool doing_detach = false;   /* set after synchall */
 thread_id_t detacher_tid = INVALID_THREAD_ID;
 
 static void
@@ -197,7 +197,7 @@ thread_synch_check_state(dcontext_t *dcontext, thread_synch_permission_t desired
     }
     if (!THREAD_SYNCH_SAFE(tsd->synch_perm, desired_perm))
         return false;
-        /* barrier to keep the 1st check above on this side of the lock below */
+    /* barrier to keep the 1st check above on this side of the lock below */
 #ifdef WINDOWS
     MemoryBarrier();
 #else
@@ -273,7 +273,11 @@ is_at_do_syscall(dcontext_t *dcontext, app_pc pc, byte *esp)
 #else
         return is_after_or_restarted_do_syscall(dcontext, pc, false /*!vsys*/);
 #endif
-    } else if (get_syscall_method() == SYSCALL_METHOD_SYSENTER) {
+    } else if (get_syscall_method() ==
+               SYSCALL_METHOD_SYSENTER IF_X86_32(
+                   ||
+                   (get_syscall_method() == SYSCALL_METHOD_SYSCALL &&
+                    cpu_info.vendor == VENDOR_AMD))) {
 #ifdef WINDOWS
         if (pc == vsyscall_after_syscall) {
             if (DYNAMO_OPTION(sygate_sysenter))
@@ -318,7 +322,7 @@ is_native_thread_state_valid(dcontext_t *dcontext, app_pc pc, byte *esp)
      * instead we just check the pc for the dr dll, interception code, and
      * do_syscall regions and check the stack against the thread's dr stack
      * and the d_r_initstack, all of which we can do without grabbing any locks.
-     * That should be sufficient at this point, FIXME try to use something
+     * That should be sufficient at this point, XXX try to use something
      * like is_dynamo_address() to make this more maintainable */
     /* For sysenter system calls we also have to check the top of the stack
      * for the after_do_syscall_address to catch the do_syscall @ syscall
@@ -341,9 +345,9 @@ is_native_thread_state_valid(dcontext_t *dcontext, app_pc pc, byte *esp)
                  * xref case 9333 */
                 is_at_do_syscall(dcontext, pc, esp)) &&
             !is_on_initstack(esp) && !is_on_dstack(dcontext, esp) &&
-            IF_CLIENT_INTERFACE(!is_in_client_lib(pc) &&)
+            !is_in_client_lib(pc) &&
             /* xref PR 200067 & 222812 on client-owned native threads */
-            IF_CLIENT_INTERFACE(!IS_CLIENT_THREAD(dcontext) &&)
+            !IS_CLIENT_THREAD(dcontext) &&
 #ifdef HOT_PATCHING_INTERFACE
             /* Shouldn't be in the middle of executing a hotp_only patch.  The
              * check for being in hotp_dll is DR_WHERE_HOTPATCH because the patch can
@@ -383,7 +387,6 @@ translate_mcontext(thread_record_t *trec, priv_mcontext_t *mcontext, bool restor
     if (is_thread_currently_native(trec)) {
         /* running natively, no need to translate unless at do_syscall for an
          * intercepted-via-trampoline syscall which we allow now for case 9333 */
-#ifdef CLIENT_INTERFACE
         if (IS_CLIENT_THREAD(trec->dcontext)) {
             /* don't need to translate anything */
             LOG(THREAD_GET, LOG_SYNCH, 1,
@@ -392,7 +395,6 @@ translate_mcontext(thread_record_t *trec, priv_mcontext_t *mcontext, bool restor
                 trec->id);
             return true;
         }
-#endif
         if (is_native_thread_state_valid(trec->dcontext, (app_pc)mcontext->pc,
                                          (byte *)mcontext->xsp)) {
 #ifdef WINDOWS
@@ -421,7 +423,7 @@ translate_mcontext(thread_record_t *trec, priv_mcontext_t *mcontext, bool restor
             }
         } else {
             /* now that do_syscall is a safe spot for native threads we shouldn't get
-             * here for get context on self, FIXME - is however possible to get here
+             * here for get context on self, XXX - is however possible to get here
              * via get_context on unsuspended thread (result of which is technically
              * undefined according to MS), see get_context post sys comments
              * (should prob. synch there in which case can assert here) */
@@ -436,7 +438,7 @@ translate_mcontext(thread_record_t *trec, priv_mcontext_t *mcontext, bool restor
     if (!native_translate) {
         /* check if waiting at a good spot */
         spinmutex_lock(tsd->synch_lock);
-        res = THREAD_SYNCH_SAFE(tsd->synch_perm, THREAD_SYNCH_VALID_MCONTEXT);
+        res = THREAD_SYNCH_SAFE(tsd->synch_perm, THREAD_SYNCH_VALID_MCONTEXT_NO_XFER);
         spinmutex_unlock(tsd->synch_lock);
         if (res) {
             LOG(THREAD_GET, LOG_SYNCH, 1,
@@ -448,12 +450,10 @@ translate_mcontext(thread_record_t *trec, priv_mcontext_t *mcontext, bool restor
                 dump_mcontext(get_mcontext(trec->dcontext), THREAD_GET, DUMP_NOT_XML);
             });
             *mcontext = *get_mcontext(trec->dcontext);
-#ifdef CLIENT_INTERFACE
             if (dr_xl8_hook_exists()) {
                 if (!instrument_restore_nonfcache_state(trec->dcontext, true, mcontext))
                     return false;
             }
-#endif
             return true;
         }
     }
@@ -512,7 +512,6 @@ waiting_at_safe_spot(thread_record_t *trec, thread_synch_state_t desired_state)
     return false;
 }
 
-#ifdef CLIENT_SIDELINE
 static bool
 should_suspend_client_thread(dcontext_t *dcontext, thread_synch_state_t desired_state)
 {
@@ -520,7 +519,6 @@ should_suspend_client_thread(dcontext_t *dcontext, thread_synch_state_t desired_
     ASSERT(IS_CLIENT_THREAD(dcontext));
     return (THREAD_SYNCH_IS_CLEANED(desired_state) || dcontext->client_data->suspendable);
 }
-#endif
 
 /* checks whether the thread trec is at a spot suitable for requested define
  * desired_state
@@ -528,7 +526,7 @@ should_suspend_client_thread(dcontext_t *dcontext, thread_synch_state_t desired_
 /* Note that since trec is potentially suspended at an arbitrary point,
  * this function (and any function it calls) cannot call mutex_lock as
  * trec thread may hold a lock.  It is ok for at_safe_spot to return false if
- * it can't obtain a lock on the first try. FIXME : in the long term we may
+ * it can't obtain a lock on the first try. XXX : in the long term we may
  * want to go to a locking model that stores the thread id of the owner in
  * which case we can check for this situation directly
  */
@@ -550,24 +548,23 @@ at_safe_spot(thread_record_t *trec, priv_mcontext_t *mc,
     }
 #endif
     /* check if suspended at good spot */
-    /* FIXME: right now don't distinguish between suspend and term privileges
+    /* XXX: right now don't distinguish between suspend and term privileges
      * even though suspend is stronger requirement, are the checks below
      * sufficient */
-    /* FIXME : check with respect to flush, should be ok */
+    /* XXX : check with respect to flush, should be ok */
     /* test fcache_unit_areas.lock (from fcache.c) before calling recreate_app_state
      * since it calls in_fcache() which uses the lock (if we are in_fcache()
      * assume other locks are not a problem (so is_dynamo_address is fine)) */
     /* Right now the only dr code that ends up in the cache is our DLL main
      * (which we'll reduce/get rid of with libc independence), our takeover
      * from preinject return stack, and the callback.c interception code.
-     * FIXME : test for just these and ASSERT(!is_dynamo_address) otherwise */
+     * XXX : test for just these and ASSERT(!is_dynamo_address) otherwise */
     if (is_thread_currently_native(trec)) {
         /* thread is running native, verify is not in dr code */
-#ifdef CLIENT_INTERFACE
         /* We treat client-owned threads (such as a client nudge thread) as native and
          * consider them safe if they are in the client_lib.  Since they might own client
          * locks that could block application threads from progressing, we synchronize
-         * with them last.  FIXME - xref PR 231301 - since we can't disambiguate
+         * with them last.  XXX - xref PR 231301 - since we can't disambiguate
          * client->ntdll/gencode which is safe from client->dr->ntdll/gencode which isn't
          * we disallow both.  This could hurt synchronization efficiency if the client
          * owned thread spent most of its execution time calling out of its lib to ntdll
@@ -582,9 +579,17 @@ at_safe_spot(thread_record_t *trec, priv_mcontext_t *mc,
                  * of time holding locks.
                  */
                 (!should_suspend_client_thread(trec->dcontext, desired_state) ||
-                 trec->dcontext->client_data->mutex_count == 0);
+                 trec->dcontext->client_data->mutex_count == 0) &&
+                /* If a client thread has set is_exiting in cleanup_and_terminate, it
+                 * next increments exiting_thread_count and waits for the
+                 * thread_initexit_lock to exit: and for static DR that satisfies
+                 * is_in_client_lib(), but if we kill it then exiting_thread_count
+                 * will never decrement and we'll fail to synch.
+                 * Better to consider unsafe and let the thread exit and retry.
+                 * XXX i#7673: Adding a client join feature could avoid complexity here.
+                 */
+                !trec->dcontext->is_exiting;
         }
-#endif
         if (is_native_thread_state_valid(trec->dcontext, mc->pc, (byte *)mc->xsp)) {
             safe = true;
             /* We should always be able to translate a valid native state, but be
@@ -601,7 +606,6 @@ at_safe_spot(thread_record_t *trec, priv_mcontext_t *mc,
             }
 #endif
         }
-#ifdef CLIENT_INTERFACE
     } else if (desired_state == THREAD_SYNCH_TERMINATED_AND_CLEANED &&
                trec->dcontext->whereami == DR_WHERE_FCACHE &&
                trec->dcontext->client_data->at_safe_to_terminate_syscall) {
@@ -613,7 +617,6 @@ at_safe_spot(thread_record_t *trec, priv_mcontext_t *mc,
          * to rule out some corner cases.
          */
         safe = true;
-#endif
     } else if ((!WRITE_LOCK_HELD(&fcache_unit_areas->lock) &&
                 /* even though we only need the read lock, if our target holds it
                  * and a 3rd thread requests the write lock, we'll hang if we
@@ -683,26 +686,38 @@ void
 check_wait_at_safe_spot(dcontext_t *dcontext, thread_synch_permission_t cur_state)
 {
     thread_synch_data_t *tsd = (thread_synch_data_t *)dcontext->synch_field;
-    app_pc pc;
+#ifdef WINDOWS
     byte cxt[MAX(CONTEXT_HEAP_SIZE_OPAQUE, sizeof(priv_mcontext_t))];
+#else
+    /* On UNIX, cxt never holds an opaque sigcontext_t (see below), so we don't
+     * reserve space for one to avoid exceeding the kernel module's
+     * -Wframe-larger-than limit.
+     * XXX: Use a pre-allocated per-thread buffer to avoid the stack entirely.
+     */
+    byte cxt[sizeof(priv_mcontext_t)];
+#endif
     bool set_context = false;
     bool set_mcontext = false;
     if (tsd->pending_synch_count == 0 || cur_state == THREAD_SYNCH_NONE)
         return;
     ASSERT(tsd->pending_synch_count >= 0);
-    pc = get_mcontext(dcontext)->pc;
+    DEBUG_DECLARE(app_pc pc = get_mcontext(dcontext)->pc;)
     LOG(THREAD, LOG_SYNCH, 2, "waiting for synch with state %d (pc " PFX ")\n", cur_state,
         pc);
-    if (cur_state == THREAD_SYNCH_VALID_MCONTEXT) {
+
+    /* Both THREAD_SYNCH_VALID_MCONTEXT_NO_XFER and THREAD_SYNCH_VALID_MCONTEXT indicate
+     * a valid mcontext so check for at least THREAD_SYNCH_VALID_MCONTEXT_NO_XFER.
+     */
+    if (THREAD_SYNCH_SAFE(cur_state, THREAD_SYNCH_VALID_MCONTEXT_NO_XFER)) {
         ASSERT(!is_dynamo_address(pc));
         /* for detach must set this here and now */
-        IF_WINDOWS(IF_CLIENT_INTERFACE(set_last_error(dcontext->app_errno)));
+        IF_WINDOWS(set_last_error(dcontext->app_errno));
     }
     spinmutex_lock(tsd->synch_lock);
     tsd->synch_perm = cur_state;
     /* Since can be killed, suspended, etc. must call the exit dr hook. But, to
      * avoid races, we must do so before giving up the synch_lock. This is why
-     * that lock has to be in unprotected memory. FIXME - for single thread in
+     * that lock has to be in unprotected memory. XXX - for single thread in
      * dr this will lead to rank order violation between dr exclusivity lock
      * and the synch_lock with no easy workaround (real deadlocks possible).
      * Luckily we'll prob. never use that option. */
@@ -717,7 +732,7 @@ check_wait_at_safe_spot(dcontext_t *dcontext, thread_synch_permission_t cur_stat
      * We don't yet handle the detach case, so it still requires no system
      * calls, including the act of releasing the synch_lock
      * which is why that lock has to be a user mode spin yield lock.
-     * FIXME: we could change tsd->synch_lock back to a regular lock
+     * XXX: we could change tsd->synch_lock back to a regular lock
      * once we have detach handling system calls here.
      */
     spinmutex_unlock(tsd->synch_lock);
@@ -732,7 +747,7 @@ check_wait_at_safe_spot(dcontext_t *dcontext, thread_synch_permission_t cur_stat
             SPINLOCK_PAUSE();
         } else {
 #endif
-            /* FIXME case 10100: replace this sleep/yield with a wait_for_event() */
+            /* XXX case 10100: replace this sleep/yield with a wait_for_event() */
             synch_thread_yield();
 #ifdef WINDOWS
         }
@@ -754,8 +769,16 @@ check_wait_at_safe_spot(dcontext_t *dcontext, thread_synch_permission_t cur_stat
             set_mcontext = true;
             memcpy(cxt, tsd->set_mcontext, sizeof(*tsd->set_mcontext));
         } else {
+#ifdef WINDOWS
             set_context = true;
             memcpy(cxt, tsd->set_context, tsd->set_context_size);
+#else
+            /* tsd->set_context is set by set_synched_thread_context(), which
+             * only accepts a priv_mcontext_t on UNIX. If that changes, cxt must
+             * be enlarged to fit a sigcontext_t.
+             */
+            ASSERT_NOT_IMPLEMENTED(false);
+#endif
         }
         synch_thread_free_setcontext(tsd); /* sets to NULL for us */
     }
@@ -763,14 +786,14 @@ check_wait_at_safe_spot(dcontext_t *dcontext, thread_synch_permission_t cur_stat
     LOG(THREAD, LOG_SYNCH, 2, "done waiting for synch with state %d (pc " PFX ")\n",
         cur_state, pc);
     if (set_mcontext || set_context) {
-        /* FIXME: see comment in dispatch.c check_wait_at_safe_spot() call
+        /* XXX: see comment in dispatch.c check_wait_at_safe_spot() call
          * about problems with KSTART(fcache_* differences bet the target
          * being at the synch point vs in the cache.
          */
         if (set_mcontext)
-            thread_set_self_mcontext((priv_mcontext_t *)cxt);
+            thread_set_self_mcontext((priv_mcontext_t *)cxt, false);
         else
-            thread_set_self_context((void *)cxt);
+            thread_set_self_context((void *)cxt, false);
         ASSERT_NOT_REACHED();
     }
 }
@@ -866,11 +889,11 @@ set_synched_thread_context(thread_record_t *trec,
 
 /* This is used to limit the maximum number of times synch_with_thread or
  * synch_with_all_threads spin yield loops while waiting on an exiting thread.
- * We assert if we ever break out of the loop because of this limit.  FIXME make
+ * We assert if we ever break out of the loop because of this limit.  XXX make
  * sure this limit is large enough that if it does ever trigger it's because
  * of some kind of deadlock situation.  Breaking out of the synchronization loop
  * early is a correctness issue.  Right now the limits are large but arbitrary.
- * FIXME : once we are confident about thread synch get rid of these max loop checks.
+ * XXX : once we are confident about thread synch get rid of these max loop checks.
  * N.B.: the THREAD_SYNCH_SMALL_LOOP_MAX flag causes us to divide these by 10.
  */
 #define SYNCH_ALL_THREADS_MAXIMUM_LOOPS (DYNAMO_OPTION(synch_all_threads_max_loops))
@@ -883,7 +906,7 @@ set_synched_thread_context(thread_record_t *trec,
 
 /* for use by synch_with_* routines to wait for thread(s) */
 static void
-synch_thread_yield()
+synch_thread_yield(void)
 {
     /* xref 9400, 9488 - os_thread_yield() works ok on an UP machine, but on an MP machine
      * yield might not actually do anything (in which case we burn through to the max
@@ -935,7 +958,7 @@ synch_with_thread(thread_id_t id, bool block, bool hold_initexit_lock,
     thread_synch_result_t res = THREAD_SYNCH_RESULT_NOT_SAFE;
     bool first_loop = true;
     IF_UNIX(bool actually_suspended = true;)
-    const uint max_loops = TEST(THREAD_SYNCH_SMALL_LOOP_MAX, flags)
+    const uint max_loops = TESTANY(THREAD_SYNCH_SMALL_LOOP_MAX, flags)
         ? (SYNCH_MAXIMUM_LOOPS / 10)
         : SYNCH_MAXIMUM_LOOPS;
 
@@ -967,9 +990,9 @@ synch_with_thread(thread_id_t id, bool block, bool hold_initexit_lock,
 
     while (true) {
         /* get thread record */
-        /* FIXME : thread id recycling is possible that this could be a
+        /* XXX : thread id recycling is possible that this could be a
          * different thread, perhaps we should take handle instead of id
-         * FIXME: use the new num field of thread_record_t?
+         * XXX: use the new num field of thread_record_t?
          */
         LOG(THREAD, LOG_SYNCH, 3, "Looping on synch with thread " TIDFMT "\n", id);
         trec = thread_lookup(id);
@@ -979,7 +1002,7 @@ synch_with_thread(thread_id_t id, bool block, bool hold_initexit_lock,
          * threads list) who is still using shared resources (ref case 3121) */
         if ((trec == NULL && exiting_thread_count == expect_exiting) ||
             loop_count++ > max_loops) {
-            /* make sure we didn't exit the loop without synchronizing, FIXME :
+            /* make sure we didn't exit the loop without synchronizing, XXX :
              * in release builds we assume the synchronization is failing and
              * continue without it, but that is dangerous.
              * It is now up to the caller to handle this, and some use
@@ -1011,35 +1034,35 @@ synch_with_thread(thread_id_t id, bool block, bool hold_initexit_lock,
                 first_loop = false;
             }
             if (!os_thread_suspend(trec)) {
-                /* FIXME : eventually should be a real assert once we figure out
+                /* XXX : eventually should be a real assert once we figure out
                  * how to handle threads with low privilege handles */
                 /* For dr_api_exit, we may have missed a thread exit. */
                 ASSERT_CURIOSITY_ONCE(
                     (trec->dcontext->currently_stopped IF_APP_EXPORTS(|| dr_api_exit)) &&
                     "Thead synch unable to suspend target"
                     " thread, case 2096?");
-                res = (TEST(THREAD_SYNCH_SUSPEND_FAILURE_IGNORE, flags)
+                res = (TESTANY(THREAD_SYNCH_SUSPEND_FAILURE_IGNORE, flags)
                            ? THREAD_SYNCH_RESULT_SUCCESS
                            : THREAD_SYNCH_RESULT_SUSPEND_FAILURE);
                 IF_UNIX(actually_suspended = false);
                 break;
             }
             if (!thread_get_mcontext(trec, &mc)) {
-                /* FIXME : eventually should be a real assert once we figure out
+                /* XXX : eventually should be a real assert once we figure out
                  * how to handle threads with low privilege handles */
                 ASSERT_CURIOSITY_ONCE(false &&
                                       "Thead synch unable to get_context target"
                                       " thread, case 2096?");
-                res = (TEST(THREAD_SYNCH_SUSPEND_FAILURE_IGNORE, flags)
+                res = (TESTANY(THREAD_SYNCH_SUSPEND_FAILURE_IGNORE, flags)
                            ? THREAD_SYNCH_RESULT_SUCCESS
                            : THREAD_SYNCH_RESULT_SUSPEND_FAILURE);
                 /* Make sure to not leave suspended if not returning success */
-                if (!TEST(THREAD_SYNCH_SUSPEND_FAILURE_IGNORE, flags))
+                if (!TESTANY(THREAD_SYNCH_SUSPEND_FAILURE_IGNORE, flags))
                     os_thread_resume(trec);
                 break;
             }
             if (at_safe_spot(trec, &mc, desired_state)) {
-                /* FIXME: case 5325 for detach handling and testing */
+                /* XXX: case 5325 for detach handling and testing */
                 IF_WINDOWS(
                     ASSERT_NOT_IMPLEMENTED(!dcontext->aslr_context.sys_aslr_clobbered));
                 LOG(THREAD, LOG_SYNCH, 2, "Thread " TIDFMT " suspended in good spot\n",
@@ -1055,7 +1078,7 @@ synch_with_thread(thread_id_t id, bool block, bool hold_initexit_lock,
             }
             if (!os_thread_resume(trec)) {
                 ASSERT_NOT_REACHED();
-                res = (TEST(THREAD_SYNCH_SUSPEND_FAILURE_IGNORE, flags)
+                res = (TESTANY(THREAD_SYNCH_SUSPEND_FAILURE_IGNORE, flags)
                            ? THREAD_SYNCH_RESULT_SUCCESS
                            : THREAD_SYNCH_RESULT_SUSPEND_FAILURE);
                 break;
@@ -1139,7 +1162,7 @@ synch_with_thread(thread_id_t id, bool block, bool hold_initexit_lock,
                     os_wait_thread_terminated(trec->dcontext);
                 }
             } else
-                ASSERT(TEST(THREAD_SYNCH_SUSPEND_FAILURE_IGNORE, flags));
+                ASSERT(TESTANY(THREAD_SYNCH_SUSPEND_FAILURE_IGNORE, flags));
 #endif
         }
         if (THREAD_SYNCH_IS_CLEANED(desired_state)) {
@@ -1176,7 +1199,7 @@ bool
 synch_with_all_threads(thread_synch_state_t desired_synch_state,
                        /*OUT*/ thread_record_t ***threads_out,
                        /*OUT*/ int *num_threads_out, thread_synch_permission_t cur_state,
-                       /* FIXME: turn the ThreadSynch* enums into bitmasks and merge
+                       /* XXX: turn the ThreadSynch* enums into bitmasks and merge
                         * into flags param */
                        uint flags)
 {
@@ -1203,10 +1226,9 @@ synch_with_all_threads(thread_synch_state_t desired_synch_state,
     dcontext_t *dcontext = NULL;
     uint flags_one; /* flags for synch_with_thread() call */
     thread_synch_result_t synch_res;
-    const uint max_loops = TEST(THREAD_SYNCH_SMALL_LOOP_MAX, flags)
+    const uint max_loops = TESTANY(THREAD_SYNCH_SMALL_LOOP_MAX, flags)
         ? (SYNCH_ALL_THREADS_MAXIMUM_LOOPS / 10)
         : SYNCH_ALL_THREADS_MAXIMUM_LOOPS;
-#ifdef CLIENT_INTERFACE
     /* We treat client-owned threads as native but they don't have a clean native state
      * for us to suspend them in (they are always in client or dr code).  We need to be
      * able to suspend such threads so that they're !couldbelinking and holding no dr
@@ -1215,11 +1237,10 @@ synch_with_all_threads(thread_synch_state_t desired_synch_state,
      * meet this requirement (see at_safe_spot()).  As such, all we need to worry about
      * here are client locks the client-owned thread might hold that could block other
      * threads from reaching safe spots.  If we only suspend client-owned threads once
-     * all other threads are taken care of then this is not a problem. FIXME - xref
+     * all other threads are taken care of then this is not a problem. XXX - xref
      * PR 231301 on issues that arise if the client thread spends most of its time
      * calling out of its lib to dr API, ntdll, or generated code functions. */
     bool finished_non_client_threads;
-#endif
 
     ASSERT(!dynamo_all_threads_synched);
     /* flag any caller who does not give up enough permissions to avoid livelock
@@ -1233,7 +1254,7 @@ synch_with_all_threads(thread_synch_state_t desired_synch_state,
                      /* detach currently violates this: bug 8942 */
                      || started_detach);
 
-    /* must set exactly one of these -- FIXME: better way to check? */
+    /* must set exactly one of these -- XXX: better way to check? */
     ASSERT(
         TESTANY(THREAD_SYNCH_SUSPEND_FAILURE_ABORT | THREAD_SYNCH_SUSPEND_FAILURE_IGNORE |
                     THREAD_SYNCH_SUSPEND_FAILURE_RETRY,
@@ -1246,7 +1267,7 @@ synch_with_all_threads(thread_synch_state_t desired_synch_state,
                  flags));
     flags_one = flags;
     /* we'll do the retry */
-    if (TEST(THREAD_SYNCH_SUSPEND_FAILURE_RETRY, flags)) {
+    if (TESTANY(THREAD_SYNCH_SUSPEND_FAILURE_RETRY, flags)) {
         flags_one &= ~THREAD_SYNCH_SUSPEND_FAILURE_RETRY;
         flags_one |= THREAD_SYNCH_SUSPEND_FAILURE_ABORT;
     }
@@ -1269,7 +1290,7 @@ synch_with_all_threads(thread_synch_state_t desired_synch_state,
     /* since all_threads synch doesn't give any permissions this is necessary
      * to prevent deadlock in the case of two threads trying to synch with all
      * threads at the same time  */
-    /* FIXME: for DEADLOCK_AVOIDANCE, to preserve LIFO, should we
+    /* XXX: for DEADLOCK_AVOIDANCE, to preserve LIFO, should we
      * exit DR, trylock, then immediately enter DR?  introducing any
      * race conditions in doing so?
      * Ditto on all other os_thread_yields in this file!
@@ -1305,7 +1326,7 @@ synch_with_all_threads(thread_synch_state_t desired_synch_state,
 
     d_r_mutex_lock(&thread_initexit_lock);
     /* synch with all threads */
-    /* FIXME: this should be a do/while loop - then we wouldn't have
+    /* XXX: this should be a do/while loop - then we wouldn't have
      * to initialize all the variables above
      */
     while (threads_are_stale || !all_synched ||
@@ -1338,7 +1359,7 @@ synch_with_all_threads(thread_synch_state_t desired_synch_state,
             /* care only if we have already notified or synched thread */
             if (synch_array_temp[i] != SYNCH_WITH_ALL_NEW) {
                 for (j = 0; j < num_threads; j++) {
-                    /* FIXME : os recycles thread ids, should have stronger
+                    /* XXX : os recycles thread ids, should have stronger
                      * check here, could check dcontext equivalence, (but we
                      * recycle those to), probably should check threads_temp
                      * handle and be sure thread is still alive since the id
@@ -1362,7 +1383,6 @@ synch_with_all_threads(thread_synch_state_t desired_synch_state,
 
         all_synched = true;
         LOG(THREAD, LOG_SYNCH, 3, "Looping over all threads (%d threads)\n", num_threads);
-#ifdef CLIENT_INTERFACE
         finished_non_client_threads = true;
         for (i = 0; i < num_threads; i++) {
             if (threads[i]->id != my_id && synch_array[i] != SYNCH_WITH_ALL_SYNCHED &&
@@ -1371,7 +1391,6 @@ synch_with_all_threads(thread_synch_state_t desired_synch_state,
                 break;
             }
         }
-#endif
         /* make a copy of the thread ids (can't just keep the thread list
          * since it consists of pointers to live thread_record_t structs).
          * we must make the copy before synching b/c cleaning up a thread
@@ -1387,14 +1406,25 @@ synch_with_all_threads(thread_synch_state_t desired_synch_state,
         for (i = 0; i < num_threads; i++) {
             /* do not de-ref threads[i] after synching if it was cleaned up! */
             if (synch_array[i] != SYNCH_WITH_ALL_SYNCHED && threads[i]->id != my_id) {
-#ifdef CLIENT_INTERFACE
-                if (!finished_non_client_threads &&
+                if ((!finished_non_client_threads
+#ifdef STATIC_LIBRARY
+                     /* Give client threads who may be in dynamo_thread_exit waiting
+                      * on thread_initexit_lock a chance to exit.  For static DR we
+                      * can't tell whether we suspended safely b/c is_in_client_lib()
+                      * is true for the whole app!
+                      */
+                     || (int)loop_count < num_threads
+#endif
+                     ) &&
                     IS_CLIENT_THREAD(threads[i]->dcontext)) {
                     all_synched = false;
+                    /* XXX i#7673: Adding a client join feature could avoid complexity
+                     * here.
+                     */
                     continue; /* skip this thread for now till non-client are finished */
                 }
                 if (IS_CLIENT_THREAD(threads[i]->dcontext) &&
-                    (TEST(flags, THREAD_SYNCH_SKIP_CLIENT_THREAD) ||
+                    (TESTANY(flags, THREAD_SYNCH_SKIP_CLIENT_THREAD) ||
                      !should_suspend_client_thread(threads[i]->dcontext,
                                                    desired_synch_state))) {
                     /* PR 609569: do not suspend this thread.
@@ -1413,7 +1443,6 @@ synch_with_all_threads(thread_synch_state_t desired_synch_state,
                     threads[i]->dcontext->client_data->left_unsuspended = true;
                     continue;
                 }
-#endif
                 /* speed things up a tad */
                 if (synch_array[i] != SYNCH_WITH_ALL_NOTIFIED) {
                     ASSERT(synch_array[i] == SYNCH_WITH_ALL_NEW);
@@ -1436,7 +1465,7 @@ synch_with_all_threads(thread_synch_state_t desired_synch_state,
                     LOG(THREAD, LOG_SYNCH, 2, "Synch failed!\n");
                     all_synched = false;
                     if (synch_res == THREAD_SYNCH_RESULT_SUSPEND_FAILURE) {
-                        if (TEST(THREAD_SYNCH_SUSPEND_FAILURE_ABORT, flags))
+                        if (TESTANY(THREAD_SYNCH_SUSPEND_FAILURE_ABORT, flags))
                             goto synch_with_all_abort;
                     } else
                         ASSERT(synch_res == THREAD_SYNCH_RESULT_NOT_SAFE);
@@ -1490,10 +1519,10 @@ synch_with_all_threads(thread_synch_state_t desired_synch_state,
      * to correspond w/ no suspended threads, a freed threads array, and no
      * locks being held, so we go through the abort path
      */
-    if (!all_synched && TEST(THREAD_SYNCH_SUSPEND_FAILURE_ABORT, flags))
+    if (!all_synched && TESTANY(THREAD_SYNCH_SUSPEND_FAILURE_ABORT, flags))
         goto synch_with_all_abort;
 synch_with_all_exit:
-    /* make sure we didn't exit the loop without synchronizing, FIXME : in
+    /* make sure we didn't exit the loop without synchronizing, XXX : in
      * release builds we assume the synchronization is failing and continue
      * without it, but that is dangerous.
      * It is now up to the caller to handle this, and some use
@@ -1522,11 +1551,11 @@ synch_with_all_exit:
                          num_threads_temp *
                              sizeof(thread_id_t) HEAPACCT(ACCT_THREAD_MGT));
     }
-    /* FIXME case 9333: on all_synch failure we do not free threads array if
+    /* XXX case 9333: on all_synch failure we do not free threads array if
      * synch_result is ignored.  Callers are responsible for resuming threads that are
      * suspended and freeing allocation for threads array
      */
-    if ((!all_synched && TEST(THREAD_SYNCH_SUSPEND_FAILURE_ABORT, flags)) ||
+    if ((!all_synched && TESTANY(THREAD_SYNCH_SUSPEND_FAILURE_ABORT, flags)) ||
         THREAD_SYNCH_IS_CLEANED(desired_synch_state)) {
         global_heap_free(
             threads, num_threads * sizeof(thread_record_t *) HEAPACCT(ACCT_THREAD_MGT));
@@ -1545,7 +1574,7 @@ synch_with_all_exit:
     *num_threads_out = num_threads;
     dynamo_all_threads_synched = all_synched;
     ASSERT(exiting_thread_count - expect_self_exiting == 0);
-    /* FIXME case 9392: where on all_synch failure we do not release the locks in the
+    /* XXX case 9392: where on all_synch failure we do not release the locks in the
      * non-abort exit path */
     return all_synched;
 
@@ -1556,13 +1585,11 @@ synch_with_all_abort:
         if (threads[i]->id != my_id) {
             if (synch_array[i] == SYNCH_WITH_ALL_SYNCHED) {
                 bool resume = true;
-#ifdef CLIENT_SIDELINE
                 if (IS_CLIENT_THREAD(threads[i]->dcontext) &&
                     threads[i]->dcontext->client_data->left_unsuspended) {
                     /* PR 609569: we did not suspend this thread */
                     resume = false;
                 }
-#endif
                 if (resume) {
                     DEBUG_DECLARE(ok =)
                     os_thread_resume(threads[i]);
@@ -1594,7 +1621,6 @@ resume_all_threads(thread_record_t **threads, const uint num_threads)
 {
     uint i;
     thread_id_t my_tid;
-    bool res;
 
     ASSERT_OWN_MUTEX(true, &all_threads_synch_lock);
     ASSERT_OWN_MUTEX(true, &thread_initexit_lock);
@@ -1606,19 +1632,17 @@ resume_all_threads(thread_record_t **threads, const uint num_threads)
     for (i = 0; i < num_threads; i++) {
         if (my_tid == threads[i]->id)
             continue;
-#ifdef CLIENT_SIDELINE
         if (IS_CLIENT_THREAD(threads[i]->dcontext) &&
             threads[i]->dcontext->client_data->left_unsuspended) {
             /* PR 609569: we did not suspend this thread */
             threads[i]->dcontext->client_data->left_unsuspended = false;
             continue;
         }
-#endif
 
         /* This routine assumes that each thread in the array was suspended, so
          * each one has to successfully resume.
          */
-        res = os_thread_resume(threads[i]);
+        DEBUG_DECLARE(bool res =) os_thread_resume(threads[i]);
         ASSERT(res);
     }
 }
@@ -1659,17 +1683,16 @@ end_synch_with_all_threads(thread_record_t **threads, uint num_threads, bool res
 void
 translate_from_synchall_to_dispatch(thread_record_t *tr, thread_synch_state_t synch_state)
 {
-    bool res;
     /* we do not have to align priv_mcontext_t */
     priv_mcontext_t *mc = global_heap_alloc(sizeof(*mc) HEAPACCT(ACCT_OTHER));
     bool free_cxt = true;
     dcontext_t *dcontext = tr->dcontext;
     app_pc pre_translation;
     ASSERT(OWN_MUTEX(&all_threads_synch_lock) && OWN_MUTEX(&thread_initexit_lock));
-    /* FIXME: would like to assert that suspendcount is > 0 but how? */
+    /* XXX: would like to assert that suspendcount is > 0 but how? */
     ASSERT(thread_synch_successful(tr));
 
-    res = thread_get_mcontext(tr, mc);
+    DEBUG_DECLARE(bool res =) thread_get_mcontext(tr, mc);
     ASSERT(res);
     pre_translation = (app_pc)mc->pc;
     LOG(GLOBAL, LOG_CACHE, 2, "\trecreating address for " PFX "\n", mc->pc);
@@ -1707,9 +1730,9 @@ translate_from_synchall_to_dispatch(thread_record_t *tr, thread_synch_state_t sy
             else if (pre_translation + SYSENTER_LENGTH == vsyscall_sysenter_return_pc)
                 mc->pc = get_do_int_syscall_entry(dcontext);
             /* exit stub and subsequent fcache_return will save rest of state */
-            res = set_synched_thread_context(dcontext->thread_record, mc, NULL, 0,
-                                             synch_state _IF_X64((void *)mc)
-                                                 _IF_WINDOWS(NULL));
+            DEBUG_DECLARE(res =)
+            set_synched_thread_context(dcontext->thread_record, mc, NULL, 0,
+                                       synch_state _IF_X64((void *)mc) _IF_WINDOWS(NULL));
             ASSERT(res);
             /* cxt is freed by set_synched_thread_context() or target thread */
             free_cxt = false;
@@ -1719,21 +1742,22 @@ translate_from_synchall_to_dispatch(thread_record_t *tr, thread_synch_state_t sy
             if (INTERNAL_OPTION(steal_reg_at_reset) != 0) {
                 /* We don't want to translate, just update the stolen reg values */
                 arch_mcontext_reset_stolen_reg(dcontext, mc);
-                res = set_synched_thread_context(dcontext->thread_record, mc, NULL, 0,
-                                                 synch_state _IF_X64((void *)mc)
-                                                     _IF_WINDOWS(NULL));
+                DEBUG_DECLARE(res =)
+                set_synched_thread_context(dcontext->thread_record, mc, NULL, 0,
+                                           synch_state _IF_X64((void *)mc)
+                                               _IF_WINDOWS(NULL));
                 ASSERT(res);
                 /* cxt is freed by set_synched_thread_context() or target thread */
                 free_cxt = false;
             }
         });
     } else {
-        res = translate_mcontext(tr, mc, true /*restore memory*/, NULL);
+        DEBUG_DECLARE(res =) translate_mcontext(tr, mc, true /*restore memory*/, NULL);
         ASSERT(res);
         if (!thread_synch_successful(tr) || mc->pc == 0) {
             /* Better to risk failure on accessing a freed cache than
              * to have a guaranteed crash by sending to NULL.
-             * FIXME: it's possible the real translation is NULL,
+             * XXX: it's possible the real translation is NULL,
              * but if so should be fine to leave it there since the
              * current eip should also be NULL.
              */
@@ -1754,10 +1778,10 @@ translate_from_synchall_to_dispatch(thread_record_t *tr, thread_synch_state_t sy
          * re-interp from translated cxt, to avoid having to handle stale
          * local state problems if we simply resumed.
          * We assume no KSTATS or other state issues to deal with.
-         * FIXME: enter hook w/o an exit?
+         * XXX: enter hook w/o an exit?
          */
         dcontext->next_tag = (app_pc)mc->pc;
-        /* FIXME PR 212266: for linux if we're at an inlined syscall
+        /* XXX PR 212266: for linux if we're at an inlined syscall
          * we may have problems: however, we might be able to rely on the kernel
          * not clobbering any registers besides eax (which is ok: reset stub
          * handles it), though presumably it's allowed to write to any
@@ -1767,7 +1791,7 @@ translate_from_synchall_to_dispatch(thread_record_t *tr, thread_synch_state_t sy
         if (pre_translation ==
                 IF_WINDOWS_ELSE(vsyscall_after_syscall, vsyscall_sysenter_return_pc) &&
             !waiting_at_safe_spot(dcontext->thread_record, synch_state)) {
-            /* FIXME case 7827/PR 212266: shouldn't translate for this case, right?
+            /* XXX case 7827/PR 212266: shouldn't translate for this case, right?
              * should have -ignore_syscalls set at_syscall and eliminate
              * this whole block of code
              */
@@ -1775,7 +1799,7 @@ translate_from_synchall_to_dispatch(thread_record_t *tr, thread_synch_state_t sy
              * be doing the ret natively to regain control, but rather
              * will interpret it
              */
-            /* FIXME: ensure readable and writable? */
+            /* XXX: ensure readable and writable? */
             app_pc cur_retaddr = *((app_pc *)mc->xsp);
             app_pc native_retaddr;
             ASSERT(cur_retaddr != NULL);
@@ -1823,11 +1847,16 @@ translate_from_synchall_to_dispatch(thread_record_t *tr, thread_synch_state_t sy
          * But the stolen reg was restored to the application value during
          * translate_mcontext.
          */
-        IF_AARCHXX({
-            /* Preserve the translated value from mc before we clobber it. */
-            dcontext->local_state->spill_space.reg_stolen = get_stolen_reg_val(mc);
-            set_stolen_reg_val(mc, (reg_t)os_get_dr_tls_base(dcontext));
-        });
+#if defined(AARCHXX) || defined(RISCV64)
+        /* Preserve the translated value from mc before we clobber it. */
+        dcontext->local_state->spill_space.reg_stolen = get_stolen_reg_val(mc);
+        set_stolen_reg_val(mc, (reg_t)os_get_dr_tls_base(dcontext));
+#    ifdef RISCV64
+        os_set_app_tls_base(dcontext, TLS_REG_LIB, (void *)get_tp_reg_val(mc));
+        set_tp_reg_val(mc, (reg_t)os_get_app_tls_base(dcontext, TLS_REG_LIB));
+#    endif
+#endif
+
 #ifdef WINDOWS
         /* i#25: we could have interrupted thread in DR, where has priv fls data
          * in TEB, and fcache_return blindly copies into app fls: so swap to app
@@ -1836,9 +1865,9 @@ translate_from_synchall_to_dispatch(thread_record_t *tr, thread_synch_state_t sy
         swap_peb_pointer(dcontext, false /*to app*/);
 #endif
         /* exit stub and subsequent fcache_return will save rest of state */
-        res =
-            set_synched_thread_context(dcontext->thread_record, mc, NULL, 0,
-                                       synch_state _IF_X64((void *)mc) _IF_WINDOWS(NULL));
+        DEBUG_DECLARE(res =)
+        set_synched_thread_context(dcontext->thread_record, mc, NULL, 0,
+                                   synch_state _IF_X64((void *)mc) _IF_WINDOWS(NULL));
         ASSERT(res);
         /* cxt is freed by set_synched_thread_context() or target thread */
         free_cxt = false;
@@ -1893,10 +1922,10 @@ send_all_other_threads_native(void)
     init_apc_go_native = true;
     SELF_PROTECT_DATASEC(DATASEC_RARELY_PROT);
 
-#    ifdef CLIENT_INTERFACE
     wait_for_outstanding_nudges();
-#    endif
 #endif
+
+    instrument_pre_detach_event();
 
     /* Suspend all threads except those trying to synch with us */
     if (!synch_with_all_threads(desired_state, &threads, &num_threads,
@@ -1917,7 +1946,7 @@ send_all_other_threads_native(void)
 #endif
 
 #ifdef WINDOWS
-    /* FIXME i#95: handle outstanding callbacks where we've put our retaddr on
+    /* XXX i#95: handle outstanding callbacks where we've put our retaddr on
      * the app stack.  This should be able to share
      * detach_helper_handle_callbacks() code.  Won't the old single-thread
      * dr_app_stop() have had this same problem?  Since we're not tearing
@@ -1930,7 +1959,7 @@ send_all_other_threads_native(void)
     for (i = 0; i < num_threads; i++) {
         if (threads[i]->dcontext == my_dcontext ||
             is_thread_currently_native(threads[i]) ||
-            /* FIXME i#2784: we should suspend client threads for the duration
+            /* XXX i#2784: we should suspend client threads for the duration
              * of the app being native to avoid problems with having no
              * signal handlers in place.
              */
@@ -1958,7 +1987,7 @@ send_all_other_threads_native(void)
             /* This won't change a thread at a syscall, so we rely on the thread
              * going to d_r_dispatch and then going native when its syscall exits.
              *
-             * FIXME i#95: That means the time to go native is, unfortunately,
+             * XXX i#95: That means the time to go native is, unfortunately,
              * unbounded.  This means that dr_app_cleanup() needs to synch the
              * threads and force-xl8 these.  We should share code with detach.
              * Right now we rely on the app joining all its threads *before*
@@ -1980,6 +2009,81 @@ send_all_other_threads_native(void)
     return;
 }
 
+static void
+detach_set_mcontext_helper(thread_record_t *thread)
+{
+    priv_mcontext_t mc;
+    LOG(GLOBAL, LOG_ALL, 2, "Detach: translating " TIDFMT "\n", thread);
+    DEBUG_DECLARE(bool ok =)
+    thread_get_mcontext(thread, &mc);
+    ASSERT(ok);
+    /* For a thread at a syscall, we use SA_RESTART for our suspend signal,
+     * so the kernel will adjust the restart point back to the syscall for us
+     * where expected.  This is an artifical signal we're introducing, so an
+     * app that assumes no signals and assumes its non-auto-restart syscalls
+     * don't need loops could be broken.
+     */
+    LOG(GLOBAL, LOG_ALL, 3,
+        /* Having the code bytes can help diagnose post-detach where the code
+         * cache is gone.
+         */
+        "Detach: pre-xl8 pc=%p (%02x %02x %02x %02x %02x), xsp=%p "
+        "for thread " TIDFMT "\n",
+        mc.pc, *mc.pc, *(mc.pc + 1), *(mc.pc + 2), *(mc.pc + 3), *(mc.pc + 4), mc.xsp,
+        thread->id);
+    DEBUG_DECLARE(ok =)
+    translate_mcontext(thread, &mc, true /*restore mem*/, NULL /*f*/);
+    ASSERT(ok);
+    if (!thread->under_dynamo_control) {
+        LOG(GLOBAL, LOG_ALL, 1, "Detach : thread " TIDFMT " already running natively\n",
+            thread->id);
+        /* we do need to restore the app ret addr, for native_exec */
+        if (!DYNAMO_OPTION(thin_client) && DYNAMO_OPTION(native_exec) &&
+            !vmvector_empty(native_exec_areas)) {
+            put_back_native_retaddrs(thread->dcontext);
+        }
+    }
+    detach_finalize_translation(thread, &mc);
+    LOG(GLOBAL, LOG_ALL, 1, "Detach: pc=" PFX " for thread " TIDFMT "\n", mc.pc,
+        thread->id);
+    ASSERT(!is_dynamo_address(mc.pc) && !in_fcache(mc.pc));
+    /* XXX case 7457: if the thread is suspended after it received a fault
+     * but before the kernel copied the faulting context to the user mode
+     * structures for the handler, it could result in a codemod exception
+     * that wouldn't happen natively!
+     */
+    DEBUG_DECLARE(ok =)
+    thread_set_mcontext(thread, &mc);
+    ASSERT(ok);
+    /* i#249: restore app's PEB/TEB fields */
+    IF_WINDOWS(restore_peb_pointer_for_thread(thread->dcontext));
+    /* Put the translation into the dcontext's mcontext so the detach state
+     * is available via dr_get_mcontext().
+     */
+    *get_mcontext(thread->dcontext) = mc;
+}
+
+static void
+detach_cleanup_helper(thread_record_t *thread _IF_WINDOWS(bool detach_stacked_callbacks))
+{
+    DEBUG_DECLARE(int exit_res =)
+    dynamo_shared_exit(thread _IF_WINDOWS(detach_stacked_callbacks));
+    ASSERT(exit_res == SUCCESS);
+    detach_finalize_cleanup();
+
+    stack_free(d_r_initstack, DYNAMORIO_STACK_SIZE);
+
+    dynamo_exit_post_detach();
+
+    doing_detach = false;
+    started_detach = false;
+
+    SELF_PROTECT_DATASEC(DATASEC_RARELY_PROT);
+    dynamo_detaching_flag = LOCK_FREE_STATE;
+    EXITING_DR();
+    options_detach();
+}
+
 void
 detach_on_permanent_stack(bool internal, bool do_cleanup, dr_stats_t *drstats)
 {
@@ -1992,8 +2096,6 @@ detach_on_permanent_stack(bool internal, bool do_cleanup, dr_stats_t *drstats)
     bool detach_stacked_callbacks;
     bool *cleanup_tpc;
 #endif
-    DEBUG_DECLARE(bool ok;)
-    DEBUG_DECLARE(int exit_res;)
 
     /* synch-all flags: */
     uint flags = 0;
@@ -2019,6 +2121,8 @@ detach_on_permanent_stack(bool internal, bool do_cleanup, dr_stats_t *drstats)
      */
     if (!atomic_compare_exchange(&dynamo_detaching_flag, LOCK_FREE_STATE, LOCK_SET_STATE))
         return;
+
+    instrument_pre_detach_event();
 
     /* Unprotect .data for exit cleanup.
      * XXX: more secure to not do this until we've synched, but then need
@@ -2080,12 +2184,10 @@ detach_on_permanent_stack(bool internal, bool do_cleanup, dr_stats_t *drstats)
      * since we can't distinguish internally vs externally created threads.
      */
     os_thread_yield();
-#    ifdef CLIENT_INTERFACE
     wait_for_outstanding_nudges();
-#    endif
 #endif
 
-#ifdef UNIX
+#if defined(UNIX) && !defined(LINUX_KERNEL)
     /* i#2270: we ignore alarm signals during detach to reduce races. */
     signal_remove_alarm_handlers(my_dcontext);
 #endif
@@ -2167,7 +2269,6 @@ detach_on_permanent_stack(bool internal, bool do_cleanup, dr_stats_t *drstats)
 
     LOG(GLOBAL, LOG_ALL, 1, "Detach: starting to translate contexts\n");
     for (i = 0; i < num_threads; i++) {
-        priv_mcontext_t mc;
         if (threads[i]->dcontext == my_dcontext) {
             my_idx = i;
             my_tr = threads[i];
@@ -2181,61 +2282,14 @@ detach_on_permanent_stack(bool internal, bool do_cleanup, dr_stats_t *drstats)
             LOG(GLOBAL, LOG_ALL, 2, "Detach: not translating " TIDFMT "\n",
                 threads[i]->id);
         } else {
-            LOG(GLOBAL, LOG_ALL, 2, "Detach: translating " TIDFMT "\n", threads[i]->id);
-            DEBUG_DECLARE(ok =)
-            thread_get_mcontext(threads[i], &mc);
-            ASSERT(ok);
-            /* For a thread at a syscall, we use SA_RESTART for our suspend signal,
-             * so the kernel will adjust the restart point back to the syscall for us
-             * where expected.  This is an artifical signal we're introducing, so an
-             * app that assumes no signals and assumes its non-auto-restart syscalls
-             * don't need loops could be broken.
-             */
-            LOG(GLOBAL, LOG_ALL, 3,
-                /* Having the code bytes can help diagnose post-detach where the code
-                 * cache is gone.
-                 */
-                "Detach: pre-xl8 pc=%p (%02x %02x %02x %02x %02x), xsp=%p "
-                "for thread " TIDFMT "\n",
-                mc.pc, *mc.pc, *(mc.pc + 1), *(mc.pc + 2), *(mc.pc + 3), *(mc.pc + 4),
-                mc.xsp, threads[i]->id);
-            DEBUG_DECLARE(ok =)
-            translate_mcontext(threads[i], &mc, true /*restore mem*/, NULL /*f*/);
-            ASSERT(ok);
-
-            if (!threads[i]->under_dynamo_control) {
-                LOG(GLOBAL, LOG_ALL, 1,
-                    "Detach : thread " TIDFMT " already running natively\n",
-                    threads[i]->id);
-                /* we do need to restore the app ret addr, for native_exec */
-                if (!DYNAMO_OPTION(thin_client) && DYNAMO_OPTION(native_exec) &&
-                    !vmvector_empty(native_exec_areas)) {
-                    put_back_native_retaddrs(threads[i]->dcontext);
-                }
-            }
-            detach_finalize_translation(threads[i], &mc);
-
-            LOG(GLOBAL, LOG_ALL, 1, "Detach: pc=" PFX " for thread " TIDFMT "\n", mc.pc,
-                threads[i]->id);
-            ASSERT(!is_dynamo_address(mc.pc) && !in_fcache(mc.pc));
-            /* XXX case 7457: if the thread is suspended after it received a fault
-             * but before the kernel copied the faulting context to the user mode
-             * structures for the handler, it could result in a codemod exception
-             * that wouldn't happen natively!
-             */
-            DEBUG_DECLARE(ok =)
-            thread_set_mcontext(threads[i], &mc);
-            ASSERT(ok);
-
-            /* i#249: restore app's PEB/TEB fields */
-            IF_WINDOWS(restore_peb_pointer_for_thread(threads[i]->dcontext));
+            detach_set_mcontext_helper(threads[i]);
         }
         /* Resumes the thread, which will do kernel-visible cleanup of
          * signal state. Resume happens within the synch_all region where
          * the thread_initexit_lock is held so that we can clean up thread
          * data later.
          */
-#ifdef UNIX
+#if defined(UNIX) && !defined(LINUX_KERNEL)
         os_signal_thread_detach(threads[i]->dcontext);
 #endif
         LOG(GLOBAL, LOG_ALL, 1, "Detach: thread " TIDFMT " is being resumed as native\n",
@@ -2244,7 +2298,7 @@ detach_on_permanent_stack(bool internal, bool do_cleanup, dr_stats_t *drstats)
     }
 
     ASSERT(my_idx != -1 || !internal);
-#ifdef UNIX
+#if defined(UNIX) && !defined(LINUX_KERNEL)
     LOG(GLOBAL, LOG_ALL, 1, "Detach: waiting for threads to fully detach\n");
     for (i = 0; i < num_threads; i++) {
         if (i != my_idx && !IS_CLIENT_THREAD(threads[i]->dcontext))
@@ -2272,7 +2326,7 @@ detach_on_permanent_stack(bool internal, bool do_cleanup, dr_stats_t *drstats)
         dynamo_thread_exit_pre_client(my_dcontext, my_tr->id);
     }
 
-    LOG(GLOBAL, LOG_ALL, 1, "Detach: Letting slave threads go native\n");
+    LOG(GLOBAL, LOG_ALL, 1, "Detach: Letting secondary threads go native\n");
 #ifdef WINDOWS
     global_heap_free(cleanup_tpc, num_threads * sizeof(bool) HEAPACCT(ACCT_OTHER));
     /* XXX: there's a possible race if a thread waiting at APC is still there
@@ -2287,19 +2341,154 @@ detach_on_permanent_stack(bool internal, bool do_cleanup, dr_stats_t *drstats)
     SYSLOG_INTERNAL_INFO("Detaching from process, entering final cleanup");
     if (drstats != NULL)
         stats_get_snapshot(drstats);
-    DEBUG_DECLARE(exit_res =)
-    dynamo_shared_exit(my_tr _IF_WINDOWS(detach_stacked_callbacks));
-    ASSERT(exit_res == SUCCESS);
-    detach_finalize_cleanup();
-
-    stack_free(d_r_initstack, DYNAMORIO_STACK_SIZE);
-
-    dynamo_exit_post_detach();
-
-    doing_detach = false;
-    started_detach = false;
-
-    SELF_PROTECT_DATASEC(DATASEC_RARELY_PROT);
-    dynamo_detaching_flag = LOCK_FREE_STATE;
-    EXITING_DR();
+    detach_cleanup_helper(my_tr _IF_WINDOWS(detach_stacked_callbacks));
 }
+
+#ifdef LINUX
+void
+detach_externally_on_new_stack(void)
+{
+    dcontext_t *my_dcontext;
+    priv_mcontext_t my_mcontext;
+    thread_record_t **threads;
+    thread_record_t *my_tr = NULL;
+    int i, num_threads, my_idx = -1;
+    thread_id_t my_id;
+    DEBUG_DECLARE(bool ok;)
+    /* synch-all flags: */
+    uint flags = 0;
+    /* For Unix, such privilege problems are rarer but we would still prefer to
+     * continue if we hit a problem.
+     */
+    flags |= THREAD_SYNCH_SUSPEND_FAILURE_IGNORE;
+    /* i#297: we only synch client threads after process exit event. */
+    flags |= THREAD_SYNCH_SKIP_CLIENT_THREAD;
+    ENTERING_DR();
+    /* dynamo_detaching_flag is not really a lock, and since no one ever waits
+     * on it we can't deadlock on it either.
+     */
+    if (!atomic_compare_exchange(&dynamo_detaching_flag, LOCK_FREE_STATE, LOCK_SET_STATE))
+        return;
+    instrument_pre_detach_event();
+    /* Unprotect .data for exit cleanup.
+     * XXX: more secure to not do this until we've synched, but then need
+     * alternative prot for started_detach and init_apc_go_native*
+     */
+    SELF_UNPROTECT_DATASEC(DATASEC_RARELY_PROT);
+    ASSERT(!started_detach);
+    started_detach = true;
+    ASSERT(dynamo_initialized);
+    ASSERT(!dynamo_exited);
+    my_id = d_r_get_thread_id();
+    my_dcontext = get_thread_private_dcontext();
+    ASSERT(my_dcontext != NULL);
+    LOG(GLOBAL, LOG_ALL, 1, "Detach: thread %d starting detach process\n", my_id);
+    SYSLOG(SYSLOG_INFORMATION, INFO_DETACHING, 2, get_application_name(),
+           get_application_pid());
+    /* synch with flush */
+    if (my_dcontext != NULL)
+        enter_threadexit(my_dcontext);
+    /* i#2270: we ignore alarm signals during detach to reduce races. */
+#    ifndef LINUX_KERNEL
+    signal_remove_alarm_handlers(my_dcontext);
+#    endif
+    /* suspend all DR-controlled threads at safe locations */
+    if (!synch_with_all_threads(THREAD_SYNCH_SUSPENDED_VALID_MCONTEXT, &threads,
+                                &num_threads,
+                                /* Case 6821: allow other synch-all-thread uses
+                                 * that beat us to not wait on us. We still have
+                                 * a problem if we go first since we must xfer
+                                 * other threads.
+                                 */
+                                THREAD_SYNCH_NO_LOCKS_NO_XFER, flags)) {
+        REPORT_FATAL_ERROR_AND_EXIT(FAILED_TO_SYNCHRONIZE_THREADS, 2,
+                                    get_application_name(), get_application_pid());
+    }
+    /* Now we own the thread_initexit_lock.  We'll release the locks grabbed in
+     * synch_with_all_threads below after cleaning up all the threads in case we
+     * need to grab it during process exit cleanup.
+     */
+    ASSERT(mutex_testlock(&all_threads_synch_lock) &&
+           mutex_testlock(&thread_initexit_lock));
+    ASSERT(!doing_detach);
+    doing_detach = true;
+    detacher_tid = d_r_get_thread_id();
+#    ifdef HOT_PATCHING_INTERFACE
+    /* In hotp_only mode, we must remove patches when detaching; we don't want
+     * to leave in all our hooks and detach; that will definitely crash the app.
+     */
+    if (DYNAMO_OPTION(hotp_only))
+        hotp_only_detach_helper();
+#    endif
+    if (!DYNAMO_OPTION(thin_client))
+        revert_memory_regions();
+    unhook_vsyscall();
+    LOG(GLOBAL, LOG_ALL, 1,
+        "Detach : unpatched ntdll.dll and fixed memory permissions\n");
+    /* perform exit tasks that require full thread data structs */
+    dynamo_process_exit_with_thread_info();
+    LOG(GLOBAL, LOG_ALL, 1, "Detach: starting to translate contexts\n");
+    for (i = 0; i < num_threads; i++) {
+        if (threads[i]->dcontext == my_dcontext) {
+            my_idx = i;
+            my_tr = threads[i];
+            my_mcontext = *get_mcontext(my_dcontext);
+            my_mcontext.pc = my_dcontext->next_tag;
+            DEBUG_DECLARE(ok =)
+            translate_mcontext(threads[i], &my_mcontext, true /*restore mem*/,
+                               NULL /*f*/);
+            continue;
+        } else if (IS_CLIENT_THREAD(threads[i]->dcontext)) {
+            /* i#297 we will kill client-owned threads later after app exit events
+             * in dynamo_shared_exit().
+             */
+            continue;
+        } else if (detach_do_not_translate(threads[i])) {
+            LOG(GLOBAL, LOG_ALL, 2, "Detach: not translating " TIDFMT "\n",
+                threads[i]->id);
+        } else {
+            detach_set_mcontext_helper(threads[i]);
+        }
+        /* Resumes the thread, which will do kernel-visible cleanup of
+         * signal state. Resume happens within the synch_all region where
+         * the thread_initexit_lock is held so that we can clean up thread
+         * data later.
+         */
+#    ifndef LINUX_KERNEL
+        os_signal_thread_detach(threads[i]->dcontext);
+#    endif
+        LOG(GLOBAL, LOG_ALL, 1, "Detach: thread " TIDFMT " is being resumed as native\n",
+            threads[i]->id);
+        os_thread_resume(threads[i]);
+    }
+#    ifndef LINUX_KERNEL
+    LOG(GLOBAL, LOG_ALL, 1, "Detach: waiting for threads to fully detach\n");
+    for (i = 0; i < num_threads; i++) {
+        if (i != my_idx && !IS_CLIENT_THREAD(threads[i]->dcontext))
+            os_wait_thread_detached(threads[i]->dcontext);
+    }
+#    endif
+    /* Clean up each thread now that everyone has gone native. Needs to be
+     * done with the thread_initexit_lock held, which is true within a synched
+     * region.
+     */
+    for (i = 0; i < num_threads; i++) {
+        if (i != my_idx && !IS_CLIENT_THREAD(threads[i]->dcontext)) {
+            LOG(GLOBAL, LOG_ALL, 1, "Detach: cleaning up thread " TIDFMT " %s\n",
+                threads[i]->id, IF_WINDOWS_ELSE(cleanup_tpc[i] ? "and its TPC" : "", ""));
+            dynamo_other_thread_exit(threads[i] _IF_WINDOWS(!cleanup_tpc[i]));
+        }
+    }
+    if (my_idx != -1) {
+        /* pre-client thread cleanup (PR 536058) */
+        dynamo_thread_exit_pre_client(my_dcontext, my_tr->id);
+    }
+    LOG(GLOBAL, LOG_ALL, 1, "Detach: Letting secondary threads go native\n");
+    end_synch_with_all_threads(threads, num_threads, false /*don't resume */);
+    threads = NULL;
+    LOG(GLOBAL, LOG_ALL, 1, "Detach: Entering final cleanup and unload\n");
+    SYSLOG_INTERNAL_INFO("Detaching from process, entering final cleanup");
+    detach_cleanup_helper(my_tr);
+    thread_set_self_mcontext(&my_mcontext, true);
+}
+#endif
